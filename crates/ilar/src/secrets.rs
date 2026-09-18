@@ -93,6 +93,13 @@ struct Master {
 static MASTERS: LazyLock<Mutex<HashMap<PathBuf, Master>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Whether a store error is the lock — sealed with no usable password —
+/// rather than a store that cannot be read. The lock is a state a call
+/// can work around or ask about; a damaged file is a failure.
+pub fn is_lock(error: &anyhow::Error) -> bool {
+    error.is::<Locked>() || error.is::<Resealed>()
+}
+
 /// Drop the held master for a store: what a new process starts as.
 pub fn forget_master(store: &SecretStore) {
     MASTERS.lock().unwrap().remove(store.path());
@@ -771,6 +778,11 @@ pub struct Secrets {
     /// two calls that find the store locked together would otherwise
     /// put up two prompts for the same password.
     unlocking: Arc<tokio::sync::Mutex<()>>,
+    /// Whether a tool result has already said that the scrub cannot see
+    /// a sealed store. Said once per runtime, shared with every child:
+    /// a line on every result of a session that never opens the store
+    /// would be the standing notice the TUI just stopped showing.
+    said_sealed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Notes waiting to be collected, each with the tool call it belongs to.
@@ -845,6 +857,7 @@ impl Secrets {
             sudo: false,
             notes: Arc::new(Mutex::new(Vec::new())),
             unlocking: Arc::new(tokio::sync::Mutex::new(())),
+            said_sealed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -911,7 +924,7 @@ impl Secrets {
     /// it, anything else is the failure itself. No `secrets:` prefix —
     /// the tool that asked adds its own name.
     pub(crate) fn store_error(&self, error: anyhow::Error) -> String {
-        if error.is::<Locked>() || error.is::<Resealed>() {
+        if is_lock(&error) {
             format!("{error}: {}", self.unlock_hint())
         } else {
             format!("{error:#}")
@@ -1000,7 +1013,17 @@ impl Secrets {
     /// environment and redacting output. An unreadable store yields
     /// nothing here; the resolve path is where that gets reported.
     pub fn all(&self) -> Vec<Granted> {
-        let mut all = self.store.all().unwrap_or_default();
+        self.stored_and_lock().0
+    }
+
+    /// [`Self::all`], and whether the store withheld its values because
+    /// it is locked — the one read that answers both, so a scrub does
+    /// not read the file twice to find out what it just could not see.
+    fn stored_and_lock(&self) -> (Vec<Granted>, bool) {
+        let (mut all, locked) = match self.store.all() {
+            Ok(all) => (all, false),
+            Err(error) => (Vec::new(), is_lock(&error)),
+        };
         all.extend(
             self.held
                 .lock()
@@ -1008,7 +1031,7 @@ impl Secrets {
                 .iter()
                 .map(|(name, value)| Granted::new(name, value.clone())),
         );
-        all
+        (all, locked)
     }
 
     /// A value a tool may take on its own authority — the sudo tool's
@@ -1025,6 +1048,27 @@ impl Secrets {
     /// was granted it: what a tool result may carry.
     pub fn scrub(&self, text: &str) -> String {
         redact(text, &self.all())
+    }
+
+    /// [`Self::scrub`], with what the result has to admit when the
+    /// store is sealed and this runtime has not opened it: values
+    /// nobody can read cannot be scrubbed from output or matched in a
+    /// child's environment, and nothing else in the session would say
+    /// so — a `bash` that names no secret never asks for the password.
+    /// Said once per runtime, on the first result it applies to, and
+    /// never for a store the scrub can see.
+    pub fn scrub_admitting(&self, text: &str) -> (String, Option<String>) {
+        use std::sync::atomic::Ordering;
+        let (stored, locked) = self.stored_and_lock();
+        let note = (locked && !self.said_sealed.swap(true, Ordering::Relaxed)).then(|| {
+            format!(
+                "the secret store is sealed and this session has not opened it: until it is, \
+                 tool output is not scrubbed of stored values and a command's environment is \
+                 not checked for them; {}",
+                self.unlock_hint()
+            )
+        });
+        (redact(text, &stored), note)
     }
 
     /// The values the call may use, each granted by a standing grant,
@@ -1078,8 +1122,18 @@ impl Secrets {
         let Some(sender) = &self.prompts else {
             return;
         };
-        if !self.store.is_locked() {
-            return;
+        // One read decides, not a look at the flags: a master this
+        // process holds may be stale — a second process resealed the
+        // file under another password — and only the read that fails
+        // finds that out and drops it. Reading here makes the discovery
+        // this call's to ask about, not the next call's; and a call
+        // that reads `Locked` because another call's read dropped the
+        // master a moment ago is asked too, rather than sent home to
+        // fail while the prompt is up. Anything else — plain, open, or
+        // damaged — is the caller's own read to report.
+        match self.store.load() {
+            Err(error) if is_lock(&error) => {}
+            _ => return,
         }
         // One prompt at a time. Waiting for the turn is not worth
         // outliving the call: a cancelled one leaves rather than queues.
@@ -1138,6 +1192,13 @@ impl Secrets {
         self.unlock_if_locked(&request).await;
         if self.store.root_granted(request.tool) {
             return Ok(());
+        }
+        // Nobody to ask and a store that cannot be read: the standing
+        // yes may well be in there. "Root is not granted" would be a
+        // guess dressed as a fact; the lock is the reason, so it is
+        // the refusal.
+        if self.prompts.is_none() && self.store.is_locked() {
+            return Err(self.store_error(Locked.into()));
         }
         self.ask(&request, ROOT, reason).await
     }
@@ -1750,6 +1811,96 @@ mod tests {
         assert!(store.is_locked(), "the useless master was kept");
         store.unlock("open sesame").unwrap();
         assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    /// The call that discovers the reseal is the call that asks: a
+    /// stale master read as "not locked" and the prompt only came with
+    /// the next call, so every reseal cost one refusal for something
+    /// the person could have answered on the spot.
+    #[tokio::test]
+    async fn a_resealed_store_asks_for_the_new_password_in_the_call_that_found_out() {
+        let (_dir, store) = store();
+        store.set("KEY", "", "value-one").unwrap();
+        store.encrypt("open sesame").unwrap();
+        let theirs = std::fs::read_to_string(store.path()).unwrap();
+        store.decrypt("open sesame").unwrap();
+        store.encrypt("hunter22").unwrap();
+        std::fs::write(store.path(), &theirs).unwrap();
+        assert!(!store.is_locked(), "a master is still held");
+        let (tx, mut rx) = ask_channel(1);
+        let secrets = Secrets::new(store.clone()).with_prompts(tx);
+        let cancel = cancel();
+        let names = ["KEY".to_string()];
+        let (outcome, asked) = tokio::join!(secrets.resolve(request(&names, &cancel)), async {
+            let asked = answer_unlock(&mut rx, Some("open sesame")).await;
+            answer(&mut rx, Some(Grant::Once)).await;
+            asked
+        });
+        let granted = outcome.expect("the store opened under the new password");
+        assert_eq!(granted[0].value(), "value-one");
+        assert!(!asked.refused, "the first ask has nothing to say");
+        assert!(!store.is_locked());
+    }
+
+    /// A sealed store nobody has opened cannot be scrubbed against, and
+    /// nothing else in a session that names no secret would say so.
+    /// The first scrub admits it, once per runtime; a store the scrub
+    /// can see admits nothing.
+    #[test]
+    fn a_sealed_store_is_admitted_once_on_the_first_result() {
+        let (_dir, store) = store();
+        store.set("KEY", "", "value-one").unwrap();
+        let open = Secrets::new(store.clone());
+        assert_eq!(
+            open.scrub_admitting("value-one"),
+            ("<secret:KEY>".to_string(), None),
+            "an open store has nothing to admit"
+        );
+
+        store.encrypt("open sesame").unwrap();
+        forget_master(&store);
+        let secrets = Secrets::new(store.clone()).with_unlock_hint("restart ilar");
+        let child = secrets.clone();
+        let (text, note) = secrets.scrub_admitting("value-one");
+        assert_eq!(text, "value-one", "nothing to scrub with");
+        let note = note.expect("the first result admits the lock");
+        assert!(note.contains("not scrubbed of stored values"), "{note}");
+        assert!(note.contains("restart ilar"), "{note}");
+        // Once: not on the next result, and not on a child's either.
+        assert_eq!(child.scrub_admitting("again"), ("again".to_string(), None));
+
+        // Opened later: the scrub sees the store, and says nothing.
+        store.unlock("open sesame").unwrap();
+        assert_eq!(
+            secrets.scrub_admitting("value-one"),
+            ("<secret:KEY>".to_string(), None)
+        );
+    }
+
+    /// Headless, a standing "always" on a locked store is unreadable,
+    /// not absent: the refusal names the lock, since "root is not
+    /// granted" would be a guess dressed as a fact — and it is where a
+    /// cron line with a sealed store actually fails.
+    #[tokio::test]
+    async fn a_headless_approval_on_a_locked_store_names_the_lock() {
+        let (_dir, store) = store();
+        store.grant_always(ROOT, "sudo").unwrap();
+        store.encrypt("open sesame").unwrap();
+        forget_master(&store);
+        let secrets = Secrets::new(store.clone()).with_unlock_hint("run ilar at a terminal");
+        let cancel = cancel();
+        let ask = Request {
+            tool: "sudo",
+            names: &[],
+            detail: "apt install ripgrep",
+            session_id: "s1",
+            tool_call_id: None,
+            cancel: &cancel,
+        };
+        let error = secrets.approve_root(ask, "").await.unwrap_err();
+        assert!(error.contains("sealed and locked"), "{error}");
+        assert!(error.contains("run ilar at a terminal"), "{error}");
+        assert!(!error.contains("not granted"), "{error}");
     }
 
     /// Root is a pseudo-secret: nothing to store, a standing grant to

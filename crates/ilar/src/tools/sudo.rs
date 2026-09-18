@@ -185,10 +185,17 @@ impl Tool for SudoTool {
             // Covered by the approval just given: the person said yes
             // to this command as root, and the password is how root is
             // reached here.
-            let mut password = match secrets.held_or_stored(crate::secrets::SUDO_PASSWORD) {
-                Ok(password) => password.filter(|password| !password.is_empty()),
-                // A locked store says how this driver's user unlocks
-                // it, as every other refusal the lock causes does.
+            let (mut password, lock) = match secrets.held_or_stored(crate::secrets::SUDO_PASSWORD) {
+                Ok(password) => (password.filter(|password| !password.is_empty()), None),
+                // A sealed store nobody has opened is not a wrong
+                // password: it is no stored password, which is what
+                // the probe below is for. The lock is kept for the one
+                // place a person meets its cost — giving up at the
+                // password prompt the stored one would have spared.
+                Err(error) if crate::secrets::is_lock(&error) => {
+                    (None, Some(secrets.store_error(error)))
+                }
+                // A store that cannot be read at all is a failure.
                 Err(error) => {
                     return ToolOutput::error(format!("sudo: {}", secrets.store_error(error)));
                 }
@@ -267,10 +274,19 @@ impl Tool for SudoTool {
                             typed
                         }
                         Ok(None) => {
-                            return ToolOutput::error(match refusal {
-                                Some(refusal) => format!("sudo: no password given ({refusal})"),
-                                None => "sudo: no password given".to_string(),
+                            // Giving up here is where a locked store
+                            // is felt: the stored password would have
+                            // spared the prompt.
+                            let unread = lock.as_deref().map(|lock| {
+                                format!("; any stored SUDO_PASSWORD could not be read: {lock}")
                             });
+                            return ToolOutput::error(format!(
+                                "sudo: no password given{}{}",
+                                refusal
+                                    .map(|refusal| format!(" ({refusal})"))
+                                    .unwrap_or_default(),
+                                unread.unwrap_or_default()
+                            ));
                         }
                         Err(error) => return ToolOutput::error(format!("sudo: {error}")),
                     },

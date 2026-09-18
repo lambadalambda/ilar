@@ -124,7 +124,9 @@ The grant prompt is approval only. What sudo wants for the command is
 settled after the yes, in this order:
 
 1. A password held from earlier this session, or stored under the name
-   `SUDO_PASSWORD`, is used as it is.
+   `SUDO_PASSWORD`, is used as it is. A sealed store this session has
+   not opened holds no password this call can read: that counts as
+   none, not as a failure, and the probe decides.
 2. Otherwise `sudo -n true` is probed. A system that passes it — a
    NOPASSWD rule — runs with `-n` and nobody is asked anything.
 3. Only a probe that fails brings up a second prompt, for the password
@@ -153,7 +155,12 @@ With nobody to ask (`ilar exec`, a scheduled turn) a standing grant
 runs on what is known: a held or stored password, or a passing probe.
 A failing probe with no password is a refusal naming
 `ilar secret set SUDO_PASSWORD`, rather than a sudo run that could only
-fail.
+fail. A sealed store nobody has opened refuses earlier, at the
+approval: the standing yes may well be in there, so the refusal names
+the lock and how to open it rather than claiming root was never
+granted. Where there *is* somebody to ask, the lock is named at the one
+place its cost is felt — giving up at the password prompt the stored
+one would have spared.
 
 In the chat the two questions are two commands: `/grant [session|
 always]` or `/deny` for the approval, and `/password <pw>` for the
@@ -229,8 +236,18 @@ nobody can route gets its own error instead of a password prompt.
 
 A second process that reseals the store under another password locks
 this one out: the password it holds no longer opens the file, so it
-drops it, says the store was resealed, and asks again the next time it
-can.
+drops it and asks for the new one in the same call that found out,
+where there is somebody to ask. Where there is not, the call fails
+saying the store was resealed.
+
+While the store is sealed and unopened, none of what follows can see
+the values in it: tool output is not scrubbed of them, and the half of
+the child-environment shielding that matches on value is off (the half
+that goes by name, ilar's own keys, still works). The first tool result
+of such a session says so, once. Nothing asks for the password on that
+account: a session that never names a secret is never asked, and a
+prompt before the first command would be the start-of-session prompt
+under another name.
 
 ## What a child shell no longer sees
 

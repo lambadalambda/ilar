@@ -2799,6 +2799,92 @@ async fn sudo_asks_for_the_password_after_the_yes_and_only_when_it_is_wanted() {
     );
 }
 
+/// A sealed store nobody has opened is not a wrong password: it is no
+/// stored password, which is exactly what the passwordless probe is
+/// for. sudo used to fail right there, naming a master password that
+/// had nothing to do with why the command could not run. Now the probe
+/// decides — and where the system does want a password, the ask is the
+/// ordinary one.
+#[tokio::test]
+async fn a_locked_store_is_no_stored_password_and_the_probe_decides() {
+    use ilar::secrets::Ask;
+    use ilar::tools::Tool;
+    let dir = tempfile::tempdir().unwrap();
+    let binary = fake_sudo(dir.path());
+    let sudo = ilar::tools::sudo::SudoTool::with_binary(&binary.to_string_lossy());
+    let store = ilar::secrets::SecretStore::open(&dir.path().join("state"));
+    store.set("SUDO_PASSWORD", "", "hunter22").unwrap();
+    store.grant_always("root", "sudo").unwrap();
+    store.encrypt("open sesame").unwrap();
+    ilar::secrets::forget_master(&store);
+    let call = serde_json::json!({"command": "id", "reason": "a test"});
+    let (tx, mut rx) = ilar::secrets::ask_channel(1);
+    let secrets = ilar::secrets::Secrets::new(store.clone()).with_prompts(tx);
+
+    // The unlock is declined, the approval given for the session: the
+    // probe passes on this system, so the command runs with no
+    // password and nothing more is asked.
+    let (out, _) = tokio::join!(
+        sudo.run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone())),
+        async {
+            let Some(Ask::Unlock(prompt)) = rx.recv().await else {
+                panic!("the unlock ask never came");
+            };
+            prompt.reply.send(None).unwrap();
+            let Some(Ask::Grant(grant)) = rx.recv().await else {
+                panic!("the grant ask never came");
+            };
+            grant
+                .reply
+                .send(Some(ilar::secrets::Grant::Session))
+                .unwrap();
+        }
+    );
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("noninteractive"), "{}", out.content);
+    assert!(store.is_locked(), "the declined unlock opened the store");
+
+    // The system wants a password after all: the ordinary password ask,
+    // not a refusal about the lock.
+    sudo_wants_a_password(&binary, "hunter22");
+    let (out, _) = tokio::join!(
+        sudo.run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone())),
+        async {
+            let Some(Ask::Password(prompt)) = rx.recv().await else {
+                panic!("the password ask never came");
+            };
+            prompt.reply.send(Some("hunter22".to_string())).unwrap();
+        }
+    );
+    assert!(!out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("pw=<secret:SUDO_PASSWORD>"),
+        "{}",
+        out.content
+    );
+
+    // Giving up at that prompt is where the lock is felt, so that is
+    // where it is named: the stored password would have spared it.
+    assert!(secrets.forget_held(ilar::secrets::SUDO_PASSWORD));
+    let (out, _) = tokio::join!(
+        sudo.run(call.clone(), ctx(dir.path()).with_secrets(secrets.clone())),
+        async {
+            let Some(Ask::Password(prompt)) = rx.recv().await else {
+                panic!("the password ask never came");
+            };
+            prompt.reply.send(None).unwrap();
+        }
+    );
+    assert!(out.is_error);
+    assert!(
+        out.content
+            .contains("no password given; any stored SUDO_PASSWORD could not be read"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("sealed and locked"), "{}", out.content);
+}
+
 /// Cancelling the password prompt fails the call rather than running
 /// sudo on a guess; a stored password sudo refuses stays stored and
 /// says what replaces it.

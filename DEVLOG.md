@@ -1,5 +1,55 @@
 # DEVLOG
 
+## 2026-09-18 — Three things the lock left behind
+
+The lazy master password shipped with three loose ends its review had
+named, all about what a sealed, unopened store does to the calls that
+run against it.
+
+**sudo read the lock as a wrong password.** It looked for a stored
+`SUDO_PASSWORD` before anything else and returned on `Err(Locked)`,
+twenty lines above the `sudo -n true` probe whose whole purpose is the
+no-stored-password case. Now the lock *is* that case: the probe
+decides, and where the system does want a password the ask is the
+ordinary one; giving up at that prompt names the lock, since that is
+the one place a person meets its cost. One correction to the issue as
+filed, which the review pushed all the way through: a headless driver
+never got that far, because the standing root approval lives in the
+store too and a locked store read as "not granted" — a guess dressed
+as a fact, on a box where `ilar secret grant root --tool sudo` had been
+run. The approval now refuses with the lock instead. The first draft
+had put the lock's wording on two headless paths below the approval
+that nothing can reach; the review noticed they were dead.
+
+The unlock gate also lost a race on review: it looked at the flags —
+sealed, master held — and only then read. Two calls finding a resealed
+store together had the first one's read drop the master and the
+second one's read come back `Locked`, which the gate sent home
+unprompted while the first was at the prompt. One read now decides,
+and any lock error means "ask".
+
+**A resealed store cost one refusal.** `unlock_if_locked` asked "is the
+store locked?", and a stale master — a second process resealed the file
+under another password — made that a no; only the read that failed
+dropped it, so the call that found out failed and the next one asked.
+The gate now reads the store when a master is held, so the discovery
+is the discovering call's to ask about.
+
+**A locked store scrubbed nothing and said nothing.** `all()` is
+`unwrap_or_default()` on a sealed store, so the output scrub had no
+needles and the value-matched half of the environment shielding was
+off — not new, but newly the ordinary case, since a `bash` that names
+no secret never triggers the prompt. The values cannot be read, so
+that part is what it is; the silence was fixable. The first tool result
+of such a session says so, once per runtime. Once, deliberately: a line
+on every result would be the standing notice the TUI stopped showing
+this morning, moved into the transcript. And no prompt on that account:
+a prompt before the first command is the start-of-session prompt under
+another name, which is what the whole change was for removing.
+
+One commit for the three, not one each: they share a file and a
+theme, and each is a handful of lines.
+
 ## 2026-09-18 — Read-only means these four tools
 
 The forty-minute `explore` child from the 2026-09-16 session already
