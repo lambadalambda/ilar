@@ -859,6 +859,9 @@ pub fn plan(
             // person is not for a room, and reading or writing it
             // aloud there would be the same leak by another door.
             memory: (private && gateway.memory.enabled).then(|| memory.clone()),
+            // The review after a turn writes for it; the standing
+            // "when to write" section is a terminal session's.
+            memory_prompt: false,
         },
     )?;
     // Where it is: reached over a chat, with a home, wakeable from a

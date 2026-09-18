@@ -263,7 +263,9 @@ sandbox is still the security boundary — see the warning in the
 What the assistant adds to the archive: the daily notes under `daily/`
 receive every compaction handover, the review after a turn writes notes
 and core entries on its own, and the weekly review promotes what
-recurs.
+recurs. Because the review writes for it, the assistant is not shown
+the standing "Remembering" section a terminal session opens with; the
+review's prompt carries the same rule for a note's summary.
 
 ## Skills it writes itself
 

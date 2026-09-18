@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use ilar::agent::LoopEvent;
-use ilar::memory::{CoreFile, MemoryStore, NoteKind};
+use ilar::memory::{CoreFile, MemoryStore, NoteKind, SUMMARY_RULE};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -105,7 +105,7 @@ dashes\", \"description\": \"…\", \"triggers\": [\"…\"], \"body\": \"…\", 
 \"new\": \"…\"}}] — a distilled rule with its reason, never the story of what happened, and \
 patch a skill that exists before creating one. Never store secrets, paths that change, or \
 what is easily looked up.",
-        ilar::memory::SUMMARY_RULE
+        SUMMARY_RULE
     )
 });
 
@@ -430,6 +430,14 @@ impl PendingStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule the `memory` tool states, so a note written here is
+    /// found the same way as one the model wrote itself.
+    #[test]
+    fn the_review_prompt_carries_the_summary_rule() {
+        assert!(PROMPT.contains(SUMMARY_RULE));
+        assert!(PROMPT.contains("\"summary\": \"one line\""));
+    }
 
     #[test]
     fn an_episode_is_worth_reviewing_past_the_threshold_or_after_an_error() {

@@ -35,16 +35,18 @@ pub const USER_CHARS: usize = 1375;
 
 /// How a note's summary is written, said wherever a note gets written:
 /// in the `memory` tool's description, in the standing prompt section,
-/// and in the gateway's after-turn review. The index matches words,
-/// so the summary has to carry the words a future question will.
-pub const SUMMARY_RULE: &str = "A note's summary is the one line search matches on, by its \
-words and not their meaning: put in it the words a future question would use — ticket ids, \
-hostnames, error strings, file names.";
+/// and in the gateway's after-turn review. The index matches words
+/// across the whole note and shows the summary, so the summary has to
+/// carry the words a future question will.
+pub const SUMMARY_RULE: &str = "Search matches words, not meaning, across a note's title, \
+summary and body, and shows the summary: put in the summary the words a future question \
+would use — ticket ids, hostnames, error strings, file names.";
 
 /// The standing section a session with a memory opens with, present
 /// whether or not anything has been written yet — an empty memory
 /// nobody mentions never gets written. Says what memory is for, what
-/// to skip, the two places, and that a write reaches the next session.
+/// to skip, and that a write reaches the next session; the tool's
+/// description says how the tool works.
 pub static PROMPT_SECTION: LazyLock<String> = LazyLock::new(|| {
     format!(
         "# Remembering\n\n\
@@ -52,11 +54,8 @@ pub static PROMPT_SECTION: LazyLock<String> = LazyLock::new(|| {
          empty until you write it. Keep what the next session would otherwise have to be told \
          again: a preference or correction from the person, a decision and its reason, a \
          convention of this project that no file states. Skip what the repository, the \
-         session log or a search already records, and today's paths and errors. A core entry \
-         (add, replace, remove) is one line injected into every future session under a hard \
-         cap — consolidate rather than overflow. A note (note) is one fact in the archive, \
-         found later by search. {SUMMARY_RULE} What you write changes the next session's \
-         prompt, not this one's."
+         session log or a search already records, and what is true only today. {SUMMARY_RULE} \
+         What you write changes the next session's prompt, not this one's."
     )
 });
 

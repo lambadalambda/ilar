@@ -1170,6 +1170,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             // theatre.
             withheld_paths: Vec::new(),
             memory: directory_memory(config, &cwd),
+            memory_prompt: true,
         },
     )?;
     let mut plan_notices = std::mem::take(&mut plan.notices);
@@ -1499,6 +1500,9 @@ async fn main() -> Result<()> {
                 // above.
                 withheld_paths: Vec::new(),
                 memory: directory_memory(&config, &cwd),
+                // Nobody reviews a terminal session afterwards: the
+                // model is told when to write.
+                memory_prompt: true,
             },
         )?;
         if args.print_prompt {

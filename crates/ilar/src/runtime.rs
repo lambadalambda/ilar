@@ -78,6 +78,11 @@ pub struct RuntimeOptions {
     /// an assistant its own; a seat that must not know the person,
     /// none.
     pub memory: Option<Arc<crate::memory::MemoryStore>>,
+    /// Tell the model when to write its memory, in a standing prompt
+    /// section: for a session nobody reviews afterwards, so the model
+    /// is the one who writes. An assistant with a review after each
+    /// turn leaves it off. Nothing without `memory`.
+    pub memory_prompt: bool,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -110,6 +115,7 @@ pub struct RuntimePlan {
     withheld_paths: Vec<PathBuf>,
     project_instructions: ProjectInstructions,
     memory: Option<Arc<crate::memory::MemoryStore>>,
+    memory_prompt: bool,
 }
 
 /// A session, its tools, and the channels a driver listens on.
@@ -567,22 +573,26 @@ impl RuntimePlan {
             withheld_paths: options.withheld_paths.clone(),
             project_instructions,
             memory: options.memory.clone(),
+            memory_prompt: options.memory_prompt,
         })
     }
 
     /// The prompt as the session sends it: what `resolve` assembled,
     /// plus — read now, not at resolve, so a driver's own additions
     /// come first — the memory: the standing section on when to write
-    /// it, present from the first session so an empty store gets
-    /// written, and the core block, frozen for the session, once
-    /// there is one. Nothing when there is no store.
+    /// it, where the driver asked for one, present from the first
+    /// session so an empty store gets written; and the core block,
+    /// frozen for the session, once there is one. Nothing when there
+    /// is no store.
     fn system_prompt_at_start(&self) -> Result<String> {
         let mut prompt = self.system_prompt.clone();
         let Some(store) = &self.memory else {
             return Ok(prompt);
         };
-        prompt.push_str("\n\n");
-        prompt.push_str(&crate::memory::PROMPT_SECTION);
+        if self.memory_prompt {
+            prompt.push_str("\n\n");
+            prompt.push_str(&crate::memory::PROMPT_SECTION);
+        }
         if let Some(block) = store.core_block().context("reading the core memory")? {
             prompt.push_str("\n\n");
             prompt.push_str(&block);
@@ -1310,6 +1320,7 @@ mod tests {
                 &RuntimeOptions {
                     cwd: cwd.clone(),
                     memory,
+                    memory_prompt: true,
                     ..RuntimeOptions::default()
                 },
             )

@@ -449,6 +449,9 @@ async fn a_fact_kept_in_one_chat_is_found_from_another_and_the_core_reaches_a_ne
         prompt.contains("# Memory") && prompt.contains("Likes earl grey"),
         "{prompt}"
     );
+    // The review after a turn writes for it: no standing "when to
+    // write" section, which is a terminal session's.
+    assert!(!prompt.contains("# Remembering"), "{prompt}");
     fake.inject_in_group("hi all", "room-1", "alice").await;
     fake.wait_for_sent(4, WAIT).await;
     let prompt = gateway.system_prompt("fake:room-1").unwrap();
