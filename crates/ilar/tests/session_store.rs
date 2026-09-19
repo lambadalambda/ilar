@@ -457,10 +457,43 @@ fn writer_lease_rejects_contention_and_releases_on_drop() {
         .err()
         .expect("second writer must fail");
     assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-    assert!(error.to_string().contains("already active"));
+    // The refusal names the holder: a zombie in another pane is a
+    // process to find, and "may be another ilar process" was no help.
+    let said = error.to_string();
+    assert!(
+        said.contains(&format!("held by process {}", std::process::id())),
+        "{said}"
+    );
+    assert!(said.contains("which took it at"), "{said}");
 
     drop(first);
     store.acquire_writer(&meta.session_id).unwrap();
+}
+
+/// A lock written by an older ilar says nothing about its holder. The
+/// refusal falls back to what it always said rather than inventing a
+/// process.
+#[test]
+fn a_lock_that_names_nobody_still_refuses() {
+    let (store, dir) = temp_store();
+    let meta = sample_meta();
+    // The session holds a lease of its own; the contention under test
+    // is between two writers, not with it.
+    drop(store.create(meta.clone()).unwrap());
+    let first = store.acquire_writer(&meta.session_id).unwrap();
+    // As an older ilar left it: locked, and empty.
+    std::fs::write(dir.path().join(format!("{}.lock", meta.session_id)), b"").unwrap();
+
+    let error = store
+        .acquire_writer(&meta.session_id)
+        .err()
+        .expect("second writer must fail");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(
+        error.to_string().contains("another ilar process"),
+        "{error}"
+    );
+    drop(first);
 }
 
 #[test]
