@@ -303,7 +303,14 @@ Qwen builds, open their answer with a literal `<think>…</think>` block in
 the content itself. A block at the head of the content stream is read as
 thinking and nothing else has to be configured — the tag may arrive split
 across deltas and still closes. Only a leading block counts, so a model
-writing *about* the tag later in an answer is left alone.
+writing *about* the tag later in an answer is left alone. The line break
+between the thought and the answer is a separator and comes off; an
+answer that opens with indented code keeps its indent. What was
+extracted is thinking like any other, so it goes back under
+`replay_thinking` as `reasoning_content` — verified live against
+`opencode-go/minimax-m3` over two turns on 2026-09-19. A block the model
+never closes stays thinking to the end of the turn, the same as a
+reasoning model truncated mid-thought.
 
 A thought goes back under the name it arrived as: `reasoning_content` for
 most, `reasoning` for the OpenRouter-style servers behind OpenCode Zen. The

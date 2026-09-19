@@ -24,6 +24,18 @@ the blank line a model leaves between its thinking and its answer was
 only swallowed when it shared a delta with the closing tag; it is a
 separator wherever it falls.
 
+A third came from the review: a server that sends an empty
+`tool_calls` list beside ordinary content — some proxies do — would
+have ended the content stream before the block was decided, cutting a
+tag in half. An empty list is not a call.
+
+The extracted thought is thinking like any other, so it goes back as
+`reasoning_content` rather than as the inline tag it arrived in. That
+is a wire the model was never sent before, so it was probed live:
+minimax-m3 completed both turns of the two-turn thinking smoke, tool
+call and all. One unrelated row, deepseek-v4-flash, failed the same
+run with an upstream 530 from the gateway.
+
 ## 2026-09-19 — Memory, the write side
 
 A fuller write-up of Claude Code's auto-memory appeared in the vault,
