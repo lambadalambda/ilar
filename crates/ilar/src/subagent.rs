@@ -301,6 +301,10 @@ struct ChildSteers {
 struct ChildSteer {
     /// The running turn's steer channel; `None` once that turn ended.
     sender: Option<crate::agent::SteerSender>,
+    /// What a run took into its prompt and has not committed yet. Still
+    /// owed: an unstarted run hands these back, so they belong in the
+    /// mirror until the run says it started.
+    claimed: Vec<String>,
     /// Messages the child has not been seen to take. While its turn runs
     /// they are in flight; once it ends they wait for its next resume —
     /// the root rule, where an undelivered steer moves to the queue
@@ -336,23 +340,27 @@ impl ChildSteers {
                 .unwrap_or_default();
             ChildSteer {
                 sender: None,
+                claimed: Vec::new(),
                 pending,
             }
         })
     }
 
-    /// Write what is parked for this child, or remove the file when
-    /// nothing is. Called under the lock, after every change.
-    fn mirror(&self, session_id: &str, pending: &[String]) {
+    /// Write everything still owed to this child — what a run has
+    /// claimed but not committed, then what is waiting behind it — or
+    /// remove the file when nothing is owed. Called under the lock,
+    /// after every change, so the file is never a half-applied edit.
+    fn mirror(&self, session_id: &str, entry: &ChildSteer) {
         let Some(dir) = self.dir.as_ref() else {
             return;
         };
         let path = Self::mirror_path(dir, session_id);
-        if pending.is_empty() {
+        let owed: Vec<&String> = entry.claimed.iter().chain(entry.pending.iter()).collect();
+        if owed.is_empty() {
             let _ = std::fs::remove_file(&path);
             return;
         }
-        if let Ok(bytes) = serde_json::to_vec(pending) {
+        if let Ok(bytes) = serde_json::to_vec(&owed) {
             let _ = crate::memory::write_atomically(&path, &bytes);
         }
     }
@@ -380,7 +388,11 @@ impl ChildSteers {
         let entry = self.entry(&mut steers, session_id);
         entry.sender = sender;
         let queued = std::mem::take(&mut entry.pending);
-        self.mirror(session_id, &[]);
+        // Claimed, not delivered: the file keeps them until the run
+        // says it committed them, so a crash mid-turn does not lose
+        // what this call just took out of `pending`.
+        entry.claimed = queued.clone();
+        self.mirror(session_id, entry);
         drop(steers);
         ChildTurnSteer {
             session_id: session_id.to_string(),
@@ -406,8 +418,7 @@ impl ChildSteers {
             return false;
         }
         entry.pending.push(text);
-        let pending = entry.pending.clone();
-        self.mirror(session_id, &pending);
+        self.mirror(session_id, entry);
         true
     }
 
@@ -416,8 +427,7 @@ impl ChildSteers {
         let mut steers = lock_unpoisoned(&self.steers);
         let entry = self.entry(&mut steers, session_id);
         entry.pending.push(text);
-        let pending = entry.pending.clone();
-        self.mirror(session_id, &pending);
+        self.mirror(session_id, entry);
     }
 
     /// Whether this exact text is still waiting for the child. The
@@ -425,10 +435,24 @@ impl ChildSteers {
     /// say honestly that the message is parked rather than delivered.
     fn holds(&self, session_id: &str, text: &str) -> bool {
         let mut steers = lock_unpoisoned(&self.steers);
-        self.entry(&mut steers, session_id)
+        let held = self
+            .entry(&mut steers, session_id)
             .pending
             .iter()
-            .any(|held| held == text)
+            .any(|held| held == text);
+        Self::prune(&mut steers, session_id);
+        held
+    }
+
+    /// The run committed the prompt it built: what it claimed is read,
+    /// so only what is still waiting stays owed.
+    fn committed(&self, session_id: &str) {
+        let mut steers = lock_unpoisoned(&self.steers);
+        if let Some(entry) = steers.get_mut(session_id) {
+            entry.claimed.clear();
+            self.mirror(session_id, entry);
+        }
+        Self::prune(&mut steers, session_id);
     }
 
     /// The child took this message at a step boundary, so it is waiting
@@ -440,8 +464,7 @@ impl ChildSteers {
             && let Some(index) = entry.pending.iter().position(|held| held == text)
         {
             entry.pending.remove(index);
-            let pending = entry.pending.clone();
-            self.mirror(session_id, &pending);
+            self.mirror(session_id, entry);
         }
         Self::prune(&mut steers, session_id);
     }
@@ -462,22 +485,23 @@ impl ChildSteers {
     /// whatever was said while it was running.
     fn end(&self, session_id: &str, restored: Vec<String>) {
         let mut steers = lock_unpoisoned(&self.steers);
-        if let Some(entry) = steers.get_mut(session_id) {
-            entry.sender = None;
-            entry.pending.splice(0..0, restored);
-            let pending = entry.pending.clone();
-            self.mirror(session_id, &pending);
-        }
+        // Through `entry`, not `get_mut`: a concurrent read may have
+        // pruned this child away, and dropping `restored` here would
+        // lose exactly the messages the mirror exists to keep.
+        let entry = self.entry(&mut steers, session_id);
+        entry.sender = None;
+        entry.claimed.clear();
+        entry.pending.splice(0..0, restored);
+        self.mirror(session_id, entry);
         Self::prune(&mut steers, session_id);
     }
 
     /// A child with no channel and nothing waiting is not a child this
     /// map has anything to say about.
     fn prune(steers: &mut std::collections::HashMap<String, ChildSteer>, session_id: &str) {
-        if steers
-            .get(session_id)
-            .is_some_and(|entry| entry.sender.is_none() && entry.pending.is_empty())
-        {
+        if steers.get(session_id).is_some_and(|entry| {
+            entry.sender.is_none() && entry.pending.is_empty() && entry.claimed.is_empty()
+        }) {
             steers.remove(session_id);
         }
     }
@@ -516,6 +540,7 @@ impl ChildTurnSteer {
     /// delivered, not waiting.
     fn started(&mut self) {
         self.queued.clear();
+        self.steers.committed(&self.session_id);
     }
 }
 
