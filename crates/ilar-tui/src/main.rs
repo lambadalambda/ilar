@@ -2770,10 +2770,22 @@ fn seed_agent_focus(
     store: &SessionStore,
     session_id: &str,
     streaming: bool,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<crate::transcript::Line_>, String> {
+    // Two checkpoints, around the two expensive halves: reading the
+    // log, and folding it into rows. Neither half is interruptible
+    // from outside, so a seed abandoned mid-half still finishes that
+    // half — but a retarget no longer pays for both.
+    let stopped = || "seed abandoned".to_string();
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(stopped());
+    }
     let reader = store
         .load(session_id)
         .map_err(|error| format!("cannot open agent transcript: {error:#}"))?;
+    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(stopped());
+    }
     // A working agent's open tool rows are open, not failed: marking
     // them ✗ here also made the real result unsettleable, so the row
     // lied until the next refocus.
@@ -3233,18 +3245,43 @@ fn apply_terminal_title(topic: Option<&str>) {
 }
 
 /// The lazy preview load for the search modal's listing rows:
-/// (generation, session id, the loader's channel).
-type PreviewTask = (
-    u64,
-    String,
-    std::sync::mpsc::Receiver<Vec<(String, String, bool)>>,
-);
-/// A focus seed replaying on a worker: which child it is for, and the
-/// handle carrying its lines.
-type FocusSeedTask = (
-    String,
-    tokio::task::JoinHandle<Result<Vec<crate::transcript::Line_>, String>>,
-);
+/// A preview load in flight: which generation and session it answers,
+/// the loader's channel, and the flag that stops it.
+///
+/// Both of these carry a `cancel` a worker watches, and both raise it
+/// on drop. Selection moves with the arrow keys, so a held-down key
+/// starts a loader per row; before this, each one parsed a whole
+/// session archive to the end on a blocking thread whose result the
+/// landing guard would then throw away. Dropping the task *is* the
+/// cancellation, so there is no path that replaces one and forgets.
+struct PreviewTask {
+    generation: u64,
+    session: String,
+    rx: std::sync::mpsc::Receiver<Vec<(String, String, bool)>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// A focus seed replaying on a worker: which child it is for, the
+/// handle carrying its lines, and the flag that stops it.
+struct FocusSeedTask {
+    session: String,
+    handle: tokio::task::JoinHandle<Result<Vec<crate::transcript::Line_>, String>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for PreviewTask {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl Drop for FocusSeedTask {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
 /// A rewind in flight: the discarded-turn count for its notice, the
 /// pause state to restore on failure (the hold may predate the rewind),
 /// and the handle.
@@ -3461,16 +3498,19 @@ async fn run_app(
             let wanted = (search.generation, row.session_id.clone());
             let in_flight = preview_rx
                 .as_ref()
-                .is_some_and(|(generation, sid, _)| *generation == wanted.0 && *sid == wanted.1);
+                .is_some_and(|task| task.generation == wanted.0 && task.session == wanted.1);
             if !in_flight {
                 let (tx, rx) = std::sync::mpsc::channel();
                 let store = store.clone();
                 let sid = wanted.1.clone();
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let flag = cancel.clone();
                 tokio::task::spawn_blocking(move || {
                     // Always answer — a load that sent nothing would
                     // leave the row empty and this loop re-spawning a
-                    // loader every pass.
-                    let context = ilar::recall::session_entries(&store, &sid)
+                    // loader every pass. Except when it was abandoned:
+                    // nobody is listening, and the channel is gone.
+                    let context = ilar::recall::session_entries_until(&store, &sid, &flag)
                         .ok()
                         .and_then(|entries| {
                             let last = entries.last()?;
@@ -3491,10 +3531,23 @@ async fn run_app(
                         });
                     let _ = tx.send(context);
                 });
-                preview_rx = Some((wanted.0, wanted.1, rx));
+                // Assigning drops the loader that was in flight, which
+                // stops it: the row it was for is not on screen now.
+                preview_rx = Some(PreviewTask {
+                    generation: wanted.0,
+                    session: wanted.1,
+                    rx,
+                    cancel,
+                });
             }
         }
-        if let Some((generation, sid, rx)) = preview_rx.as_ref() {
+        if let Some(PreviewTask {
+            generation,
+            session: sid,
+            rx,
+            ..
+        }) = preview_rx.as_ref()
+        {
             match rx.try_recv() {
                 Ok(context) => {
                     if let Some(search) = app.session_search.as_mut()
@@ -3829,13 +3882,17 @@ async fn run_app(
                 }
             }
         }
-        if let Some((_, handle)) = focus_seed.as_mut()
-            && handle.is_finished()
+        if let Some(seed) = focus_seed.as_mut()
+            && seed.handle.is_finished()
         {
-            let (for_session, handle) = focus_seed.take().unwrap();
-            let seeded = handle.await.unwrap_or_else(|join_error| {
+            // Awaited in place: a finished handle yields at once, and
+            // the task is not moved out of the guard that owns it.
+            let seeded = (&mut seed.handle).await.unwrap_or_else(|join_error| {
                 Err(format!("cannot open agent transcript: {join_error}"))
             });
+            let for_session = seed.session.clone();
+            // It landed, so there is nothing left to cancel.
+            focus_seed = None;
             land_agent_focus(app, &for_session, seeded);
         }
         if let Some((_, _, handle)) = rewind_task.as_mut()
@@ -5315,12 +5372,19 @@ async fn run_app(
                                     if let Some(streaming) = open_agent_focus(app, store, &id) {
                                         let store = store.clone();
                                         let seed_id = id.clone();
-                                        focus_seed = Some((
-                                            id,
-                                            tokio::task::spawn_blocking(move || {
-                                                seed_agent_focus(&store, &seed_id, streaming)
+                                        let cancel = std::sync::Arc::new(
+                                            std::sync::atomic::AtomicBool::new(false),
+                                        );
+                                        let flag = cancel.clone();
+                                        // Assigning drops whatever seed
+                                        // was in flight, which stops it.
+                                        focus_seed = Some(FocusSeedTask {
+                                            session: id,
+                                            handle: tokio::task::spawn_blocking(move || {
+                                                seed_agent_focus(&store, &seed_id, streaming, &flag)
                                             }),
-                                        ));
+                                            cancel,
+                                        });
                                     }
                                 }
                                 None if app.focus.is_none() => {
