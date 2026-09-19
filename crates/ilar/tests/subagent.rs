@@ -986,10 +986,19 @@ async fn concurrency_cap_errors_with_guidance() {
         1,
         "expected exactly one capped call: {results:?}"
     );
-    assert!(matches!(
-        errors[0],
-        ContentBlock::ToolResult { content, .. } if content.to_lowercase().contains("do not retry")
-    ));
+    // Guidance, not a contradiction: the old text said "do not retry"
+    // and "then try again" in one breath.
+    assert!(
+        matches!(
+            errors[0],
+            ContentBlock::ToolResult { content, .. }
+                if content.contains("which is the limit")
+                    && content.contains("Wait for one to finish")
+                    && !content.contains("try again")
+        ),
+        "{:?}",
+        errors[0]
+    );
 }
 
 #[tokio::test]
