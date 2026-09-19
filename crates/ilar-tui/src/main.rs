@@ -5491,16 +5491,41 @@ mod tests {
         assert!(cancel.load(Ordering::Acquire));
     }
 
-    /// A seed that was abandoned before it started says so rather than
-    /// paying for a replay nobody will read.
+    /// A seed whose target moved on stops rather than folding a whole
+    /// transcript into rows for a view that is not on screen.
     #[test]
-    fn a_cancelled_seed_does_not_read_the_transcript() {
+    fn a_cancelled_seed_builds_no_rows() {
         let dir = tempfile::tempdir().unwrap();
         let store = ilar::session::SessionStore::new(dir.path().to_path_buf());
+        let id = ilar::session::new_id();
+        let mut session = store
+            .create(ilar::session::SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: ilar::session::new_id(),
+                text: "go".into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        // Uncancelled it seeds rows; cancelled it seeds none.
+        let live = AtomicBool::new(false);
+        assert!(super::seed_agent_focus(&store, &id, false, &live).is_ok());
         let cancel = AtomicBool::new(true);
-        let error = super::seed_agent_focus(&store, "no-such-session", false, &cancel)
-            .expect_err("a cancelled seed");
-        assert_eq!(error, "seed abandoned", "it never reached the store");
+        assert!(
+            super::seed_agent_focus(&store, &id, false, &cancel).is_err(),
+            "a seed nobody wants still built its rows"
+        );
     }
 
     #[test]
