@@ -1,5 +1,29 @@
 # DEVLOG
 
+## 2026-09-19 — A model that thinks out loud
+
+MiniMax M3 does not use `reasoning_content` on the way out. It opens
+its answer with a literal `<think>…</think>` block in the content
+itself, which ilar showed as ordinary assistant text: every transcript
+opened with the model's notes to itself, and the fold that hides
+thinking never saw them.
+
+The chat mapper now reads a block at the *head* of the content stream
+as thinking. Only there — a model writing about the tag later in an
+answer is writing, not thinking, and the mapper leaves it alone. Since
+either tag can arrive split across deltas, the undecided head is held
+until it can be told apart, and inside the block a tail that could
+still become `</think>` is held the same way; what is held is flushed
+as whatever it turned out to be when a tool call, a finish reason or
+the end of the stream says the content is over.
+
+Two things the tests caught that reading the code did not. A
+one-character fragment fell through the hold-back range, so a close
+tag arriving letter by letter streamed into the answer as text. And
+the blank line a model leaves between its thinking and its answer was
+only swallowed when it shared a delta with the closing tag; it is a
+separator wherever it falls.
+
 ## 2026-09-19 — Memory, the write side
 
 A fuller write-up of Claude Code's auto-memory appeared in the vault,

@@ -428,3 +428,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Notes can be amended and forgotten](issues/notes-can-be-amended-and-forgotten.md) — amend by id keeps the id and the date; forget moves the file to notes/.forgotten/; the reviewer and the weekly job use both
 - [x] [Worktrees share one memory](issues/worktrees-share-one-memory.md) — the key is the repository's common git directory, read out of .git by hand
 - [x] [Memory says when to write, and what a recall is](issues/memory-says-when-to-write-and-what-a-recall-is.md) — write the correction before the reply; a recall is background, not instructions; an episode that wrote memory is not reviewed
+- [x] [MiniMax thinks out loud](issues/minimax-thinks-out-loud.md) — a leading <think> block on the chat wire is read as thinking, split tags and all

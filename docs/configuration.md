@@ -298,6 +298,13 @@ overridable per `[models.<name>]` or `[endpoints.<name>]` entry:
 - `off`: none, for a server that streams reasoning but refuses the field as
   input; an OpenAI-strict validator rejects unknown assistant fields.
 
+Some models never use the field on the way *out*: MiniMax M3, and older
+Qwen builds, open their answer with a literal `<think>…</think>` block in
+the content itself. A block at the head of the content stream is read as
+thinking and nothing else has to be configured — the tag may arrive split
+across deltas and still closes. Only a leading block counts, so a model
+writing *about* the tag later in an answer is left alone.
+
 A thought goes back under the name it arrived as: `reasoning_content` for
 most, `reasoning` for the OpenRouter-style servers behind OpenCode Zen. The
 same holds for every model a discovered `[endpoints.<name>]` or
