@@ -2488,7 +2488,8 @@ impl App {
         const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
         if self.busy {
             self.set_notice(
-                "a turn is running — images send with a fresh message; try again when it ends",
+                "a turn is running — attach when it ends; a draft that already has \
+                 attachments still sends them, as a steer or a queued message",
                 NoticeLevel::Warning,
             );
             return false;

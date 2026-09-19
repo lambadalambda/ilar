@@ -40,7 +40,7 @@ is. `general.resume_offer = false` turns it off — see
 During a turn the status line reads like:
 
 ```
-○ thinking · 84.2 KiB · 12.3 KiB/s   zai/glm-5.3   in 300 · out ~8.4k · cache 86% · Σ 1.2M $0.42 · ctx [██░░░░░░] 24%
+○ thinking · 84.2 KiB · 12.3 KiB/s   zai/glm-5.3   in 300 · out ~8400 · cache 86% · Σ 1m $0.42 · ctx [██░░░░░░] 24%
 ```
 
 - **Activity + liveness** — `thinking · 84.2 KiB · 12.3 KiB/s`: bytes
@@ -162,8 +162,7 @@ attached to it. Stashes stack, the input title counts them
 is ever sent on its own: a stash only comes back when you pop it.
 
 Because a stash lives in the running app and nothing else, the things
-that would throw it away say so first: a session switch (resume, fork,
-rewind) is refused while any stash waits, and Ctrl-D on a blank prompt
+that would throw it away say so first: Ctrl-D on a blank prompt
 warns once before the second press quits. That warning leads with the
 key and then names everything leaving would take: the running turn, the
 background agents cancelled with it, the goal and its round, the
@@ -198,10 +197,12 @@ The catalog knows which models see: every OpenAI model does, on z.ai
 only the V-series (available on the coding plan too), and on OpenCode
 whichever rows models.dev marks multimodal (the GPT, Grok, Muse Spark,
 Kimi and Qwen families among them). Attaching on anything else is refused with a notice
-naming the model, and attachments only ride a *fresh* turn — while a
-turn runs, submit puts your text back and asks you to wait, because
-steering carries text only. Esc discards attachments along with the
-draft. Oversized images are downscaled to fit 2048 px on the longest
+naming the model. A draft's attachments travel with it whenever it
+goes: as a fresh turn, as a steer into the turn already running, or as
+a queued message. What a running turn refuses is *attaching* — Ctrl-V
+while it works says so and asks you to wait, so an image is never
+added to a message halfway out the door. Esc discards attachments
+along with the draft. Oversized images are downscaled to fit 2048 px on the longest
 edge before anything is stored or sent — providers shrink to that
 before tiling anyway, so a retina screenshot costs a fraction of the
 bytes with nothing lost. Three backstops: 64 MiB of file, weighed
@@ -249,9 +250,10 @@ cache, and a newer `/btw` replaces a still-running one.
 opens a two-pane grep over every session you have:
 
 - **Empty query**: your sessions with the ones from the directory
-  you are in first, newest-first within each group — topic, last words
-  said, and when it was last used ("2h ago" inside a day, "aug 12"
-  beyond), with the tail of the conversation previewed on the right.
+  you are in first, newest-first within each group — topic and when it
+  was last used ("2h ago" inside a day, "aug 12" beyond). From 96
+  columns up, the tail of the selected conversation is previewed on
+  the right; below that the list takes the whole modal.
   So the row you open on is where you left off *here*; sessions from
   elsewhere follow, marked with their directory (`· ~/repos/foo`), and
   sessions nothing was ever said in come last. The list is capped at a
@@ -307,9 +309,9 @@ there too, as a ✉ `delivering` row, and when it lands the transcript gets
 one quiet line — `✉ "review the diff" delivered to explore · survey the
 API` — naming the session by its agent and task rather than by id. A
 result that has to climb to another tree says so on its way — `✉
-"review the diff" passed on to build · land the fix` — and only a
-result that cannot be delivered at all claims the notice line above the
-input. A background job — `bash` with `run_in_background` — sits in the
+"review the diff" passed on to build · land the fix` — and a result
+that cannot be delivered, or is held because the session it belongs to
+is open elsewhere, claims the notice line above the input. A background job — `bash` with `run_in_background` — sits in the
 same panel while it runs, as a ⚙ row with its command and elapsed time,
 so a long render never reads as a hang; it has no transcript to open.
 The panel's title counts each kind for what it is — `agents (2) · 1 job
