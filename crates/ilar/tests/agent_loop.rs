@@ -1823,7 +1823,13 @@ async fn concurrent_turn_on_same_session_is_rejected_before_append() {
     )
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("already active"));
+    // The refusal names the process that holds the session.
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("held by process {}", std::process::id())),
+        "{error}"
+    );
 
     cancel.cancel();
     assert_eq!(first.await.unwrap().unwrap(), TurnOutcome::Aborted);
