@@ -825,6 +825,8 @@ enum MemoryAction {
     Replace,
     Remove,
     Note,
+    Amend,
+    Forget,
     Show,
 }
 
@@ -840,6 +842,8 @@ struct MemoryInput {
     title: Option<String>,
     summary: Option<String>,
     body: Option<String>,
+    /// amend / forget: the note, as `memory_search` spells it.
+    id: Option<String>,
 }
 
 fn default_file() -> CoreFile {
@@ -870,9 +874,12 @@ impl Tool for MemoryTool {
                  session and has a hard cap — an overflow is an error, so consolidate; show \
                  prints both files as they are. note files one durable fact in the archive \
                  (kind: decision, solution, preference, event, task, risk; title; a one-line \
-                 summary; body), found later with memory_search. {SUMMARY_RULE} Save \
-                 preferences, corrections, decisions and conventions; skip the trivial, the \
-                 searchable, and today's paths."
+                 summary; body), found later with memory_search. amend rewrites a note you \
+                 name by id, keeping its id and its date; forget retires one. {SUMMARY_RULE} \
+                 Save preferences, corrections, decisions and conventions; skip the trivial, \
+                 the searchable, and today's paths. Search before you write a note: when one \
+                 is already about this, amend it rather than file a second, and forget one the \
+                 work proved wrong."
             )
         });
         DESCRIPTION.as_str()
@@ -890,15 +897,16 @@ impl Tool for MemoryTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["add", "replace", "remove", "note", "show"], "description": "show: both core files as they are now, with their caps"},
+                "action": {"type": "string", "enum": ["add", "replace", "remove", "note", "amend", "forget", "show"], "description": "show: both core files as they are now, with their caps"},
                 "file": {"type": "string", "enum": ["memory", "user"], "description": "Which core file (default memory)"},
                 "text": {"type": "string", "description": "add: the entry, one line; remove: text every entry to drop contains"},
                 "old": {"type": "string", "description": "replace: text the first entry to replace contains"},
                 "new": {"type": "string", "description": "replace: the new entry"},
+                "id": {"type": "string", "description": "amend / forget: the note's id, as memory_search spells it"},
                 "kind": {"type": "string", "enum": ["decision", "solution", "preference", "event", "task", "risk"]},
                 "title": {"type": "string"},
                 "summary": {"type": "string", "description": "note: one line"},
-                "body": {"type": "string", "description": "note: the fact in full (default: the summary)"}
+                "body": {"type": "string", "description": "note: the fact in full (default: the summary); amend: what to change, the rest is kept"}
             },
             "required": ["action"]
         })
@@ -979,6 +987,34 @@ impl Tool for MemoryTool {
                         _ => Err(anyhow::anyhow!("note needs kind, title and summary")),
                     }
                 }
+                MemoryAction::Amend => match input.id.as_deref() {
+                    Some(id) => {
+                        let change = Amendment {
+                            kind: input.kind,
+                            title: input.title.as_deref(),
+                            summary: input.summary.as_deref(),
+                            body: input.body.as_deref(),
+                        };
+                        if change.kind.is_none()
+                            && change.title.is_none()
+                            && change.summary.is_none()
+                            && change.body.is_none()
+                        {
+                            Err(anyhow::anyhow!(
+                                "amend needs something to change: kind, title, summary or body"
+                            ))
+                        } else {
+                            store
+                                .amend(id, change)
+                                .map(|note| format!("amended {} ({})", note.id, note.kind))
+                        }
+                    }
+                    None => Err(anyhow::anyhow!("amend needs the note's id")),
+                },
+                MemoryAction::Forget => match input.id.as_deref() {
+                    Some(id) => store.forget(id).map(|()| format!("forgot {id}")),
+                    None => Err(anyhow::anyhow!("forget needs the note's id")),
+                },
             };
             match outcome {
                 Ok(text) => ToolOutput::text(text),
@@ -1232,12 +1268,51 @@ mod tests {
             )
             .unwrap()
             .id;
-        let out = MemoryGetTool::new(store)
+        let out = MemoryGetTool::new(store.clone())
             .run(serde_json::json!({"ids": [id, "nope"]}), ctx())
             .await;
         assert!(!out.is_error, "{}", out.content);
         assert!(
             out.content.contains("Moved") && out.content.contains("(no notes with ids nope"),
+            "{}",
+            out.content
+        );
+
+        // A note the work moved on from: amended by id, then retired.
+        let tool = MemoryTool::new(store.clone());
+        let out = tool
+            .run(
+                serde_json::json!({"action": "amend", "id": id, "summary": "moved to a house"}),
+                ctx(),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content, format!("amended {id} (event)"));
+        assert_eq!(
+            store.get(&[id.clone()]).unwrap()[0].summary,
+            "moved to a house"
+        );
+        let out = tool
+            .run(serde_json::json!({"action": "amend", "id": id}), ctx())
+            .await;
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("something to change"),
+            "{}",
+            out.content
+        );
+
+        let out = tool
+            .run(serde_json::json!({"action": "forget", "id": id}), ctx())
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(store.notes().unwrap().is_empty());
+        let out = tool
+            .run(serde_json::json!({"action": "forget"}), ctx())
+            .await;
+        assert!(out.is_error);
+        assert!(
+            out.content.contains("needs the note's id"),
             "{}",
             out.content
         );
