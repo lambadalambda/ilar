@@ -267,7 +267,10 @@ receive every compaction handover, the review after a turn writes notes
 and core entries on its own, and the weekly review promotes what
 recurs. Because the review writes for it, the assistant is not shown
 the standing "Remembering" section a terminal session opens with; the
-review's prompt carries the same rule for a note's summary. The
+review's prompt carries the same rule for a note's summary. An episode
+in which the model used the `memory` tool itself is not reviewed at
+all: it already decided what to keep, and a review would file the same
+fact a second time. The
 opening index and the per-prompt recall reach a private chat as they
 do a terminal session, under `gateway.memory.index` and
 `gateway.memory.recall`; a room gets neither.

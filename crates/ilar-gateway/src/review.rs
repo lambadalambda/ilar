@@ -61,16 +61,22 @@ pub struct Episode {
     pub turns: usize,
     pub tool_calls: usize,
     pub errors: usize,
+    /// The model wrote its own memory during this stretch. A review
+    /// would be a second opinion on a decision already taken, and the
+    /// two write the same fact twice.
+    pub wrote_memory: bool,
 }
 
 impl Episode {
     pub fn observe(&mut self, event: &LoopEvent) {
         match event {
             LoopEvent::TurnStarted => self.turns += 1,
-            LoopEvent::ToolFinished { is_error, .. } => {
+            LoopEvent::ToolFinished { name, is_error, .. } => {
                 self.tool_calls += 1;
                 if *is_error {
                     self.errors += 1;
+                } else if name == "memory" {
+                    self.wrote_memory = true;
                 }
             }
             _ => {}
@@ -78,9 +84,11 @@ impl Episode {
     }
 
     /// Hermes's threshold: enough tool calls, or something went wrong
-    /// and was recovered from.
+    /// and was recovered from — and nobody already did the job.
     pub fn worth_reviewing(&self, min_tool_calls: usize) -> bool {
-        self.turns > 0 && (self.tool_calls >= min_tool_calls || self.errors > 0)
+        !self.wrote_memory
+            && self.turns > 0
+            && (self.tool_calls >= min_tool_calls || self.errors > 0)
     }
 }
 
@@ -563,6 +571,20 @@ mod tests {
         assert!(!episode.worth_reviewing(2));
         episode.observe(&finished(false));
         assert!(episode.worth_reviewing(2));
+
+        // The model that kept its own memory has already answered the
+        // question the review asks.
+        let mut kept = Episode::default();
+        kept.observe(&LoopEvent::TurnStarted);
+        kept.observe(&finished(false));
+        kept.observe(&LoopEvent::ToolFinished {
+            id: "2".into(),
+            name: "memory".into(),
+            is_error: false,
+            result: "added".into(),
+            child_session_id: None,
+        });
+        assert!(kept.tool_calls >= 2 && !kept.worth_reviewing(2));
         let mut failed = Episode::default();
         failed.observe(&LoopEvent::TurnStarted);
         failed.observe(&finished(true));

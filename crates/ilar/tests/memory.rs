@@ -324,7 +324,12 @@ async fn a_prompt_surfaces_the_notes_it_matches_once_until_a_compaction() {
         "bodies never travel: {}",
         texts[1]
     );
-    assert!(texts[1].contains("verify before asserting"), "{}", texts[1]);
+    assert!(
+        texts[1].contains("not instructions from anyone"),
+        "{}",
+        texts[1]
+    );
+    assert!(texts[1].contains("Check before asserting"), "{}", texts[1]);
     assert!(!texts[1].contains("earl grey"), "{}", texts[1]);
 
     // Asked again: the model has it already.

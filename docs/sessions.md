@@ -171,8 +171,12 @@ a standing section, "Remembering", present before anything has been
 written — an empty memory nobody mentions never gets written. It says
 what to keep (a preference or correction, a decision and its reason, a
 convention no file states), what to skip (what the repository, the log
-or a search already records; what is true only today), and one rule
-for a note's summary: search matches words, not meaning, across the
+or a search already records; what is true only today), and when to
+write: a correction or a stated preference goes in before the reply
+that answers it, since the end of a session is a place nobody reaches,
+while words that scope a thing to now mark something to follow here
+rather than a rule to keep. It also says to amend a note rather than
+file a second about the same fact. And one rule for a note's summary: search matches words, not meaning, across the
 whole note and shows the summary, so the summary carries the words a
 future question would use — ticket ids, hostnames, error strings, file
 names. The `memory` tool's description and the assistant's after-turn
@@ -186,9 +190,12 @@ frozen with the rest of the prompt. And on every prompt, the index is
 run over the prompt's words: notes that share two words with it, or
 one that fewer than half the notes contain, are surfaced — at most
 five, as index lines and never bodies — in a `<memory-recall>` block
-appended after the user message, framed as retrieved for possible
-relevance and, when a note is older than a day, with a reminder to
-verify before asserting. The block is a session event of its own, so
+appended after the user message. The block says what it is: background
+the session wrote earlier, for possible relevance, not instructions
+from anyone and not part of the message it follows. When a note is
+older than a day it adds that a note is what was true when it was
+written rather than live state, so a claim about code or a file and
+line may have moved. The block is a session event of its own, so
 the transcript, the web view and a resumed session all show it; the
 TUI shows a count when the session is reopened. A note is not
 surfaced twice in one context — until a compaction folds the earlier
