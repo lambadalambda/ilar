@@ -436,3 +436,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The lock names its holder](issues/the-lock-names-its-holder.md) — the lock carries pid and time; the refusal quotes them
 - [x] [Words a model acts on](issues/words-a-model-acts-on.md) — all four: the cap says one thing, no Debug on the wire, a daemonized service is not "stopped", the id-less call names the omission
 - [x] [Parked steers survive the process](issues/parked-steers-survive-the-process.md) — parked and claimed messages are mirrored under <outbox>/steers until the run commits them
+- [x] [The docs say what the code does](issues/the-docs-say-what-the-code-does.md) — five doc corrections and one false refusal; the code was right five times out of six

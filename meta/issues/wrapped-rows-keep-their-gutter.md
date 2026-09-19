@@ -44,3 +44,14 @@ Left: the parent's message inside a subagent timeline labelled `you`;
 the compaction summary as an expandable note; the 20-char agent name
 clamp; progress-before-command truncation; collapsed groups naming
 their tools; `done` flipping to `×`; the `2 * 3 * 4` italic.
+
+## Progress (2026-09-19)
+
+Done: a `*` opens emphasis only when a word follows it and closes only
+when one precedes it, so `2 * 3 * 4` is arithmetic again
+(CommonMark's flanking rule).
+
+Left, all cosmetic: the parent's message inside a subagent timeline
+labelled `you`; the compaction summary as an expandable note; the
+20-char agent name clamp; progress-before-command truncation;
+collapsed groups naming their tools; `done` flipping to `×`.

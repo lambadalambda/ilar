@@ -103,7 +103,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [UX sweep 2026-09-03](issues/ux-sweep-2026-09-03.md) — index
 - [ ] [Wrapped rows keep their gutter](issues/wrapped-rows-keep-their-gutter.md)
 - [ ] [Plain words on every surface](issues/plain-words-on-every-surface.md)
-- [ ] [The docs say what the code does](issues/the-docs-say-what-the-code-does.md)
 - [ ] [Pickers show the deciding field](issues/pickers-show-the-deciding-field.md)
 - [ ] [exec names its session](issues/exec-names-its-session.md)
 - [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
