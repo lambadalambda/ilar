@@ -599,8 +599,15 @@ fn render_inline(text: &str, base: Style) -> Vec<Span<'static>> {
             }
             continue;
         }
+        // A `*` opens emphasis only when it leads a word and closes
+        // only when it follows one — CommonMark's flanking rule, and
+        // the reason `2 * 3 * 4` is arithmetic rather than an italic
+        // three.
         if let Some(after) = rest.strip_prefix('*')
             && let Some(end) = after.find('*')
+            && !after[..end].is_empty()
+            && !after.starts_with(char::is_whitespace)
+            && !after[..end].ends_with(char::is_whitespace)
         {
             spans.push(Span::styled(
                 after[..end].to_string(),
@@ -726,6 +733,35 @@ mod tests {
         let rendered: Vec<String> = lines.iter().map(text).collect();
 
         assert_eq!(rendered, ["First paragraph.", "", "Second paragraph."]);
+    }
+
+    /// Arithmetic is not emphasis. A `*` with a space after it opens
+    /// nothing, and one with a space before it closes nothing — so a
+    /// model explaining `2 * 3 * 4` does not italicise the three.
+    #[test]
+    fn a_spaced_asterisk_is_multiplication() {
+        let lines = render("The product 2 * 3 * 4 is 24.");
+        let spans = &lines[0].spans;
+        assert!(
+            !spans
+                .iter()
+                .any(|span| span.style.add_modifier.contains(Modifier::ITALIC)),
+            "{spans:?}"
+        );
+        let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(text, "The product 2 * 3 * 4 is 24.");
+
+        // A word between asterisks is still emphasis, intraword too.
+        for (source, emphasised) in [("say *this* now", "this"), ("a*b*c", "b")] {
+            let lines = render(source);
+            assert!(
+                lines[0].spans.iter().any(|span| {
+                    span.content == emphasised && span.style.add_modifier.contains(Modifier::ITALIC)
+                }),
+                "{source}: {:?}",
+                lines[0].spans
+            );
+        }
     }
 
     #[test]
