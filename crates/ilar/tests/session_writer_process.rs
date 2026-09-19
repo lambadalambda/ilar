@@ -79,7 +79,7 @@ fn process_lock_helper() {
                 .err()
                 .expect("another process owns the writer lease");
             assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-            assert!(error.to_string().contains("already active"));
+            assert!(error.to_string().contains("is held by"));
         }
         "hold" => {
             let _writer = store.acquire_writer(&id).unwrap();

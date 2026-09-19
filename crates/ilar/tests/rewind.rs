@@ -268,7 +268,7 @@ async fn an_active_writer_rejects_the_rewind_before_any_git_work() {
     let error = rewind_session(&store, &id, cut, &target, &root)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("already active"), "{error}");
+    assert!(error.to_string().contains("is held by"), "{error}");
     // The tree was not touched: the lease is taken before any git work.
     assert_eq!(
         std::fs::read_to_string(root.join("code.txt")).unwrap(),
