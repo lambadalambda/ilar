@@ -921,9 +921,11 @@ impl TransportEventMapper for OpenAiMapper {
                             Some(_) => {}
                             None => {
                                 if entry.id.is_empty() {
-                                    return Err(
-                                        "OpenAI-compatible tool name arrived before id".into()
-                                    );
+                                    return Err(format!(
+                                        "OpenAI-compatible tool call {index} named {name:?} \
+                                         with no id: this server omits the call id the wire \
+                                         uses to pair a call with its result"
+                                    ));
                                 }
                                 // The wire index is the order truncation
                                 // completes the calls in.

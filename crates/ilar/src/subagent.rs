@@ -989,9 +989,10 @@ impl SubagentSpawner {
         if self.running.fetch_add(1, Ordering::SeqCst) >= self.max_concurrent {
             self.running.fetch_sub(1, Ordering::SeqCst);
             return ToolOutput::error(format!(
-                "task: concurrent subagent limit reached ({}/{}); do not retry — finish other \
-                 work first, then try again",
-                self.max_concurrent, self.max_concurrent
+                "task: already running {} tasks, which is the limit. Calling again now fails \
+                 the same way. Wait for one to finish — `tasks` lists them, and a result \
+                 reaches you on its own — and spawn then.",
+                self.max_concurrent
             ));
         }
         let _guard = SlotGuard(self.running.clone());

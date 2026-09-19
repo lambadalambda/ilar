@@ -266,8 +266,11 @@ impl Tool for ServiceTool {
                             existing.refresh();
                             if existing.running() {
                                 return ToolOutput::error(format!(
-                                    "service {name}: already running (pid group {:?}); stop it first",
-                                    existing.group
+                                    "service {name}: already running{}; stop it first",
+                                    existing
+                                        .group
+                                        .map(|pid| format!(" (process group {pid})"))
+                                        .unwrap_or_default()
                                 ));
                             }
                             // The entry is about to be replaced, and with
@@ -512,7 +515,17 @@ mod tests {
 
 fn describe(name: &str, entry: &ServiceEntry) -> String {
     match (&entry.exited, entry.group) {
-        (Some(exit), _) => format!("{name}: stopped ({exit}) · was: {}", entry.command),
+        // The command it was started with has exited, but the group it
+        // opened has not: a service that daemonizes leaves the shell
+        // dead and the server running. Calling that "stopped" invites
+        // a restart that then collides with what is still listening.
+        (Some(exit), Some(pid)) => format!(
+            "{name}: started process exited ({exit}) but its group is still running \
+             (process group {pid}) · up {} · {}",
+            format_uptime(entry.started.elapsed()),
+            entry.command
+        ),
+        (Some(exit), None) => format!("{name}: stopped ({exit}) · was: {}", entry.command),
         (None, group) => format!(
             "{name}: running (pid {}) · up {} · {}",
             group
