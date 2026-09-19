@@ -459,7 +459,7 @@ impl SessionStore {
         // repeated deletion of the same session is a pathology, not a
         // state to wait out.
         for _ in 0..LOCK_IDENTITY_ATTEMPTS {
-            let file = OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
                 .read(true)
@@ -474,9 +474,7 @@ impl SessionStore {
                     {
                         std::io::Error::new(
                             std::io::ErrorKind::WouldBlock,
-                            format!(
-                                "session {id} already active in another turn (its driver may be another ilar process)"
-                            ),
+                            format!("session {id} is held by {}", holder(&mut file)),
                         )
                     } else {
                         error
@@ -488,6 +486,10 @@ impl SessionStore {
                 drop(file);
                 continue;
             }
+            // Say who holds it, so the refusal above can name a
+            // process rather than a possibility. Best effort: a lock
+            // that cannot be written is still a lock.
+            let _ = write_holder(&file);
             return Ok(SessionWriter {
                 _file: file,
                 session_path: self.session_path_for(&id),
@@ -501,7 +503,44 @@ impl SessionStore {
             format!("session {id} is being deleted out from under its lock"),
         ))
     }
+}
 
+/// Who holds a session's lock, as the lock file says. The line is
+/// written by the winner right after it takes the lock; a lock from an
+/// older ilar, or one whose holder died between locking and writing,
+/// says nothing and gets the old wording — which is still true, just
+/// less useful.
+fn holder(file: &mut File) -> String {
+    let mut text = String::new();
+    let read = file
+        .seek(std::io::SeekFrom::Start(0))
+        .and_then(|_| file.read_to_string(&mut text));
+    if read.is_err() {
+        return "another turn (its driver may be another ilar process)".into();
+    }
+    let mut lines = text.lines();
+    match (lines.next(), lines.next()) {
+        (Some(pid), Some(since)) if !pid.is_empty() => {
+            format!("process {pid}, which took it at {since}")
+        }
+        _ => "another turn (its driver may be another ilar process)".into(),
+    }
+}
+
+/// Stamp this process onto the lock it just won.
+fn write_holder(file: &File) -> std::io::Result<()> {
+    let line = format!(
+        "{}\n{}\n",
+        std::process::id(),
+        chrono::Utc::now().to_rfc3339()
+    );
+    file.set_len(0)?;
+    (&*file).seek(std::io::SeekFrom::Start(0))?;
+    (&*file).write_all(line.as_bytes())?;
+    (&*file).flush()
+}
+
+impl SessionStore {
     /// Create a new session; writes the Meta event as the first line.
     /// A root session with a launch directory also becomes that
     /// directory's answer to "what was I last doing here?".
