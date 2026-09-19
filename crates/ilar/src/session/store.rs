@@ -1076,7 +1076,7 @@ fn read_replay(
     if let Ok(replay) = read_indexed_replay(file, path, replay_index_path, id) {
         return Ok(replay);
     }
-    let canonical = read_events(file, path, id, repair_tail)?;
+    let canonical = read_events(file, path, id, repair_tail, cancelled)?;
     let canonical_event_count = canonical.events.len();
     let (effective_model, effective_variant, todo_list, topic) = replay_state(&canonical.events);
     let (events, event_base) = if repair_tail {
@@ -1306,6 +1306,7 @@ fn read_events(
     path: &std::path::Path,
     id: &str,
     repair_tail: bool,
+    cancelled: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<CanonicalReplay> {
     let expected = file_stamp(&file.metadata()?)?;
     if file_stamp(&std::fs::metadata(path)?)? != expected {
