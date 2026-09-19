@@ -99,6 +99,10 @@ const MAX_COALESCED_DELTA_BYTES: usize = 16 * 1024;
 pub struct LoopEventSender {
     sender: tokio::sync::mpsc::Sender<LoopEvent>,
     terminal: Option<tokio::sync::mpsc::OwnedPermit<LoopEvent>>,
+    /// Raised once `TurnStarted` is actually on the channel. From then
+    /// on the receiver is owed a terminal event, and the debt is paid
+    /// on drop if the turn did not pay it itself — see [`Drop`].
+    started: std::sync::atomic::AtomicBool,
     progress:
         std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, ToolProgressSnapshot>>>,
     tails: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
@@ -138,6 +142,7 @@ pub fn loop_event_channel(capacity: usize) -> (LoopEventSender, LoopEventReceive
         LoopEventSender {
             sender,
             terminal: Some(terminal),
+            started: std::sync::atomic::AtomicBool::new(false),
             progress: progress.clone(),
             tails: tails.clone(),
             progress_wake,
@@ -164,11 +169,19 @@ impl LoopEventSender {
         event: LoopEvent,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> bool {
-        tokio::select! {
+        let starts = matches!(event, LoopEvent::TurnStarted);
+        let sent = tokio::select! {
             biased;
             () = cancel.cancelled() => false,
             result = self.sender.send(event) => result.is_ok(),
+        };
+        // Only a start that actually landed opens the debt; a publish
+        // the cancellation won leaves the receiver expecting nothing.
+        if starts && sent {
+            self.started
+                .store(true, std::sync::atomic::Ordering::Release);
         }
+        sent
     }
 
     /// Publish a cumulative progress snapshot without slowing the provider stream.
@@ -199,6 +212,29 @@ impl LoopEventSender {
         }
         self.progress.lock().unwrap().clear();
         self.tails.lock().unwrap().clear();
+    }
+}
+
+/// A turn that announced itself owes the channel its ending. Rather
+/// than auditing every `?` in the loop — one missed site is a consumer
+/// that waits forever on a stream that simply stopped — the debt is
+/// settled here: whatever happened, the sender cannot go out of scope
+/// after `TurnStarted` without a terminal event behind it. A turn that
+/// published its own has already taken the permit, so this does
+/// nothing; a turn that returned early, panicked, or was dropped
+/// mid-flight gets [`TurnOutcome::Aborted`], which is what "it stopped
+/// without finishing" means to every consumer. The error itself
+/// reaches the caller through the returned `Result`, not through here.
+impl Drop for LoopEventSender {
+    fn drop(&mut self) {
+        if !self.started.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        if let Some(permit) = self.terminal.take() {
+            let _ = permit.send(LoopEvent::TurnDone {
+                outcome: crate::agent::TurnOutcome::Aborted,
+            });
+        }
     }
 }
 
