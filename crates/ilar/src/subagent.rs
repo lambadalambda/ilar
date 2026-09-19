@@ -4211,6 +4211,23 @@ mod tests {
             "a claimed queue leaves no file behind"
         );
 
+        // The window the mirror exists for: a run has taken the queue
+        // into its prompt but has not committed it, and the process
+        // dies. What it took is still owed, so the next one finds it.
+        let mid_turn = mirrored();
+        mid_turn.queue("other", "say the thing".into());
+        let (_receiver, run) = mid_turn.open("other");
+        assert_eq!(run.prompt(""), "say the thing");
+        assert_eq!(
+            mirrored().pending("other"),
+            1,
+            "a crash mid-turn lost what the run had claimed"
+        );
+        // A message sent while that run is in flight is owed too.
+        mid_turn.queue("other", "and this".into());
+        assert_eq!(mirrored().pending("other"), 2);
+        std::mem::forget(run);
+
         // Without a directory nothing is written, and nothing breaks.
         let plain = ChildSteers::default();
         plain.queue("child", "held in memory".into());
