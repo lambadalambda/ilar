@@ -97,6 +97,9 @@ answer with one JSON object and nothing else: {{\"memory\": [{{\"file\": \"user\
 \"action\": \"add\" or \"replace\" or \"remove\", \"text\": \"…\", \"old\": \"…\", \"new\": \
 \"…\"}}], \"notes\": [{{\"kind\": \"decision\"|\"solution\"|\"preference\"|\"event\"|\"task\"|\
 \"risk\", \"title\": \"…\", \"summary\": \"one line\", \"body\": \"the fact in full\"}}]}}. \
+A note the conversation changed or disproved is not a second note: search the archive first, \
+and answer with {{\"action\": \"amend\", \"id\": \"…\"}} plus the fields to change, or \
+{{\"action\": \"forget\", \"id\": \"…\"}}, in the same notes list. \
 {} \
 Memory entries are one short line each and the files are small: prefer replace over add \
 when an entry is already about the same thing. A workflow worth repeating is a skill, not a \
@@ -154,11 +157,35 @@ fn default_file() -> CoreFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NoteDraft {
-    pub kind: NoteKind,
-    pub title: String,
-    pub summary: String,
+    /// `note` (the default), `amend` or `forget`; the last two name a
+    /// note by `id` instead of describing a new one.
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub kind: Option<NoteKind>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
+}
+
+impl NoteDraft {
+    fn action(&self) -> &str {
+        self.action.as_deref().unwrap_or("note")
+    }
+
+    /// What the chat is told this draft is about: the title, or the id
+    /// for a draft that only names one.
+    fn subject(&self) -> String {
+        self.title
+            .clone()
+            .or_else(|| self.id.clone())
+            .unwrap_or_else(|| "?".into())
+    }
 }
 
 /// What the review's answer amounted to.
@@ -221,7 +248,14 @@ impl Plan {
             lines.push(format!("{}: {what}", file_name(edit.file)));
         }
         for note in &self.notes {
-            lines.push(format!("note ({}): {}", kind_name(note.kind), note.title));
+            lines.push(match note.action() {
+                "note" => format!(
+                    "note ({}): {}",
+                    note.kind.map(kind_name).unwrap_or("?"),
+                    note.subject()
+                ),
+                other => format!("note {other}: {}", note.subject()),
+            });
         }
         for skill in &self.skills {
             lines.push(format!("skill {}: {}", skill.action, skill.name));
@@ -289,19 +323,41 @@ impl Plan {
             }
         }
         for note in &self.notes {
-            match store.note(
-                note.kind,
-                &note.title,
-                &note.summary,
-                note.body.as_deref().unwrap_or(&note.summary),
-                Utc::now(),
-            ) {
-                Ok(written) => outcome
-                    .kept
-                    .push(format!("note {}: {}", written.id, note.title)),
+            let result = match (note.action(), note.id.as_deref()) {
+                ("note", _) => match (note.kind, note.title.as_deref(), note.summary.as_deref()) {
+                    (Some(kind), Some(title), Some(summary)) => store
+                        .note(
+                            kind,
+                            title,
+                            summary,
+                            note.body.as_deref().unwrap_or(summary),
+                            Utc::now(),
+                        )
+                        .map(|written| format!("note {}: {title}", written.id)),
+                    _ => Err(anyhow::anyhow!("a note needs kind, title and summary")),
+                },
+                ("amend", Some(id)) => store
+                    .amend(
+                        id,
+                        ilar::memory::Amendment {
+                            kind: note.kind,
+                            title: note.title.as_deref(),
+                            summary: note.summary.as_deref(),
+                            body: note.body.as_deref(),
+                        },
+                    )
+                    .map(|amended| format!("note {id} amended: {}", amended.title)),
+                ("forget", Some(id)) => store.forget(id).map(|()| format!("note {id} forgotten")),
+                ("amend" | "forget", None) => {
+                    Err(anyhow::anyhow!("{} needs the note's id", note.action()))
+                }
+                (other, _) => Err(anyhow::anyhow!("unknown note action {other:?}")),
+            };
+            match result {
+                Ok(line) => outcome.kept.push(line),
                 Err(error) => outcome
                     .failed
-                    .push(format!("note {}: {error:#}", note.title)),
+                    .push(format!("note {}: {error:#}", note.subject())),
             }
         }
         outcome
@@ -437,6 +493,57 @@ mod tests {
     fn the_review_prompt_carries_the_summary_rule() {
         assert!(PROMPT.contains(SUMMARY_RULE));
         assert!(PROMPT.contains("\"summary\": \"one line\""));
+    }
+
+    /// A conversation that changed a fact does not file a second note
+    /// about it: the reviewer amends the one that is there, and
+    /// retires one the work disproved.
+    #[test]
+    fn a_review_amends_and_forgets_the_notes_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let skills = crate::skills::SkillLibrary::new(dir.path().join("skills"));
+        let now = Utc::now();
+        let moved = store
+            .note(NoteKind::Decision, "Deploy box", "on tenco", "old", now)
+            .unwrap();
+        let wrong = store
+            .note(
+                NoteKind::Risk,
+                "Disk",
+                "the disk is nearly full",
+                "80%",
+                now,
+            )
+            .unwrap();
+
+        let plan = Plan::parse(&format!(
+            "{{\"notes\": [\
+             {{\"action\": \"amend\", \"id\": \"{}\", \"summary\": \"on secunda now\"}}, \
+             {{\"action\": \"forget\", \"id\": \"{}\"}}, \
+             {{\"action\": \"forget\"}}]}}",
+            moved.id, wrong.id
+        ))
+        .expect("a plan");
+        let described = plan.describe();
+        assert_eq!(described[0], format!("note amend: {}", moved.id));
+        assert_eq!(described[1], format!("note forget: {}", wrong.id));
+
+        let applied = plan.apply(&store, &skills);
+        assert_eq!(
+            applied.kept,
+            [
+                format!("note {} amended: Deploy box", moved.id),
+                format!("note {} forgotten", wrong.id),
+            ]
+        );
+        assert_eq!(applied.failed.len(), 1, "{:?}", applied.failed);
+        assert!(applied.failed[0].contains("needs the note's id"));
+
+        let left = store.notes().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].summary, "on secunda now");
+        assert_eq!(left[0].id, moved.id, "amended, not replaced");
     }
 
     #[test]
