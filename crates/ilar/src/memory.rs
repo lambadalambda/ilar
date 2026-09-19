@@ -60,14 +60,53 @@ pub static PROMPT_SECTION: LazyLock<String> = LazyLock::new(|| {
 });
 
 /// Where a terminal session launched from `cwd` keeps its memory:
-/// `<state dir>/memory/<slug>/`, the slug being the canonical launch
-/// directory spelled as one path component. Two spellings of one
-/// directory share a memory; a subdirectory of a checkout is another
-/// directory, as it is for sessions. Nothing is created here — the
-/// first write makes the directory.
+/// `<state dir>/memory/<slug>/`. The key is the project, not the
+/// directory — inside a repository it is the repository's common git
+/// directory, so every worktree of it and every directory inside one
+/// remember together, and outside a repository it is the canonical
+/// launch directory. Nothing is created here; the first write makes
+/// the directory.
 pub fn dir_for(state_dir: &Path, cwd: &Path) -> PathBuf {
+    state_dir.join("memory").join(slug(&memory_key(cwd)))
+}
+
+fn memory_key(cwd: &Path) -> PathBuf {
     let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-    state_dir.join("memory").join(slug(&canonical))
+    common_git_dir(&canonical).unwrap_or(canonical)
+}
+
+/// The repository's common git directory — the main checkout's
+/// `.git` — reached from anywhere inside it. Read from the files git
+/// keeps there rather than by running git: a `.git` directory is the
+/// answer unless it names a common one, and a linked worktree's
+/// `.git` is a file that names its own git directory, which does.
+/// `None` when there is no repository above `from`.
+fn common_git_dir(from: &Path) -> Option<PathBuf> {
+    let git = from
+        .ancestors()
+        .map(|dir| dir.join(".git"))
+        .find(|path| path.exists())?;
+    let git_dir = if git.is_dir() {
+        git
+    } else {
+        let text = std::fs::read_to_string(&git).ok()?;
+        resolve(git.parent()?, text.trim().strip_prefix("gitdir:")?.trim())
+    };
+    let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(text) => resolve(&git_dir, text.trim()),
+        Err(_) => git_dir,
+    };
+    common.canonicalize().ok()
+}
+
+/// A path git wrote down, which may be relative to the file it was in.
+fn resolve(base: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
 }
 
 /// How much of the path the slug keeps, from its end — the part a
@@ -78,10 +117,17 @@ const SLUG_CHARS: usize = 100;
 /// A path as one file name: separators and anything outside
 /// `[A-Za-z0-9._-]` become `-`, the last [`SLUG_CHARS`] of that are
 /// kept, and a short hash of the whole path is appended so `a/b` and
-/// `a-b` cannot land in one directory.
+/// `a-b` cannot land in one directory. A repository is shown by its
+/// checkout and not by the `.git` inside it, while the hash stays
+/// over the key, so the two cannot be confused for one another.
 fn slug(path: &Path) -> String {
     let text = path.to_string_lossy();
-    let flat: String = text
+    let shown = match path.file_name() {
+        Some(name) if name == ".git" => path.parent().unwrap_or(path),
+        _ => path,
+    }
+    .to_string_lossy();
+    let flat: String = shown
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
