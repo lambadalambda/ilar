@@ -406,10 +406,29 @@ impl SessionStore {
     /// indexes. Unlike `load`, rewind markers are not folded out: the
     /// audit view keeps every line, including abandoned tails.
     pub fn audit_events(&self, id: &str) -> std::io::Result<Vec<SessionEvent>> {
+        self.audit_events_until(id, &NEVER)
+    }
+
+    /// [`audit_events`](Self::audit_events) that gives up when
+    /// `cancelled` is raised. A long archive is a long parse, and a
+    /// caller who has gone away — a tool call abandoned, a preview
+    /// scrolled past — should not still be paying for it. The error is
+    /// [`std::io::ErrorKind::Interrupted`], which is a stop and not a
+    /// failure of the log.
+    pub fn audit_events_until(
+        &self,
+        id: &str,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> std::io::Result<Vec<SessionEvent>> {
         let id = SessionId::parse(id)?;
         let path = self.session_path_for(&id);
         let bytes = std::fs::read(&path)?;
-        parse_event_bytes(&bytes[..committed_len(&bytes)], id.as_str(), 0)
+        Ok(
+            parse_event_lines_until(&bytes[..committed_len(&bytes)], id.as_str(), 0, cancelled)?
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect(),
+        )
     }
 
     pub fn acquire_writer(&self, id: &str) -> std::io::Result<SessionWriter> {
@@ -1203,8 +1222,32 @@ pub(super) fn parse_event_lines(
     id: &str,
     line_offset: usize,
 ) -> std::io::Result<Vec<(usize, SessionEvent)>> {
+    parse_event_lines_until(bytes, id, line_offset, &NEVER)
+}
+
+/// A flag nothing raises, for the readers nobody can walk away from.
+static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How often a cancellable parse asks whether it is still wanted. Often
+/// enough that a caller does not wait on a whole archive, rarely enough
+/// that the load costs nothing next to parsing the lines between.
+const CANCEL_EVERY: usize = 256;
+
+/// [`parse_event_lines`] that stops when `cancelled` is raised.
+pub(super) fn parse_event_lines_until(
+    bytes: &[u8],
+    id: &str,
+    line_offset: usize,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> std::io::Result<Vec<(usize, SessionEvent)>> {
     let mut events = Vec::new();
     for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+        if index % CANCEL_EVERY == 0 && cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                format!("session {id}: read stopped; nobody is waiting for it"),
+            ));
+        }
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }

@@ -16,12 +16,20 @@ use crate::session::SessionStore;
 const CONTEXT_ENTRY_CHARS: usize = 400;
 /// Events either side of a hit when reading around it.
 const CONTEXT_RADIUS: usize = 2;
+/// Rows one listing returns, and the characters they may add up to.
+/// Every row is bounded on its own, but a long session's user messages
+/// alone outgrow the window they were asked for; what does not fit is
+/// named and reachable with `after`.
+const MAX_LISTED: usize = 50;
+const MAX_LISTING_CHARS: usize = 16_000;
 
 #[derive(serde::Deserialize)]
 struct Input {
     query: Option<String>,
     event: Option<u64>,
     speaker: Option<String>,
+    /// Listing only: continue after this event index.
+    after: Option<u64>,
 }
 
 pub struct HistoryTool {
@@ -73,9 +81,20 @@ fn render_context(entries: &[recall::Entry], event: usize) -> String {
         .join("\n")
 }
 
-fn render_listing(entries: &[recall::Entry], speaker: recall::Speaker) -> String {
+fn render_listing(
+    entries: &[recall::Entry],
+    speaker: recall::Speaker,
+    left: usize,
+    after: Option<usize>,
+) -> String {
     if entries.is_empty() {
-        return format!("this session has nothing from {}", speaker.label());
+        return match after {
+            Some(after) => format!(
+                "nothing from {} after event {after} in this session",
+                speaker.label()
+            ),
+            None => format!("this session has nothing from {}", speaker.label()),
+        };
     }
     let mut lines = vec![format!(
         "{} entr(ies) from {}, oldest first:",
@@ -84,6 +103,13 @@ fn render_listing(entries: &[recall::Entry], speaker: recall::Speaker) -> String
     )];
     for entry in entries {
         lines.push(format!("event {}: {}", entry.event, entry.text));
+    }
+    if left > 0 {
+        let last = entries.last().map(|entry| entry.event).unwrap_or(0);
+        lines.push(format!(
+            "({left} more not shown; pass after={last} for the next page, or use query to \
+             narrow)"
+        ));
     }
     lines.join("\n")
 }
@@ -126,6 +152,10 @@ impl Tool for HistoryTool {
                     "type": ["string", "null"],
                     "enum": ["user", "assistant", "thinking", "tool_call", "tool_result", "summary", "topic", null],
                     "description": "Narrow a search to one speaker, or list everything one said when there is no query. `speaker: \"user\"` alone lists the instructions you were given."
+                },
+                "after": {
+                    "type": ["integer", "null"],
+                    "description": "Listing only: continue after this event index, as the end of a truncated listing tells you to."
                 }
             }
         })
@@ -140,6 +170,7 @@ impl Tool for HistoryTool {
                 query,
                 event,
                 speaker: speaker_word,
+                after,
             } = match parse_input(input, "history") {
                 Ok(input) => input,
                 Err(error) => return error,
@@ -161,10 +192,21 @@ impl Tool for HistoryTool {
             }
             // Its own session only, matching the resume guard: no
             // session reads another's log.
-            let entries = match recall::session_entries(&store, &ctx.session_id) {
-                Ok(entries) => entries,
+            //
+            // The archive is read on the blocking pool: a long session
+            // is megabytes of JSONL, and parsing it on a runtime worker
+            // stalls every other task that worker was holding. The
+            // scan stops on its own if this call is abandoned.
+            let session_id = ctx.session_id.clone();
+            let read = super::blocking_scan(move |cancelled| {
+                recall::session_entries_until(&store, &session_id, &cancelled)
+            })
+            .await;
+            let entries = match read {
+                Ok(Ok(entries)) => entries,
+                Ok(Err(error)) => return ToolOutput::error(format!("history: {error}")),
                 Err(error) => {
-                    return ToolOutput::error(format!("history: {error}"));
+                    return ToolOutput::error(format!("history: reading the session: {error}"));
                 }
             };
             match (query, event) {
@@ -183,7 +225,10 @@ impl Tool for HistoryTool {
                 (None, None) => match speaker {
                     Some(speaker) => {
                         let listed = recall::by_speaker(&entries, speaker, CONTEXT_ENTRY_CHARS);
-                        ToolOutput::text(render_listing(&listed, speaker))
+                        let after = after.map(|after| after as usize);
+                        let (page, left) =
+                            recall::page(&listed, after, MAX_LISTED, MAX_LISTING_CHARS);
+                        ToolOutput::text(render_listing(&page, speaker, left, after))
                     }
                     None => ToolOutput::error("history: needs a query, an event, or a speaker"),
                 },
@@ -220,5 +265,50 @@ mod tests {
             render_matches(&[], "nothing").contains("no earlier mention"),
             "empty result is not an error"
         );
+    }
+
+    fn said(event: usize, text: &str) -> recall::Entry {
+        recall::Entry {
+            event,
+            speaker: recall::Speaker::User,
+            text: text.into(),
+        }
+    }
+
+    /// A listing that does not fit says so, and says how to see the
+    /// rest — a truncated answer the model cannot tell is truncated is
+    /// worse than a short one.
+    #[test]
+    fn a_listing_that_is_cut_says_how_to_go_on() {
+        let entries: Vec<recall::Entry> =
+            (1..=6).map(|n| said(n * 10, &format!("ask {n}"))).collect();
+
+        let (page, left) = recall::page(&entries, None, 2, MAX_LISTING_CHARS);
+        assert_eq!(left, 4);
+        let rendered = render_listing(&page, recall::Speaker::User, left, None);
+        assert!(rendered.contains("event 10: ask 1"), "{rendered}");
+        assert!(rendered.contains("event 20: ask 2"), "{rendered}");
+        assert!(!rendered.contains("ask 3"), "{rendered}");
+        assert!(
+            rendered.contains("(4 more not shown; pass after=20"),
+            "{rendered}"
+        );
+
+        // The next page continues where that one stopped.
+        let (next, left) = recall::page(&entries, Some(20), 2, MAX_LISTING_CHARS);
+        assert_eq!(left, 2);
+        assert_eq!(next.first().map(|entry| entry.event), Some(30));
+
+        // The aggregate cap bites before the row cap when rows are big,
+        // and one row always travels however long it is.
+        let long = vec![said(1, &"x".repeat(500)), said(2, "short")];
+        let (page, left) = recall::page(&long, None, 50, 100);
+        assert_eq!((page.len(), left), (1, 1), "one row still travels");
+
+        // A page past the end says so without pretending it is empty.
+        let (none, left) = recall::page(&entries, Some(60), 50, MAX_LISTING_CHARS);
+        assert_eq!((none.len(), left), (0, 0));
+        let rendered = render_listing(&none, recall::Speaker::User, left, Some(60));
+        assert!(rendered.contains("after event 60"), "{rendered}");
     }
 }

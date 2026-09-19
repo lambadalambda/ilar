@@ -281,6 +281,48 @@ pub fn session_entries(store: &SessionStore, session_id: &str) -> std::io::Resul
     Ok(entries(&store.audit_events(session_id)?))
 }
 
+/// [`session_entries`] that gives up when `cancelled` is raised, for a
+/// reader running on the blocking pool whose caller may walk away.
+pub fn session_entries_until(
+    store: &SessionStore,
+    session_id: &str,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> std::io::Result<Vec<Entry>> {
+    Ok(entries(&store.audit_events_until(session_id, cancelled)?))
+}
+
+/// One page of a listing: the entries after `after`, capped by how many
+/// rows and by the characters they add up to. A single row always
+/// travels, however long it is, so a huge entry is truncated rather
+/// than silently skipped. Returns the page and how many entries it left
+/// behind after it.
+pub fn page(
+    entries: &[Entry],
+    after: Option<usize>,
+    max_rows: usize,
+    max_chars: usize,
+) -> (Vec<Entry>, usize) {
+    let rest: Vec<&Entry> = entries
+        .iter()
+        .filter(|entry| after.is_none_or(|first| entry.event > first))
+        .collect();
+    let mut page: Vec<Entry> = Vec::new();
+    let mut chars = 0;
+    for entry in &rest {
+        if page.len() >= max_rows {
+            break;
+        }
+        let length = entry.text.chars().count();
+        if !page.is_empty() && chars + length > max_chars {
+            break;
+        }
+        chars += length;
+        page.push((*entry).clone());
+    }
+    let left = rest.len() - page.len();
+    (page, left)
+}
+
 /// Every hit one session produced for a query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionHits {
