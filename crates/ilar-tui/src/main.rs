@@ -5418,6 +5418,65 @@ async fn run_app(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Both background replays stop when nobody wants them any more,
+    /// and the stopping is the drop itself — the arrow keys start a
+    /// loader per row, and before this each one parsed a whole archive
+    /// on a blocking thread for a row already off screen.
+    #[test]
+    fn an_abandoned_replay_is_told_to_stop() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut preview = Some(super::PreviewTask {
+            generation: 1,
+            session: "a".into(),
+            rx: std::sync::mpsc::channel().1,
+            cancel: cancel.clone(),
+        });
+        assert!(!cancel.load(Ordering::Acquire), "it starts wanted");
+        // The selection moved on: a newer load replaces this one.
+        preview = Some(super::PreviewTask {
+            generation: 1,
+            session: "b".into(),
+            rx: std::sync::mpsc::channel().1,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        assert!(
+            cancel.load(Ordering::Acquire),
+            "the replaced loader was never told to stop"
+        );
+        // And closing the modal stops the newest one too.
+        let last = preview.as_ref().map(|task| task.cancel.clone()).unwrap();
+        preview = None;
+        assert!(last.load(Ordering::Acquire), "{:?}", preview.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_focus_seed_is_told_to_stop() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let seed = super::FocusSeedTask {
+            session: "child".into(),
+            handle: tokio::task::spawn_blocking(|| Ok(Vec::new())),
+            cancel: cancel.clone(),
+        };
+        // Retargeting focus drops the seed in flight.
+        drop(seed);
+        assert!(cancel.load(Ordering::Acquire));
+    }
+
+    /// A seed that was abandoned before it started says so rather than
+    /// paying for a replay nobody will read.
+    #[test]
+    fn a_cancelled_seed_does_not_read_the_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ilar::session::SessionStore::new(dir.path().to_path_buf());
+        let cancel = AtomicBool::new(true);
+        let error = super::seed_agent_focus(&store, "no-such-session", false, &cancel)
+            .expect_err("a cancelled seed");
+        assert_eq!(error, "seed abandoned", "it never reached the store");
+    }
+
     #[test]
     fn a_focus_message_is_recorded_as_sent_to_its_target() {
         assert_eq!(
