@@ -13,9 +13,9 @@
 //!
 //! A store is a directory and nothing else, so who remembers is who
 //! owns the directory: the gateway keeps one under its home, and a
-//! terminal session keeps one per launch directory under the state
-//! directory ([`dir_for`]), the way its last-session pointer and its
-//! project instructions are already per directory.
+//! terminal session keeps one per project under the state directory
+//! ([`dir_for`]) — a repository and every worktree of it being one
+//! project, since that is what the parallel streams here are.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

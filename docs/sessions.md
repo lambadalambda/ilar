@@ -126,12 +126,20 @@ untouched, rather than replacing real history with something useless.
 
 Compaction carries a conversation forward; memory carries what was
 learned into the next one. A terminal session keeps one memory per
-launch directory, under `<state dir>/memory/<slug>/` where the slug is
-the canonical launch directory spelled as one name — two spellings of a
-directory share a memory, a subdirectory of a checkout is another
-directory, as for sessions — and nothing is created there until
-something is written. `general.memory = false` turns the whole thing
-off. The assistant ([ilar-gateway](gateway.md#memory-that-outlives-a-session))
+project, under `<state dir>/memory/<slug>/`, and nothing is created
+there until something is written. `general.memory = false` turns the
+whole thing off.
+
+The project is the repository, not the directory: inside a checkout
+the key is the repository's common git directory, so every worktree of
+it and every directory inside one remember together — the parallel
+streams a worktree is for are the same project, and what was learned
+in one is what the next needs. Outside a repository the key is the
+canonical launch directory, and two spellings of it share a memory.
+The slug shows the checkout it belongs to. Sessions still group by
+directory, so a memory and a session list need not cover the same
+ground; and a memory written under an older ilar, which keyed every
+directory separately, stays under its own slug. The assistant ([ilar-gateway](gateway.md#memory-that-outlives-a-session))
 keeps one memory under its home instead, with a few rules of its own.
 
 Two tiers. The core is two small files with hard caps, `MEMORY.md`
