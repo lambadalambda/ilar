@@ -169,6 +169,21 @@ impl NoteKind {
     }
 }
 
+/// Where a forgotten note goes: a subdirectory of `notes/`, which the
+/// listing skips because it is not a `.md` file.
+pub const FORGOTTEN: &str = ".forgotten";
+
+/// What an [`amend`](MemoryStore::amend) changes; `None` keeps what
+/// the note says. The id and `when` are not here: they are the note's
+/// identity and its age, and neither is a thing to rewrite.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Amendment<'a> {
+    pub kind: Option<NoteKind>,
+    pub title: Option<&'a str>,
+    pub summary: Option<&'a str>,
+    pub body: Option<&'a str>,
+}
+
 /// One archived fact, as read back from its file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Note {
@@ -483,31 +498,64 @@ impl MemoryStore {
         body: &str,
         when: DateTime<Utc>,
     ) -> Result<Note> {
-        let id = format!(
-            "{}-{}",
-            when.format("%Y%m%d"),
-            &crate::session::new_id()[..8]
-        );
-        let text = format!(
-            "---\nid: {id}\nkind: {}\ntitle: {}\nsummary: {}\nwhen: {}\n---\n\n{}\n",
-            kind.as_str(),
-            title.trim().replace('\n', " "),
-            summary.trim().replace('\n', " "),
-            when.to_rfc3339(),
-            body.trim()
-        );
-        write_atomically(
-            &self.dir.join("notes").join(format!("{id}.md")),
-            text.as_bytes(),
-        )?;
-        Ok(Note {
-            id,
+        let note = Note {
+            id: format!(
+                "{}-{}",
+                when.format("%Y%m%d"),
+                &crate::session::new_id()[..8]
+            ),
             kind: kind.as_str().into(),
-            title: title.trim().into(),
-            summary: summary.trim().into(),
+            title: one_line(title),
+            summary: one_line(summary),
             when,
             body: body.trim().into(),
-        })
+        };
+        write_atomically(&self.note_path(&note.id), note_file(&note).as_bytes())?;
+        Ok(note)
+    }
+
+    fn note_path(&self, id: &str) -> PathBuf {
+        self.dir.join("notes").join(format!("{id}.md"))
+    }
+
+    /// Rewrite a note in place, changing only what `change` names. The
+    /// id and `when` hold: a recall that named the note still names
+    /// it, and recency still measures from when the fact was learned,
+    /// not from when the words were fixed.
+    pub fn amend(&self, id: &str, change: Amendment<'_>) -> Result<Note> {
+        let _write = self.write.lock().unwrap();
+        let path = self.note_path(id);
+        let note = std::fs::read_to_string(&path)
+            .ok()
+            .as_deref()
+            .and_then(parse_note)
+            .ok_or_else(|| anyhow::anyhow!("no note with id {id}; ids come from memory_search"))?;
+        let kind = change.kind.map(NoteKind::as_str).unwrap_or(&note.kind);
+        let amended = Note {
+            kind: kind.to_string(),
+            title: field(change.title, &note.title),
+            summary: field(change.summary, &note.summary),
+            body: change.body.unwrap_or(&note.body).trim().to_string(),
+            ..note
+        };
+        write_atomically(&path, note_file(&amended).as_bytes())?;
+        Ok(amended)
+    }
+
+    /// Retire a note: out of the archive, so nothing searches, reads
+    /// or opens with it again — and into `notes/.forgotten/`, so a
+    /// note retired by mistake is a move away rather than gone.
+    pub fn forget(&self, id: &str) -> Result<()> {
+        let _write = self.write.lock().unwrap();
+        let path = self.note_path(id);
+        if !path.is_file() {
+            bail!("no note with id {id}; ids come from memory_search");
+        }
+        let kept = self.dir.join("notes").join(FORGOTTEN);
+        std::fs::create_dir_all(&kept).with_context(|| format!("creating {}", kept.display()))?;
+        let to = kept.join(format!("{id}.md"));
+        std::fs::rename(&path, &to).with_context(|| format!("forgetting note {id}"))?;
+        Ok(())
     }
 
     /// Append to today's daily note.
@@ -616,6 +664,29 @@ fn joined(lines: &[&str]) -> String {
         text.push('\n');
     }
     text
+}
+
+/// A note's file: frontmatter, then the body.
+fn note_file(note: &Note) -> String {
+    format!(
+        "---\nid: {}\nkind: {}\ntitle: {}\nsummary: {}\nwhen: {}\n---\n\n{}\n",
+        note.id,
+        note.kind,
+        note.title,
+        note.summary,
+        note.when.to_rfc3339(),
+        note.body
+    )
+}
+
+/// Frontmatter is one line per field, so a title or summary is one
+/// line whatever it arrived as.
+fn one_line(text: &str) -> String {
+    text.trim().replace('\n', " ")
+}
+
+fn field(new: Option<&str>, old: &str) -> String {
+    new.map(one_line).unwrap_or_else(|| old.to_string())
 }
 
 fn parse_note(text: &str) -> Option<Note> {
@@ -1323,7 +1394,13 @@ mod tests {
             )
             .unwrap();
         store
-            .note(NoteKind::Preference, "Tea", "likes earl grey", "no coffee", now)
+            .note(
+                NoteKind::Preference,
+                "Tea",
+                "likes earl grey",
+                "no coffee",
+                now,
+            )
             .unwrap();
         store.forget(&wrong.id).unwrap();
 
@@ -1337,7 +1414,10 @@ mod tests {
         assert!(store.search("tenco 8443", 10, now).unwrap().is_empty());
         assert!(store.get(&[wrong.id.clone()]).unwrap().is_empty());
         let index = store.opening_index(20, 4096, now).unwrap().unwrap();
-        assert!(index.contains("Tea") && !index.contains("Deploy box"), "{index}");
+        assert!(
+            index.contains("Tea") && !index.contains("Deploy box"),
+            "{index}"
+        );
         assert!(
             dir.path()
                 .join("notes")
