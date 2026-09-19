@@ -424,9 +424,11 @@ impl ChildSteers {
     /// message verb checks it after a resume it delegated declined, to
     /// say honestly that the message is parked rather than delivered.
     fn holds(&self, session_id: &str, text: &str) -> bool {
-        lock_unpoisoned(&self.steers)
-            .get(session_id)
-            .is_some_and(|entry| entry.pending.iter().any(|held| held == text))
+        let mut steers = lock_unpoisoned(&self.steers);
+        self.entry(&mut steers, session_id)
+            .pending
+            .iter()
+            .any(|held| held == text)
     }
 
     /// The child took this message at a step boundary, so it is waiting
@@ -446,9 +448,13 @@ impl ChildSteers {
 
     /// How many messages this task has not read yet.
     fn pending(&self, session_id: &str) -> usize {
-        lock_unpoisoned(&self.steers)
-            .get(session_id)
-            .map_or(0, |entry| entry.pending.len())
+        // Through `entry`, so a child this process has not touched yet
+        // is counted from the mirror rather than reported as owing
+        // nothing.
+        let mut steers = lock_unpoisoned(&self.steers);
+        let count = self.entry(&mut steers, session_id).pending.len();
+        Self::prune(&mut steers, session_id);
+        count
     }
 
     /// The turn is over: its channel is gone, and anything it took but
