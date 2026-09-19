@@ -1258,4 +1258,95 @@ mod tests {
         assert!(text.starts_with("# 2026-09-08\n"), "{text}");
         assert!(text.contains("## 12:00 — handover"), "{text}");
     }
+
+    /// A fact that changed is the same note with better words: the id
+    /// holds, so a recall that named it still names it, and `when`
+    /// holds, so recency still says when it was learned.
+    #[test]
+    fn an_amended_note_keeps_its_id_and_ranks_by_its_new_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let now = at("2026-09-19T12:00:00Z");
+        let note = store
+            .note(
+                NoteKind::Decision,
+                "Deploy box",
+                "the deploy box is tenco.local on port 8443",
+                "Behind the house firewall.",
+                now,
+            )
+            .unwrap();
+        let amended = store
+            .amend(
+                &note.id,
+                Amendment {
+                    summary: Some("the deploy box moved to secunda.local on port 9443"),
+                    body: Some("Moved 2026-09-19; tenco is the build box now."),
+                    ..Amendment::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(amended.id, note.id);
+        assert_eq!(amended.when, note.when);
+        assert_eq!(amended.kind, "decision");
+        assert_eq!(amended.title, "Deploy box", "what was not named is kept");
+        assert_eq!(store.notes().unwrap().len(), 1, "amended, not added");
+        let hit = |query| {
+            store
+                .search(query, 10, now)
+                .unwrap()
+                .first()
+                .map(|hit| hit.summary.clone())
+        };
+        assert!(hit("secunda").unwrap().contains("secunda.local"));
+        assert_eq!(hit("tenco").as_deref(), Some(amended.summary.as_str()));
+        assert_eq!(hit("8443"), None, "the old fact is gone from the index");
+        let unknown = store.amend("nope", Amendment::default()).unwrap_err();
+        assert!(unknown.to_string().contains("no note"), "{unknown}");
+    }
+
+    /// Forgetting is out of the archive, not off the disk: a note
+    /// retired by mistake is a move away, and a person can move it
+    /// back.
+    #[test]
+    fn a_forgotten_note_leaves_the_archive_and_stays_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let now = at("2026-09-19T12:00:00Z");
+        let wrong = store
+            .note(
+                NoteKind::Event,
+                "Deploy box",
+                "the deploy box is tenco.local on port 8443",
+                "Behind the house firewall.",
+                now,
+            )
+            .unwrap();
+        store
+            .note(NoteKind::Preference, "Tea", "likes earl grey", "no coffee", now)
+            .unwrap();
+        store.forget(&wrong.id).unwrap();
+
+        let left: Vec<String> = store
+            .notes()
+            .unwrap()
+            .into_iter()
+            .map(|note| note.title)
+            .collect();
+        assert_eq!(left, ["Tea"]);
+        assert!(store.search("tenco 8443", 10, now).unwrap().is_empty());
+        assert!(store.get(&[wrong.id.clone()]).unwrap().is_empty());
+        let index = store.opening_index(20, 4096, now).unwrap().unwrap();
+        assert!(index.contains("Tea") && !index.contains("Deploy box"), "{index}");
+        assert!(
+            dir.path()
+                .join("notes")
+                .join(FORGOTTEN)
+                .join(format!("{}.md", wrong.id))
+                .exists(),
+            "the file is kept where a person can find it"
+        );
+        let again = store.forget(&wrong.id).unwrap_err();
+        assert!(again.to_string().contains("no note"), "{again}");
+    }
 }
