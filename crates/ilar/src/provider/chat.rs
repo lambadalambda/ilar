@@ -577,6 +577,119 @@ struct StagedCall {
     early: Vec<usize>,
 }
 
+/// What a piece of the content stream turned out to be.
+#[derive(Debug, PartialEq, Eq)]
+enum Think {
+    Thinking(String),
+    /// The leading block closed; whatever follows is text.
+    Ended,
+    Text(String),
+}
+
+const OPEN: &str = "<think>";
+const CLOSE: &str = "</think>";
+
+/// A `<think>…</think>` block at the head of the content stream.
+///
+/// MiniMax M3 (and older Qwen builds) put their reasoning in the
+/// content itself rather than in a `reasoning_content` delta, so
+/// without this a transcript opens with the model's notes to itself
+/// and the fold that hides thinking never sees them. Only a *leading*
+/// block counts: a model that quotes the tag later in its answer is
+/// writing about it, not thinking out loud.
+///
+/// A tag may arrive split across deltas, so the undecided head is held
+/// until it can be told apart — and, inside the block, a tail that
+/// could still become `</think>` is held the same way.
+#[derive(Debug, Default)]
+struct LeadingThink {
+    state: ThinkState,
+    held: String,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum ThinkState {
+    /// Nothing yet that says whether this stream opens with a block.
+    #[default]
+    Undecided,
+    Inside,
+    /// Decided, either way: the rest of the stream is text.
+    Done,
+}
+
+impl LeadingThink {
+    fn push(&mut self, delta: &str) -> Vec<Think> {
+        let mut out = Vec::new();
+        self.held.push_str(delta);
+        if self.state == ThinkState::Undecided {
+            let trimmed = self.held.trim_start();
+            if let Some(rest) = trimmed.strip_prefix(OPEN) {
+                self.state = ThinkState::Inside;
+                self.held = rest.to_string();
+            } else if trimmed.is_empty() || OPEN.starts_with(trimmed) {
+                // Still could become the tag; nothing to say yet.
+                return out;
+            } else {
+                self.state = ThinkState::Done;
+                out.push(Think::Text(std::mem::take(&mut self.held)));
+                return out;
+            }
+        }
+        if self.state == ThinkState::Inside {
+            match self.held.find(CLOSE) {
+                Some(at) => {
+                    let thought = self.held[..at].to_string();
+                    let after = self.held[at + CLOSE.len()..].trim_start().to_string();
+                    self.held.clear();
+                    self.state = ThinkState::Done;
+                    if !thought.is_empty() {
+                        out.push(Think::Thinking(thought));
+                    }
+                    out.push(Think::Ended);
+                    if !after.is_empty() {
+                        out.push(Think::Text(after));
+                    }
+                }
+                None => {
+                    // Hold back only what could still open the close tag.
+                    let keep = partial_tag_at_end(&self.held, CLOSE);
+                    let thought: String = self.held[..self.held.len() - keep].to_string();
+                    self.held = self.held[self.held.len() - keep..].to_string();
+                    if !thought.is_empty() {
+                        out.push(Think::Thinking(thought));
+                    }
+                }
+            }
+            return out;
+        }
+        if !self.held.is_empty() {
+            out.push(Think::Text(std::mem::take(&mut self.held)));
+        }
+        out
+    }
+
+    /// The content stream is over — a tool call, a finish, the end.
+    /// Whatever is still held is what it is, tag-shaped or not.
+    fn flush(&mut self) -> Vec<Think> {
+        let held = std::mem::take(&mut self.held);
+        let state = std::mem::replace(&mut self.state, ThinkState::Done);
+        match state {
+            ThinkState::Inside if held.is_empty() => vec![Think::Ended],
+            ThinkState::Inside => vec![Think::Thinking(held), Think::Ended],
+            _ if held.is_empty() => Vec::new(),
+            _ => vec![Think::Text(held)],
+        }
+    }
+}
+
+/// How many bytes at the end of `text` are a proper prefix of `tag`.
+fn partial_tag_at_end(text: &str, tag: &str) -> usize {
+    (1..tag.len().min(text.len()))
+        .rev()
+        .find(|n| text.is_char_boundary(text.len() - n) && text[text.len() - n..] == tag[..*n])
+        .unwrap_or(0)
+}
+
 /// OpenAI-compatible chat-completions event mapping.
 struct OpenAiMapper {
     /// Terminal state and the tool-call ledger, keyed by the tool-call
@@ -596,6 +709,8 @@ struct OpenAiMapper {
     /// is said once, on the first reasoning delta, and only when it is
     /// the `reasoning` spelling rather than the default.
     spelling_reported: bool,
+    /// A model that thinks out loud in the content stream.
+    leading_think: LeadingThink,
 }
 
 impl OpenAiMapper {
@@ -611,6 +726,25 @@ impl OpenAiMapper {
             calls: HashMap::new(),
             thinking_open: false,
             spelling_reported: false,
+            leading_think: LeadingThink::default(),
+        }
+    }
+
+    /// Turn what the content stream amounted to into events, so a
+    /// `<think>` block at its head lands where reasoning lands.
+    fn push_content(&mut self, pieces: Vec<Think>, events: &mut Vec<ProviderEvent>) {
+        for piece in pieces {
+            match piece {
+                Think::Thinking(text) => {
+                    self.thinking_open = true;
+                    events.push(ProviderEvent::ThinkingDelta(text));
+                }
+                Think::Ended => self.close_thinking(events),
+                Think::Text(text) => {
+                    self.close_thinking(events);
+                    events.push(ProviderEvent::TextDelta(text));
+                }
+            }
         }
     }
 
@@ -711,8 +845,8 @@ impl TransportEventMapper for OpenAiMapper {
             if let Some(text) = delta["content"].as_str()
                 && !text.is_empty()
             {
-                self.close_thinking(&mut events);
-                events.push(ProviderEvent::TextDelta(text.into()));
+                let pieces = self.leading_think.push(text);
+                self.push_content(pieces, &mut events);
             }
             // DeepSeek spells an absent field as `null` on every delta
             // (`"reasoning_content":null,"tool_calls":null` around a
@@ -721,6 +855,8 @@ impl TransportEventMapper for OpenAiMapper {
                 return Err("OpenAI-compatible tool_calls must be an array".into());
             }
             if let Some(calls) = delta["tool_calls"].as_array() {
+                let pieces = self.leading_think.flush();
+                self.push_content(pieces, &mut events);
                 self.close_thinking(&mut events);
                 for call in calls {
                     let index = call["index"]
@@ -812,6 +948,9 @@ impl TransportEventMapper for OpenAiMapper {
                 }
             }
             if let Some(finish) = choice["finish_reason"].as_str() {
+                // A turn that stops mid-tag still said what it held.
+                let pieces = self.leading_think.flush();
+                self.push_content(pieces, &mut events);
                 self.close_thinking(&mut events);
                 let stop_reason = stop_reason_for(finish)?;
                 self.stop_reason = Some(stop_reason.clone());
@@ -1077,6 +1216,66 @@ mod tests {
         for key in ["messages", "tools", "stream", "stream_options"] {
             assert_eq!(zai_body[key], custom_body[key], "{key}");
         }
+    }
+
+    /// A model that thinks in its content stream: the block at the head
+    /// is reasoning, and only there — the same tag further along is the
+    /// model writing about tags.
+    #[test]
+    fn a_leading_think_block_is_thinking_however_it_is_split() {
+        let pieces = |deltas: &[&str]| {
+            let mut think = LeadingThink::default();
+            let mut all: Vec<Think> = deltas.iter().flat_map(|d| think.push(d)).collect();
+            all.extend(think.flush());
+            all
+        };
+        let thinking = |text: &str| Think::Thinking(text.into());
+        let text = |t: &str| Think::Text(t.into());
+
+        // The shape MiniMax M3 sends.
+        assert_eq!(
+            pieces(&["<think>plan", "</think>\n\nhi"]),
+            [thinking("plan"), Think::Ended, text("hi")]
+        );
+        // Both tags split across deltas, one character at a time.
+        let split: Vec<&str> = vec![
+            "<", "th", "ink", ">", "a", "b", "<", "/th", "ink", ">", "answer",
+        ];
+        assert_eq!(
+            pieces(&split),
+            [thinking("a"), thinking("b"), Think::Ended, text("answer")]
+        );
+        // Leading whitespace before the tag, and an empty block.
+        assert_eq!(
+            pieces(&["\n<think></think>done"]),
+            [Think::Ended, text("done")]
+        );
+        // No block at all: text is text, from the first delta on.
+        assert_eq!(
+            pieces(&["Hello", " there"]),
+            [text("Hello"), text(" there")]
+        );
+        // A tag the model writes *about*, mid-answer, is left alone.
+        assert_eq!(
+            pieces(&["The tag ", "<think> is how", " it marks reasoning."]),
+            [
+                text("The tag "),
+                text("<think> is how"),
+                text(" it marks reasoning.")
+            ]
+        );
+        // Something that starts like the tag and is not it.
+        assert_eq!(
+            pieces(&["<thinking about it>"]),
+            [text("<thinking about it>")]
+        );
+        // A turn that stops inside the block still says what it held.
+        assert_eq!(
+            pieces(&["<think>half a thought"]),
+            [thinking("half a thought"), Think::Ended]
+        );
+        // And one that stops on a fragment that never became a tag.
+        assert_eq!(pieces(&["<thi"]), [text("<thi")]);
     }
 
     /// The spelling a response's thinking arrives under is reported
