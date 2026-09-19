@@ -126,7 +126,5 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Review follow-ups
 
-- [ ] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md)
-- [ ] [Obsolete replays stop working](issues/obsolete-replays-stop-working.md)
-- [ ] [History searches without blocking or flooding](issues/history-searches-without-blocking-or-flooding.md)
+(all complete — see issues_archive.md)
 

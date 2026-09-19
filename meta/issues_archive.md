@@ -429,3 +429,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Worktrees share one memory](issues/worktrees-share-one-memory.md) — the key is the repository's common git directory, read out of .git by hand
 - [x] [Memory says when to write, and what a recall is](issues/memory-says-when-to-write-and-what-a-recall-is.md) — write the correction before the reply; a recall is background, not instructions; an episode that wrote memory is not reviewed
 - [x] [MiniMax thinks out loud](issues/minimax-thinks-out-loud.md) — a leading <think> block on the chat wire is read as thinking, split tags and all
+- [x] [History searches without blocking or flooding](issues/history-searches-without-blocking-or-flooding.md) — the archive is read on the blocking pool and stops when abandoned; listings are bounded with an after= continuation
+- [x] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md) — the sender owes the debt and pays it on drop, so no audited list of ? sites is needed
+- [x] [Obsolete replays stop working](issues/obsolete-replays-stop-working.md) — preview loads and focus seeds cancel on drop, and their replays watch the flag mid-parse
