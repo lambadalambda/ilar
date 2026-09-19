@@ -432,3 +432,7 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [History searches without blocking or flooding](issues/history-searches-without-blocking-or-flooding.md) — the archive is read on the blocking pool and stops when abandoned; listings are bounded with an after= continuation
 - [x] [Every started turn publishes its ending](issues/every-started-turn-publishes-its-ending.md) — the sender owes the debt and pays it on drop, so no audited list of ? sites is needed
 - [x] [Obsolete replays stop working](issues/obsolete-replays-stop-working.md) — preview loads and focus seeds cancel on drop, and their replays watch the flag mid-parse
+- [x] [Tasks lists without stalling](issues/tasks-lists-without-stalling.md) — the children's logs and their pending counts are read on the blocking pool
+- [x] [The lock names its holder](issues/the-lock-names-its-holder.md) — the lock carries pid and time; the refusal quotes them
+- [x] [Words a model acts on](issues/words-a-model-acts-on.md) — all four: the cap says one thing, no Debug on the wire, a daemonized service is not "stopped", the id-less call names the omission
+- [x] [Parked steers survive the process](issues/parked-steers-survive-the-process.md) — parked and claimed messages are mirrored under <outbox>/steers until the run commits them

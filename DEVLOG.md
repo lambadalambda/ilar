@@ -1,5 +1,41 @@
 # DEVLOG
 
+## 2026-09-19 — Defects out of the sweeps
+
+The four sweep milestones are mostly polish, but real defects were
+filed among them. These are the core-side four.
+
+**A listing is a listing again.** The `tasks` tool loaded up to twenty
+children's logs inline on the runtime — the same defect the `history`
+tool had this morning, and `serve` already spawned those loads on the
+blocking pool for exactly this reason. The loads and the parked-message
+counts now go together, off the runtime.
+
+**The lock says who holds it.** "Its driver may be another ilar
+process" is no help against a zombie in another pane. The winner
+stamps its pid and the time onto the lock; the refusal quotes them. A
+lock from an older build says nothing and gets the old wording.
+
+**Words a model acts on.** A refusal that said "do not retry" and
+"then try again" in one breath is not an instruction. It now says what
+to do instead. A `{:?}` on an `Option` went out on the wire as "pid
+group Some(1234)". A service that daemonized read as "stopped (exit
+0)" while its group was still listening, inviting a restart into a
+collision. And a tool call with no id blamed the stream where it
+should have named the server's omission.
+
+**A parked steer outlives the process.** `task_message` told the model
+a message "waits and is delivered at that task's next resume", and
+then kept it in process memory. It is mirrored to disk now, under the
+outbox, rewritten whole under the same lock as each change.
+
+The interesting part was what the review found: clearing the mirror
+the moment a run *claimed* the queue left the whole child turn
+uncovered, which is most of the window the feature exists for. A
+claimed message is not a delivered one — an unstarted run hands it
+back — so the file keeps it until the run says it committed. The test
+for that window fails on the old code.
+
 ## 2026-09-19 — Work nobody is waiting for
 
 Three defects our own reviews found and nobody went back for. They
