@@ -520,7 +520,9 @@ fn holder(file: &mut File) -> String {
     }
     let mut lines = text.lines();
     match (lines.next(), lines.next()) {
-        (Some(pid), Some(since)) if !pid.is_empty() => {
+        // A pid that is not a number is a torn or foreign line, not a
+        // process to go looking for.
+        (Some(pid), Some(since)) if pid.parse::<u32>().is_ok() => {
             format!("process {pid}, which took it at {since}")
         }
         _ => "another turn (its driver may be another ilar process)".into(),

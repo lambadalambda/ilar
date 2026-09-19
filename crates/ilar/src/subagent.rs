@@ -335,8 +335,19 @@ impl ChildSteers {
             let pending = self
                 .dir
                 .as_ref()
-                .and_then(|dir| std::fs::read(Self::mirror_path(dir, session_id)).ok())
-                .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+                .and_then(|dir| {
+                    let path = Self::mirror_path(dir, session_id);
+                    let read = std::fs::read(&path).ok()?;
+                    match serde_json::from_slice::<Vec<String>>(&read) {
+                        Ok(parked) => Some(parked),
+                        // Unreadable: take it out of the way, or every
+                        // later touch of this child pays to fail again.
+                        Err(_) => {
+                            let _ = std::fs::remove_file(&path);
+                            None
+                        }
+                    }
+                })
                 .unwrap_or_default();
             ChildSteer {
                 sender: None,
@@ -404,6 +415,11 @@ impl ChildSteers {
     /// Hand a message to a running child's turn. False when no live
     /// channel took it: the caller then decides between resuming the
     /// task and holding the message for its next resume.
+    ///
+    /// A message in flight stays owed until the child's `Steered` event
+    /// says it was read, so a crash between the two re-delivers it. The
+    /// outbox makes the same trade for results, and for the same
+    /// reason: saying a thing twice is recoverable, losing it is not.
     fn steer(&self, session_id: &str, text: String) -> bool {
         let mut steers = lock_unpoisoned(&self.steers);
         let Some(entry) = steers.get_mut(session_id) else {
@@ -684,7 +700,7 @@ impl SubagentSpawner {
         // A parked steer is this session owing a message elsewhere,
         // which is what the outbox directory is for; it keeps its own
         // subdirectory so neither reader has to skip the other's files.
-        self.child_steers = self.child_steers.clone().with_dir(dir.join("steers"));
+        self.child_steers = std::mem::take(&mut self.child_steers).with_dir(dir.join("steers"));
         self.outbox_dir = Some(dir);
         self
     }
@@ -1841,8 +1857,8 @@ task's scope yourself; continue only clearly disjoint work."
             .await;
         // A declined resume is not a lost message, and the model must
         // not read it as one: whatever the refusal says — including the
-        // concurrency limit's "do not retry" — the message itself is
-        // still parked and rides the child's next resume.
+        // concurrency cap's "wait for one to finish" — the message
+        // itself is still parked and rides the child's next resume.
         let still_queued = output.is_error && self.child_steers.holds(&task_id, &text);
         let output = if still_queued {
             output.with_appended_text(
@@ -3780,17 +3796,24 @@ impl Tool for TasksTool {
             // description calls a cheap read-only listing.
             let ids: Vec<String> = children.iter().map(|child| child.id.clone()).collect();
             let store = spawner.store.clone();
+            // The parked-message count reads a file too, so it goes
+            // with them rather than putting the I/O straight back.
+            let steers = spawner.child_steers.clone();
             let loaded = crate::tools::blocking_scan(move |cancelled| {
                 ids.iter()
-                    .map(|id| store.load_until(id, &cancelled).ok())
+                    .map(|id| (store.load_until(id, &cancelled).ok(), steers.pending(id)))
                     .collect::<Vec<_>>()
             })
             .await
             .unwrap_or_default();
             let mut lines = children
                 .into_iter()
-                .zip(loaded.into_iter().chain(std::iter::repeat_with(|| None)))
-                .map(|(child, session)| {
+                .zip(
+                    loaded
+                        .into_iter()
+                        .chain(std::iter::repeat_with(|| (None, 0))),
+                )
+                .map(|(child, (session, waiting_count))| {
                     let running = spawner.session_is_active(&child.id);
                     let delivering = spawner
                         .running_tasks()
@@ -3845,7 +3868,7 @@ impl Tool for TasksTool {
                     // in flight while it runs, waiting for its resume
                     // once it has stopped. Either way it is owed a
                     // reading, so the listing says so.
-                    let waiting = match spawner.child_steers.pending(&child.id) {
+                    let waiting = match waiting_count {
                         0 => String::new(),
                         1 => " · 1 message pending".to_string(),
                         count => format!(" · {count} messages pending"),
