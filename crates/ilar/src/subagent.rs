@@ -4148,6 +4148,43 @@ mod tests {
         assert!(leftovers.is_empty(), "rollback left {leftovers:?}");
     }
 
+    /// `task_message` tells the model a parked message "waits and is
+    /// delivered at that task's next resume". Process memory does not,
+    /// so the parked list is mirrored: a second store over the same
+    /// directory — which is what a restart is — finds them.
+    #[test]
+    fn a_parked_message_outlives_the_process_that_parked_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirrored = || ChildSteers::default().with_dir(dir.path().join("steers"));
+
+        let steers = mirrored();
+        steers.queue("child", "first".into());
+        steers.queue("child", "second".into());
+        assert_eq!(steers.pending("child"), 2);
+
+        // The process goes; the directory stays.
+        drop(steers);
+        let after = mirrored();
+        assert_eq!(after.pending("child"), 2, "a restart lost them");
+        let (_receiver, run) = after.open("child");
+        assert_eq!(run.prompt("go on"), "first\n\nsecond\n\ngo on");
+
+        // Taken, so nothing is owed and nothing is left on disk.
+        drop(run);
+        assert_eq!(after.pending("child"), 0);
+        assert_eq!(mirrored().pending("child"), 0);
+        assert!(
+            !dir.path().join("steers").join("child.json").exists(),
+            "a claimed queue leaves no file behind"
+        );
+
+        // Without a directory nothing is written, and nothing breaks.
+        let plain = ChildSteers::default();
+        plain.queue("child", "held in memory".into());
+        assert_eq!(plain.pending("child"), 1);
+        assert_eq!(ChildSteers::default().pending("child"), 0);
+    }
+
     /// The undelivered rule at its own level: a run that never started
     /// hands the queue back in order, and a run that did takes it.
     #[test]
