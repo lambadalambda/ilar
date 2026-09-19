@@ -5436,20 +5436,24 @@ mod tests {
         });
         assert!(!cancel.load(Ordering::Acquire), "it starts wanted");
         // The selection moved on: a newer load replaces this one.
+        let newer = Arc::new(AtomicBool::new(false));
         preview = Some(super::PreviewTask {
             generation: 1,
             session: "b".into(),
             rx: std::sync::mpsc::channel().1,
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: newer.clone(),
         });
         assert!(
             cancel.load(Ordering::Acquire),
             "the replaced loader was never told to stop"
         );
+        assert!(
+            !newer.load(Ordering::Acquire),
+            "the live one is still wanted"
+        );
         // And closing the modal stops the newest one too.
-        let last = preview.as_ref().map(|task| task.cancel.clone()).unwrap();
-        preview = None;
-        assert!(last.load(Ordering::Acquire), "{:?}", preview.is_none());
+        assert!(preview.take().is_some());
+        assert!(newer.load(Ordering::Acquire));
     }
 
     #[tokio::test]
@@ -6418,7 +6422,7 @@ mod tests {
         land_agent_focus(
             &mut app,
             &session_id,
-            seed_agent_focus(&store, &session_id, streaming),
+            seed_agent_focus(&store, &session_id, streaming, &AtomicBool::new(false)),
         );
         let focus = app.focus.as_ref().expect("focus opened");
         assert_eq!(focus.title, "explore · survey the picker core");
@@ -6442,7 +6446,7 @@ mod tests {
         land_agent_focus(
             &mut app,
             &session_id,
-            seed_agent_focus(&store, &session_id, streaming),
+            seed_agent_focus(&store, &session_id, streaming, &AtomicBool::new(false)),
         );
         assert!(
             app.focus.as_ref().is_some_and(|focus| !focus.running),
@@ -6457,7 +6461,7 @@ mod tests {
         land_agent_focus(
             &mut app,
             &session_id,
-            seed_agent_focus(&store, &session_id, streaming),
+            seed_agent_focus(&store, &session_id, streaming, &AtomicBool::new(false)),
         );
         assert!(app.focus.as_ref().is_some_and(|focus| !focus.running));
 
@@ -6468,7 +6472,12 @@ mod tests {
         land_agent_focus(
             &mut app,
             "no-such-session",
-            seed_agent_focus(&store, "no-such-session", streaming),
+            seed_agent_focus(
+                &store,
+                "no-such-session",
+                streaming,
+                &AtomicBool::new(false),
+            ),
         );
         assert!(app.focus.is_none(), "a blank screen is not an answer");
         let (notice, _) = app.operational_notice().expect("an honest notice");
