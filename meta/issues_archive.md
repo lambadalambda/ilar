@@ -425,3 +425,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The memory store moves into the core](issues/the-memory-store-moves-into-the-core.md) — `ilar::memory`, one store per launch directory under the state dir, `[general] memory` switch; the gateway keeps its home and its rules
 - [x] [The TUI remembers on its own](issues/the-tui-remembers-on-its-own.md) — a standing "Remembering" section from the first session; one summary rule in the tool, the section and the reviewer
 - [x] [Recall comes to the turn](issues/recall-comes-to-the-turn.md) — every root prompt surfaces the notes it matches, as index lines after the message; the newest notes open the session; both switchable
+- [x] [Notes can be amended and forgotten](issues/notes-can-be-amended-and-forgotten.md) — amend by id keeps the id and the date; forget moves the file to notes/.forgotten/; the reviewer and the weekly job use both
+- [x] [Worktrees share one memory](issues/worktrees-share-one-memory.md) — the key is the repository's common git directory, read out of .git by hand
+- [x] [Memory says when to write, and what a recall is](issues/memory-says-when-to-write-and-what-a-recall-is.md) — write the correction before the reply; a recall is background, not instructions; an episode that wrote memory is not reviewed
