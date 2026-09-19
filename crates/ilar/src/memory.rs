@@ -1289,7 +1289,7 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert_eq!(out.content, format!("amended {id} (event)"));
         assert_eq!(
-            store.get(&[id.clone()]).unwrap()[0].summary,
+            store.get(std::slice::from_ref(&id)).unwrap()[0].summary,
             "moved to a house"
         );
         let out = tool
@@ -1487,7 +1487,12 @@ mod tests {
             .collect();
         assert_eq!(left, ["Tea"]);
         assert!(store.search("tenco 8443", 10, now).unwrap().is_empty());
-        assert!(store.get(&[wrong.id.clone()]).unwrap().is_empty());
+        assert!(
+            store
+                .get(std::slice::from_ref(&wrong.id))
+                .unwrap()
+                .is_empty()
+        );
         let index = store.opening_index(20, 4096, now).unwrap().unwrap();
         assert!(
             index.contains("Tea") && !index.contains("Deploy box"),
