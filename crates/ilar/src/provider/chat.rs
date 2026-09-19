@@ -1301,6 +1301,20 @@ mod tests {
             pieces(&["<thinking about it>"]),
             [text("<thinking about it>")]
         );
+        // A close tag with nothing open is a close tag the model typed.
+        assert_eq!(pieces(&["</think>done"]), [text("</think>done")]);
+        // An answer that opens with indented code keeps its indent:
+        // only the line break between thought and answer comes off.
+        assert_eq!(
+            pieces(&["<think>plan</think>\n\n    indented"]),
+            [thinking("plan"), Think::Ended, text("    indented")]
+        );
+        assert_eq!(partial_tag_at_end("", CLOSE), 0);
+        assert_eq!(
+            partial_tag_at_end("x</thi", CLOSE),
+            4,
+            "the longest partial"
+        );
         // A turn that stops inside the block still says what it held.
         assert_eq!(
             pieces(&["<think>half a thought"]),
@@ -1397,6 +1411,62 @@ mod tests {
                 |event| matches!(event, ProviderEvent::TextDelta(text) if text.contains("think"))
             ),
             "the tag never reaches the transcript: {events:?}"
+        );
+
+        // Both tags split across deltas, on the wire.
+        let split: Vec<String> = ["<th", "ink>plan", "</th", "ink>hi"]
+            .iter()
+            .map(|piece| content(piece))
+            .collect();
+        let mut chunks: Vec<&str> = split.iter().map(String::as_str).collect();
+        chunks.push(done);
+        let events = openai_stream(&chunks).expect("a split think block");
+        assert!(
+            matches!(&events[0], ProviderEvent::ThinkingDelta(text) if text == "plan"),
+            "{events:?}"
+        );
+        assert_eq!(events[1], ProviderEvent::ThinkingCompleted, "{events:?}");
+        assert!(
+            matches!(&events[2], ProviderEvent::TextDelta(text) if text == "hi"),
+            "{events:?}"
+        );
+
+        // A tool call ends the content stream: the block closes before
+        // the call, and an empty `tool_calls` list does not end it.
+        let empty_calls = r#"{"choices":[{"index":0,"finish_reason":null,"delta":{"content":null,"tool_calls":[]}}]}"#;
+        let call = r#"{"choices":[{"index":0,"finish_reason":null,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{}"}}]}}]}"#;
+        let stopped = r#"{"choices":[{"index":0,"finish_reason":"tool_calls","delta":{}}]}"#;
+        let events = openai_stream(&[
+            &content("<think>plan"),
+            empty_calls,
+            &content(" more"),
+            call,
+            stopped,
+        ])
+        .expect("a think block before a call");
+        let thoughts: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ThinkingDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thoughts, ["plan", " more"], "{events:?}");
+        let ended = events
+            .iter()
+            .position(|event| event == &ProviderEvent::ThinkingCompleted);
+        let started = events
+            .iter()
+            .position(|event| matches!(event, ProviderEvent::ToolCallStarted { .. }));
+        assert!(
+            ended < started,
+            "thinking closes before the call: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::TextDelta(_))),
+            "an unclosed block never leaks as text: {events:?}"
         );
     }
 
