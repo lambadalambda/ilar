@@ -1335,6 +1335,41 @@ mod tests {
         openai_stream(&[chunk, trailer]).expect("a null-spelled trailer");
     }
 
+    /// MiniMax M3 puts its reasoning in the content stream. On the wire
+    /// it comes out where reasoning comes out, so the transcript opens
+    /// with the answer and the fold hides the thinking.
+    #[test]
+    fn a_model_that_thinks_in_its_content_is_read_as_thinking() {
+        let content = |text: &str| {
+            format!(
+                r#"{{"choices":[{{"index":0,"finish_reason":null,"delta":{{"content":"{text}"}}}}]}}"#
+            )
+        };
+        let done = r#"{"choices":[{"index":0,"finish_reason":"stop","delta":{}}]}"#;
+        let events = openai_stream(&[
+            &content("<think>plan"),
+            &content("</think>"),
+            &content("\\n\\nhi"),
+            done,
+        ])
+        .expect("a think block");
+        assert!(
+            matches!(&events[0], ProviderEvent::ThinkingDelta(text) if text == "plan"),
+            "{events:?}"
+        );
+        assert_eq!(events[1], ProviderEvent::ThinkingCompleted, "{events:?}");
+        assert!(
+            matches!(&events[2], ProviderEvent::TextDelta(text) if text == "hi"),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(
+                |event| matches!(event, ProviderEvent::TextDelta(text) if text.contains("think"))
+            ),
+            "the tag never reaches the transcript: {events:?}"
+        );
+    }
+
     /// By default thinking goes back on every assistant message, the
     /// way OpenCode sends it; `turn` narrows that to the assistant
     /// messages after the last real prompt, and `off` sends none. A
