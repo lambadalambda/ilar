@@ -2993,3 +2993,62 @@ fn the_archive_outlives_the_context_window() {
     assert!(matches[0].excerpt.contains("0x4f11b4"), "{matches:?}");
     assert_eq!(matches[0].speaker, ilar::recall::Speaker::User);
 }
+
+/// A reader nobody is waiting for stops. The archive read behind the
+/// `history` tool and the replay behind a focus seed both take a flag,
+/// and a raised one ends the parse rather than finishing for a caller
+/// that has gone.
+#[test]
+fn a_read_nobody_wants_stops_instead_of_finishing() {
+    use std::sync::atomic::AtomicBool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = ilar::session::SessionStore::new(dir.path().to_path_buf());
+    let id = ilar::session::new_id();
+    let mut session = store
+        .create(ilar::session::SessionMeta {
+            session_id: id.clone(),
+            parent_id: None,
+            agent: "build".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: None,
+            cwd: None,
+        })
+        .unwrap();
+    // More lines than one cancellation window, so a flag raised at the
+    // start is seen before the end.
+    for n in 0..600 {
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: ilar::session::new_id(),
+                text: format!("line {n}"),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+    drop(session);
+
+    let wanted = AtomicBool::new(false);
+    assert_eq!(
+        store.audit_events_until(&id, &wanted).unwrap().len(),
+        601,
+        "uncancelled, it reads everything"
+    );
+
+    let gone = AtomicBool::new(true);
+    let error = store
+        .audit_events_until(&id, &gone)
+        .expect_err("a read nobody wants");
+    assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    assert!(error.to_string().contains("nobody is waiting"), "{error}");
+
+    // The same flag stops the replay a focus seed runs on.
+    assert_eq!(
+        store.load_until(&id, &gone).map(|_| ()).unwrap_err().kind(),
+        std::io::ErrorKind::Interrupted
+    );
+    // And an ordinary read is unaffected by either.
+    assert!(store.load(&id).is_ok());
+    assert_eq!(store.audit_events(&id).unwrap().len(), 601);
+}
