@@ -1312,9 +1312,10 @@ mod tests {
         assert_eq!(partial_tag_at_end("", CLOSE), 0);
         assert_eq!(
             partial_tag_at_end("x</thi", CLOSE),
-            4,
+            5,
             "the longest partial"
         );
+        assert_eq!(partial_tag_at_end("nothing", CLOSE), 0);
         // A turn that stops inside the block still says what it held.
         assert_eq!(
             pieces(&["<think>half a thought"]),
