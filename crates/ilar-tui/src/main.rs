@@ -1016,11 +1016,15 @@ fn direct_resume_blocked(store: &SessionStore, id: &str) -> Option<String> {
 fn stop_session_scan(
     cancel: &mut Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     rx: &mut Option<(u64, std::sync::mpsc::Receiver<Vec<SearchRow>>)>,
+    preview: &mut Option<PreviewTask>,
 ) {
     if let Some(flag) = cancel.take() {
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     *rx = None;
+    // The row a preview was loading is about to stop existing — a new
+    // query, or no modal at all. Dropping it stops the worker.
+    *preview = None;
 }
 
 /// Everything a session switch must let go of: the background spawner,
@@ -4540,15 +4544,27 @@ async fn run_app(
                             match action {
                                 SessionSearchAction::Stay => {}
                                 SessionSearchAction::Rescan => {
-                                    stop_session_scan(&mut search_cancel, &mut search_rx);
+                                    stop_session_scan(
+                                        &mut search_cancel,
+                                        &mut search_rx,
+                                        &mut preview_rx,
+                                    );
                                 }
                                 SessionSearchAction::Dismiss => {
-                                    stop_session_scan(&mut search_cancel, &mut search_rx);
+                                    stop_session_scan(
+                                        &mut search_cancel,
+                                        &mut search_rx,
+                                        &mut preview_rx,
+                                    );
                                     app.session_search = None;
                                     app.clear_transient_notice();
                                 }
                                 SessionSearchAction::ListMode => {
-                                    stop_session_scan(&mut search_cancel, &mut search_rx);
+                                    stop_session_scan(
+                                        &mut search_cancel,
+                                        &mut search_rx,
+                                        &mut preview_rx,
+                                    );
                                     app.session_search = None;
                                     let sessions = store
                                         .list()
@@ -4578,7 +4594,11 @@ async fn run_app(
                                         }
                                         continue;
                                     }
-                                    stop_session_scan(&mut search_cancel, &mut search_rx);
+                                    stop_session_scan(
+                                        &mut search_cancel,
+                                        &mut search_rx,
+                                        &mut preview_rx,
+                                    );
                                     leave_session(
                                         &spawner,
                                         &mut aside_cancel,
@@ -4888,6 +4908,8 @@ async fn run_app(
                     }
                     if code == KeyCode::Esc {
                         app.close_focus();
+                        // Nothing left to seed into.
+                        focus_seed = None;
                         continue;
                     }
                     if let Some(named) = crate::app::focus_key_belongs_to_the_root(
@@ -5287,7 +5309,7 @@ async fn run_app(
                     app.dismiss_ghost();
                 }
                 if scan != app.session_search.as_ref().map(|search| search.generation) {
-                    stop_session_scan(&mut search_cancel, &mut search_rx);
+                    stop_session_scan(&mut search_cancel, &mut search_rx, &mut preview_rx);
                 }
             }
             Event::Mouse(mouse)
@@ -5363,6 +5385,7 @@ async fn run_app(
                             match app.click_agent_row(mouse.column, mouse.row) {
                                 Some(AgentTarget::Main) => {
                                     app.close_focus();
+                                    focus_seed = None;
                                 }
                                 Some(AgentTarget::Focus(id)) => {
                                     // `None`: the view was already on
