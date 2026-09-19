@@ -636,7 +636,8 @@ impl LeadingThink {
                 return out;
             } else {
                 self.state = ThinkState::Done;
-                out.push(Think::Text(std::mem::take(&mut self.held)));
+                let head = std::mem::take(&mut self.held);
+                out.extend(self.answer(head));
                 return out;
             }
         }
@@ -672,10 +673,11 @@ impl LeadingThink {
     }
 
     /// Text after the block, with the separator the model left between
-    /// its thinking and its answer taken off the front.
+    /// its thinking and its answer taken off the front. Line breaks
+    /// only: an answer that opens with indented code keeps its indent.
     fn answer(&mut self, text: String) -> Option<Think> {
         let text = if self.opening {
-            text.trim_start().to_string()
+            text.trim_start_matches(['\n', '\r']).to_string()
         } else {
             text
         };
@@ -703,7 +705,7 @@ impl LeadingThink {
 /// what has to be held back because the next delta may complete it.
 /// The whole tag is not a candidate: a complete one was already found.
 fn partial_tag_at_end(text: &str, tag: &str) -> usize {
-    (1..=(tag.len() - 1).min(text.len()))
+    (1..=tag.len().saturating_sub(1).min(text.len()))
         .rev()
         .find(|n| text.is_char_boundary(text.len() - n) && text[text.len() - n..] == tag[..*n])
         .unwrap_or(0)
@@ -874,9 +876,14 @@ impl TransportEventMapper for OpenAiMapper {
                 return Err("OpenAI-compatible tool_calls must be an array".into());
             }
             if let Some(calls) = delta["tool_calls"].as_array() {
-                let pieces = self.leading_think.flush();
-                self.push_content(pieces, &mut events);
-                self.close_thinking(&mut events);
+                // An empty list is not a call: some servers send one
+                // beside ordinary content, and ending the content
+                // stream on it would cut a tag in half.
+                if !calls.is_empty() {
+                    let pieces = self.leading_think.flush();
+                    self.push_content(pieces, &mut events);
+                    self.close_thinking(&mut events);
+                }
                 for call in calls {
                     let index = call["index"]
                         .as_u64()
