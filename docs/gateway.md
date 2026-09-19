@@ -311,8 +311,10 @@ report is about the person's memory, so a room is never the target,
 and with no private chat on record the job is skipped — with a fixed
 prompt: read the week's daily notes, promote what recurs into the core
 memory through the `memory` tool so the caps hold, drop what is no
-longer true, file the rest as notes, merge overlapping skills through
-`skill_manage`, and send one message saying what changed. Right before
+longer true, file the rest as notes, amend the notes the week
+corrected and forget the ones it disproved, give a note that says
+"yesterday" its date, merge overlapping skills through `skill_manage`,
+and send one message saying what changed. Right before
 it, a sweep that needs no model moves skills unused for ninety days to
 `skills/.archive/` and names the ones unused for thirty, so the prompt
 can ask about them.

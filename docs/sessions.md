@@ -149,6 +149,14 @@ is ever injected: `memory_search` returns an index, best first with
 recent notes ranking higher, and `memory_get` reads the chosen notes in
 full. The three tools are the root session's; a subagent has none.
 
+A fact that changes is the same note with better words. `amend` names
+a note by its id and rewrites what it is given, keeping the id — so a
+session that already saw the note still knows it — and keeping the
+date, so recency still measures from when the fact was learned rather
+than from when the wording was fixed. `forget` retires a note: out of
+the search, the reads and the opening index at once, and into
+`notes/.forgotten/`, which nothing reads and a person can move back.
+
 Nobody reviews a terminal session after the fact, so the model writes
 memory itself, during the turn. Every session with a memory opens with
 a standing section, "Remembering", present before anything has been
