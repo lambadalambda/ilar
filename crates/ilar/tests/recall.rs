@@ -264,3 +264,54 @@ fn hits_carry_their_session_modification_time() {
     let found = collect_all(&store, "needle", 5);
     assert_eq!(found[0].modified, listed[0].modified);
 }
+
+/// The `history` tool reads the whole archive, which on a long session
+/// is megabytes of JSONL. Parsed on a runtime worker it holds that
+/// worker for the duration and every other task on it waits. With one
+/// worker thread, a ticker beside the call is the proof: it only
+/// advances if the read went to the blocking pool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn the_history_tool_leaves_the_runtime_worker_free() {
+    use ilar::tools::{Tool, ToolContext};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (store, dir) = temp_store();
+    // Big enough that the parse is not instant.
+    let events: Vec<SessionEvent> = (0..4_000)
+        .map(|n| user(&format!("instruction {n}: {}", "detail ".repeat(20))))
+        .collect();
+    let id = session_with(&store, events);
+
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticking = ticks.clone();
+    let ticker = tokio::spawn(async move {
+        loop {
+            ticking.fetch_add(1, Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    });
+    // Let the ticker reach its first await, so the count below is the
+    // progress made *during* the call.
+    tokio::task::yield_now().await;
+    let before = ticks.load(Ordering::Relaxed);
+
+    let tool = ilar::tools::history::HistoryTool::new(store.clone());
+    let mut ctx = ToolContext::root(dir.path().to_path_buf());
+    ctx.session_id = id.clone();
+    let out = tool.run(serde_json::json!({"speaker": "user"}), ctx).await;
+    let during = ticks.load(Ordering::Relaxed) - before;
+    ticker.abort();
+
+    assert!(!out.is_error, "{}", out.content);
+    assert!(
+        during > 0,
+        "the runtime worker was held for the whole read ({during} ticks)"
+    );
+    // And the listing is bounded rather than returning all 4,000.
+    assert!(
+        out.content.contains("more not shown; pass after="),
+        "{}",
+        &out.content[..out.content.len().min(400)]
+    );
+}
