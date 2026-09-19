@@ -4181,3 +4181,99 @@ async fn mid_stream_continuation_is_bounded_and_never_for_permanent_errors() {
     assert!(result.unwrap_err().to_string().contains("bad request"));
     assert_eq!(provider.requests().len(), 1);
 }
+
+/// A turn that announced itself owes the channel its ending. These are
+/// the failures that used to return through `?` without one, leaving a
+/// consumer watching a stream that simply stopped: the provider
+/// refusing to build a stream at all, and a forced compaction whose own
+/// call fails. The guarantee is the sender's, not a list of audited
+/// return sites, so a new `?` tomorrow is covered by the same rule.
+#[tokio::test]
+async fn a_turn_that_dies_after_it_started_still_publishes_its_ending() {
+    async fn drain(mut rx: LoopEventReceiver) -> Vec<LoopEvent> {
+        let mut seen = Vec::new();
+        while let Some(event) = rx.recv().await {
+            seen.push(event);
+        }
+        seen
+    }
+
+    for (what, config) in [
+        ("provider preflight", LoopConfig::default()),
+        (
+            "compaction",
+            LoopConfig {
+                context_limit: Some(1_000_000),
+                force_compaction: true,
+                ..LoopConfig::default()
+            },
+        ),
+    ] {
+        let (store, session_id) = temp_session("build");
+        // An exhausted script errors out of `stream()` itself, which is
+        // the synchronous preflight failure — and the same failure the
+        // compaction call meets.
+        let provider = MockProvider::new(Vec::new());
+        let (tx, rx) = events_channel();
+
+        let outcome = run_turn(
+            &provider,
+            &ToolRegistry::builtin(),
+            &store,
+            &session_id,
+            "go",
+            &[],
+            None,
+            config,
+            tx,
+            CancellationToken::new(),
+            ToolContext::root(std::env::temp_dir()),
+            None,
+        )
+        .await;
+        assert!(outcome.is_err(), "{what}: expected the turn to fail");
+
+        let seen = drain(rx).await;
+        assert!(
+            matches!(seen.first(), Some(LoopEvent::TurnStarted)),
+            "{what}: {seen:?}"
+        );
+        let endings = seen
+            .iter()
+            .filter(|event| matches!(event, LoopEvent::TurnDone { .. }))
+            .count();
+        assert_eq!(endings, 1, "{what}: exactly one ending: {seen:?}");
+        assert!(
+            matches!(seen.last(), Some(LoopEvent::TurnDone { .. })),
+            "{what}: nothing after the ending: {seen:?}"
+        );
+    }
+}
+
+/// The debt only opens once a turn has actually announced itself: a
+/// failure before that is `TurnNeverStarted`, and its channel closes
+/// with nothing on it rather than an ending nobody began.
+#[tokio::test]
+async fn a_turn_that_never_started_publishes_nothing() {
+    let (store, _session_id) = temp_session("build");
+    let (tx, mut rx) = events_channel();
+    let outcome = run_turn(
+        &MockProvider::new(Vec::new()),
+        &ToolRegistry::builtin(),
+        &store,
+        // No such session: the failure lands before the prompt is
+        // appended, which is the pre-start side of the line.
+        &new_id(),
+        "go",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await;
+    assert!(outcome.is_err());
+    assert!(rx.recv().await.is_none(), "an unstarted turn says nothing");
+}
