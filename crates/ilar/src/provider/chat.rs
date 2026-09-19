@@ -605,6 +605,11 @@ const CLOSE: &str = "</think>";
 struct LeadingThink {
     state: ThinkState,
     held: String,
+    /// The block just closed and no answer has been seen yet: the
+    /// blank line a model puts between its thinking and its answer is
+    /// a separator, not the first line of the answer — and it may
+    /// arrive in a delta of its own.
+    opening: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -639,16 +644,15 @@ impl LeadingThink {
             match self.held.find(CLOSE) {
                 Some(at) => {
                     let thought = self.held[..at].to_string();
-                    let after = self.held[at + CLOSE.len()..].trim_start().to_string();
+                    let after = self.held[at + CLOSE.len()..].to_string();
                     self.held.clear();
                     self.state = ThinkState::Done;
+                    self.opening = true;
                     if !thought.is_empty() {
                         out.push(Think::Thinking(thought));
                     }
                     out.push(Think::Ended);
-                    if !after.is_empty() {
-                        out.push(Think::Text(after));
-                    }
+                    out.extend(self.answer(after));
                 }
                 None => {
                     // Hold back only what could still open the close tag.
@@ -662,10 +666,24 @@ impl LeadingThink {
             }
             return out;
         }
-        if !self.held.is_empty() {
-            out.push(Think::Text(std::mem::take(&mut self.held)));
-        }
+        let rest = std::mem::take(&mut self.held);
+        out.extend(self.answer(rest));
         out
+    }
+
+    /// Text after the block, with the separator the model left between
+    /// its thinking and its answer taken off the front.
+    fn answer(&mut self, text: String) -> Option<Think> {
+        let text = if self.opening {
+            text.trim_start().to_string()
+        } else {
+            text
+        };
+        if text.is_empty() {
+            return None;
+        }
+        self.opening = false;
+        Some(Think::Text(text))
     }
 
     /// The content stream is over — a tool call, a finish, the end.
@@ -676,8 +694,7 @@ impl LeadingThink {
         match state {
             ThinkState::Inside if held.is_empty() => vec![Think::Ended],
             ThinkState::Inside => vec![Think::Thinking(held), Think::Ended],
-            _ if held.is_empty() => Vec::new(),
-            _ => vec![Think::Text(held)],
+            _ => self.answer(held).into_iter().collect(),
         }
     }
 }
@@ -1251,6 +1268,12 @@ mod tests {
         assert_eq!(
             pieces(&["\n<think></think>done"]),
             [Think::Ended, text("done")]
+        );
+        // The separator between thinking and answer is a separator
+        // wherever it falls, including a delta of its own.
+        assert_eq!(
+            pieces(&["<think>plan", "</think>", "\n\n", "hi"]),
+            [thinking("plan"), Think::Ended, text("hi")]
         );
         // No block at all: text is text, from the first delta on.
         assert_eq!(
