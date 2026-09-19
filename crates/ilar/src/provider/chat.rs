@@ -682,9 +682,11 @@ impl LeadingThink {
     }
 }
 
-/// How many bytes at the end of `text` are a proper prefix of `tag`.
+/// How many bytes at the end of `text` are a proper prefix of `tag` —
+/// what has to be held back because the next delta may complete it.
+/// The whole tag is not a candidate: a complete one was already found.
 fn partial_tag_at_end(text: &str, tag: &str) -> usize {
-    (1..tag.len().min(text.len()))
+    (1..=(tag.len() - 1).min(text.len()))
         .rev()
         .find(|n| text.is_char_boundary(text.len() - n) && text[text.len() - n..] == tag[..*n])
         .unwrap_or(0)
