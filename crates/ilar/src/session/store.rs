@@ -956,6 +956,18 @@ impl SessionStore {
     /// Read a session snapshot. Only newline-committed records are parsed;
     /// committed corruption is rejected and an in-progress tail is ignored.
     pub fn load(&self, id: &str) -> std::io::Result<SessionReader> {
+        self.load_until(id, &NEVER)
+    }
+
+    /// [`load`](Self::load) that gives up when `cancelled` is raised.
+    /// Replaying a long transcript is the expensive half of seeding a
+    /// view; a seed whose target moved on stops here rather than
+    /// finishing for nobody.
+    pub fn load_until(
+        &self,
+        id: &str,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> std::io::Result<SessionReader> {
         let id = SessionId::parse(id)?;
         let path = self.session_path_for(&id);
         if !path.exists() {
@@ -971,6 +983,7 @@ impl SessionStore {
             &self.replay_index_path_for(&id),
             id.as_str(),
             false,
+            cancelled,
         )?;
         let pending_question = pending_question(&replay.events, &replay.unanswered_calls);
         Ok(SessionReader {
@@ -996,6 +1009,7 @@ impl SessionWriter {
             &self.replay_index_path,
             self.id.as_str(),
             true,
+            &NEVER,
         )?;
         if file_stamp(&file.metadata()?)? != replay.observed_stamp
             || file_stamp(&std::fs::metadata(&self.session_path)?)? != replay.observed_stamp
@@ -1057,6 +1071,7 @@ fn read_replay(
     replay_index_path: &std::path::Path,
     id: &str,
     repair_tail: bool,
+    cancelled: &std::sync::atomic::AtomicBool,
 ) -> std::io::Result<ReplayData> {
     if let Ok(replay) = read_indexed_replay(file, path, replay_index_path, id) {
         return Ok(replay);
@@ -1314,7 +1329,7 @@ fn read_events(
     // this is what a later tail-parse diagnostic offsets its line numbers
     // by, and the reader counts lines in the file, not surviving events.
     let physical_line_count = committed_line_count(committed);
-    let events = fold_rewinds(parse_event_lines(committed, id, 0)?, id)?;
+    let events = fold_rewinds(parse_event_lines_until(committed, id, 0, cancelled)?, id)?;
     if events.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,

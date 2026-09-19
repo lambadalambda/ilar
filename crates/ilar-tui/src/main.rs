@@ -2776,19 +2776,14 @@ fn seed_agent_focus(
     streaming: bool,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<crate::transcript::Line_>, String> {
-    // Two checkpoints, around the two expensive halves: reading the
-    // log, and folding it into rows. Neither half is interruptible
-    // from outside, so a seed abandoned mid-half still finishes that
-    // half — but a retarget no longer pays for both.
-    let stopped = || "seed abandoned".to_string();
-    if cancel.load(std::sync::atomic::Ordering::Acquire) {
-        return Err(stopped());
-    }
+    // The replay watches the flag as it parses; the fold into rows
+    // after it is one pass over events already in memory, so a check
+    // between the two is enough to stop a seed nobody is waiting for.
     let reader = store
-        .load(session_id)
+        .load_until(session_id, cancel)
         .map_err(|error| format!("cannot open agent transcript: {error:#}"))?;
     if cancel.load(std::sync::atomic::Ordering::Acquire) {
-        return Err(stopped());
+        return Err("seed abandoned".to_string());
     }
     // A working agent's open tool rows are open, not failed: marking
     // them ✗ here also made the real result unsettleable, so the row
