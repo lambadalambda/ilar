@@ -5435,6 +5435,10 @@ mod tests {
             cancel: cancel.clone(),
         });
         assert!(!cancel.load(Ordering::Acquire), "it starts wanted");
+        assert_eq!(
+            preview.as_ref().map(|task| task.session.as_str()),
+            Some("a")
+        );
         // The selection moved on: a newer load replaces this one.
         let newer = Arc::new(AtomicBool::new(false));
         preview = Some(super::PreviewTask {
