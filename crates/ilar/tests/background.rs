@@ -4227,9 +4227,15 @@ async fn a_message_refused_by_the_concurrency_limit_waits_for_the_next_resume() 
         )
         .await;
     assert!(refused.is_error, "{}", refused.content);
+    // The refusal says what to do instead of contradicting itself.
     assert!(
-        refused.content.contains("concurrent subagent limit"),
+        refused.content.contains("which is the limit"),
         "{}",
+        refused.content
+    );
+    assert!(
+        !refused.content.contains("try again"),
+        "a refusal that says both is no instruction: {}",
         refused.content
     );
     // No claimed finality for a message that is in fact kept.
