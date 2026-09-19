@@ -4172,10 +4172,12 @@ mod tests {
         drop(steers);
         let after = mirrored();
         assert_eq!(after.pending("child"), 2, "a restart lost them");
-        let (_receiver, run) = after.open("child");
+        let (_receiver, mut run) = after.open("child");
         assert_eq!(run.prompt("go on"), "first\n\nsecond\n\ngo on");
 
-        // Taken, so nothing is owed and nothing is left on disk.
+        // Taken by a run that started, so nothing is owed any more and
+        // nothing is left on disk for the next process to find.
+        run.started();
         drop(run);
         assert_eq!(after.pending("child"), 0);
         assert_eq!(mirrored().pending("child"), 0);
