@@ -1,5 +1,47 @@
 # DEVLOG
 
+## 2026-09-19 — Work nobody is waiting for
+
+Three defects our own reviews found and nobody went back for. They
+turned out to share a shape: work that keeps running after the last
+person who wanted it has gone, and a promise that only held as long as
+somebody kept auditing the return paths.
+
+**The archive is read off the runtime.** The `history` tool parsed the
+whole session log synchronously inside an async future, holding a
+runtime worker — and every other task on it — for the duration. It now
+goes through the blocking pool, and the parse checks every 256 lines
+whether anyone still wants it, so an abandoned call stops instead of
+finishing. A speaker listing was unbounded in aggregate too: each row
+was capped but a long session's user messages together were not. Fifty
+rows and 16 KiB now, with the count that did not fit and an `after=`
+to continue — a truncated answer the model cannot tell is truncated is
+worse than a short one.
+
+**A started turn cannot end without saying so.** `run_turn` published
+`TurnStarted` and then used `?` in a dozen places; a compaction failure
+or a provider that refused to build a stream returned without the
+terminal `TurnDone` the channel reserves a slot for, and a consumer
+watched a stream that simply stopped. The fix is not a list of audited
+`?` sites, which is a thing that stays correct until the next one: the
+sender itself owes the debt. It records that a start actually went out,
+and on drop — early return, panic, anything — pays the terminal event
+if the turn did not pay it first. A turn that never started still says
+nothing, which is what `TurnNeverStarted` has always meant.
+
+**An abandoned replay stops.** Arrow keys in the session picker start a
+preview loader per row, each parsing a whole archive on a blocking
+thread; the landing guards correctly threw the stale results away,
+which was exactly the problem — the work ran to the end anyway. Focus
+seeds had the same shape on retarget. Both are now structs carrying a
+cancel flag that their own `Drop` raises, so replacing one *is*
+stopping it and no code path can replace and forget. The preview
+watches the flag mid-parse; the focus seed checks it either side of its
+two halves, which are not interruptible from outside.
+
+Two of the three were verified the honest way: the fix was reverted on
+the test box and the new tests watched to fail.
+
 ## 2026-09-19 — A model that thinks out loud
 
 MiniMax M3 does not use `reasoning_content` on the way out. It opens

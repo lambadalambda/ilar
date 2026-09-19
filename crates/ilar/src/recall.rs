@@ -296,31 +296,39 @@ pub fn session_entries_until(
 /// travels, however long it is, so a huge entry is truncated rather
 /// than silently skipped. Returns the page and how many entries it left
 /// behind after it.
+///
+/// One event can hold several entries — an assistant message with two
+/// tool calls is three of them — and the next page is asked for by
+/// event, not by row. So a page never stops inside an event: it takes
+/// the rest of the last one it started, or the caller's `after` would
+/// step over the remainder and the count of what is left would be a
+/// lie.
 pub fn page(
     entries: &[Entry],
     after: Option<usize>,
     max_rows: usize,
     max_chars: usize,
 ) -> (Vec<Entry>, usize) {
+    debug_assert!(max_rows > 0, "a page of no rows can say nothing");
     let rest: Vec<&Entry> = entries
         .iter()
         .filter(|entry| after.is_none_or(|first| entry.event > first))
         .collect();
-    let mut page: Vec<Entry> = Vec::new();
+    let mut taken = 0;
     let mut chars = 0;
     for entry in &rest {
-        if page.len() >= max_rows {
-            break;
-        }
         let length = entry.text.chars().count();
-        if !page.is_empty() && chars + length > max_chars {
+        let full = taken >= max_rows || (taken > 0 && chars + length > max_chars);
+        // Past the cap, but still inside the event this page began:
+        // the rest of it comes too, since `after` addresses events.
+        if full && rest[taken - 1].event != entry.event {
             break;
         }
         chars += length;
-        page.push((*entry).clone());
+        taken += 1;
     }
-    let left = rest.len() - page.len();
-    (page, left)
+    let page: Vec<Entry> = rest[..taken].iter().map(|entry| (*entry).clone()).collect();
+    (page, rest.len() - taken)
 }
 
 /// Every hit one session produced for a query.

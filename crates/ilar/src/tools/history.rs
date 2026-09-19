@@ -311,4 +311,44 @@ mod tests {
         let rendered = render_listing(&none, recall::Speaker::User, left, Some(60));
         assert!(rendered.contains("after event 60"), "{rendered}");
     }
+
+    /// One event can be several entries — an assistant message with two
+    /// tool calls is three. The next page is asked for by event, so a
+    /// page that stopped inside one would step over the remainder and
+    /// report a count that was never true.
+    #[test]
+    fn a_page_never_stops_inside_one_event() {
+        let entry = |event: usize, text: &str| recall::Entry {
+            event,
+            speaker: recall::Speaker::Assistant,
+            text: text.into(),
+        };
+        // Event 7 holds three entries; a two-row page begins it.
+        let entries = vec![
+            entry(5, "before"),
+            entry(7, "said this"),
+            entry(7, "called a tool"),
+            entry(7, "and another"),
+            entry(9, "after"),
+        ];
+
+        let (page, left) = recall::page(&entries, None, 2, MAX_LISTING_CHARS);
+        assert_eq!(
+            page.iter().map(|e| e.event).collect::<Vec<_>>(),
+            [5, 7, 7, 7],
+            "the whole of event 7 travels with its first row"
+        );
+        assert_eq!(left, 1);
+
+        // And the continuation picks up exactly what was left.
+        let last = page.last().unwrap().event;
+        let (next, left) = recall::page(&entries, Some(last), 2, MAX_LISTING_CHARS);
+        assert_eq!(next.iter().map(|e| e.event).collect::<Vec<_>>(), [9]);
+        assert_eq!(left, 0);
+
+        // The char cap keeps the same promise.
+        let (page, left) = recall::page(&entries, None, 50, 1);
+        assert_eq!(page.iter().map(|e| e.event).collect::<Vec<_>>(), [5]);
+        assert_eq!(left, 4);
+    }
 }
