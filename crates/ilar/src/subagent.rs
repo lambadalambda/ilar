@@ -282,8 +282,20 @@ impl Drop for RunningTaskGuard {
 /// taken. Shared with every derived spawner, exactly like the running
 /// registry, so a nested task is reachable from the spawner its own
 /// parent holds.
+/// Messages the parent sent to its children, by child session.
+///
+/// `dir` is what makes the tool's promise true across a quit: a parked
+/// message is one the model was told "waits and is delivered at that
+/// task's next resume", and process memory does not survive a restart
+/// the way a task's session does. The mirror is rewritten whole under
+/// the same lock as the change it records, so the file is never a
+/// half-applied edit — and the list is a handful of short strings, so
+/// whole is cheap.
 #[derive(Clone, Default)]
-struct ChildSteers(Arc<Mutex<std::collections::HashMap<String, ChildSteer>>>);
+struct ChildSteers {
+    steers: Arc<Mutex<std::collections::HashMap<String, ChildSteer>>>,
+    dir: Option<Arc<std::path::PathBuf>>,
+}
 
 #[derive(Default)]
 struct ChildSteer {
@@ -297,6 +309,54 @@ struct ChildSteer {
 }
 
 impl ChildSteers {
+    /// The same store, mirroring parked messages under `dir`.
+    fn with_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.dir = Some(Arc::new(dir));
+        self
+    }
+
+    fn mirror_path(dir: &std::path::Path, session_id: &str) -> std::path::PathBuf {
+        dir.join(format!("{session_id}.json"))
+    }
+
+    /// The child's entry, its parked messages read off disk the first
+    /// time this process touches it — which is how a message parked
+    /// before a restart reaches the resume after it.
+    fn entry<'a>(
+        &self,
+        steers: &'a mut std::collections::HashMap<String, ChildSteer>,
+        session_id: &str,
+    ) -> &'a mut ChildSteer {
+        steers.entry(session_id.to_string()).or_insert_with(|| {
+            let pending = self
+                .dir
+                .as_ref()
+                .and_then(|dir| std::fs::read(Self::mirror_path(dir, session_id)).ok())
+                .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+                .unwrap_or_default();
+            ChildSteer {
+                sender: None,
+                pending,
+            }
+        })
+    }
+
+    /// Write what is parked for this child, or remove the file when
+    /// nothing is. Called under the lock, after every change.
+    fn mirror(&self, session_id: &str, pending: &[String]) {
+        let Some(dir) = self.dir.as_ref() else {
+            return;
+        };
+        let path = Self::mirror_path(dir, session_id);
+        if pending.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        if let Ok(bytes) = serde_json::to_vec(pending) {
+            let _ = crate::memory::write_atomically(&path, &bytes);
+        }
+    }
+
     /// The receiver a child's turn runs with, and the run's claim on
     /// everything that was waiting for it.
     fn open(&self, session_id: &str) -> (crate::agent::SteerReceiver, ChildTurnSteer) {
@@ -316,10 +376,11 @@ impl ChildSteers {
     /// is starting or into the prompt that turn starts from, and never
     /// falls between the two.
     fn begin(&self, session_id: &str, sender: Option<crate::agent::SteerSender>) -> ChildTurnSteer {
-        let mut steers = lock_unpoisoned(&self.0);
-        let entry = steers.entry(session_id.to_string()).or_default();
+        let mut steers = lock_unpoisoned(&self.steers);
+        let entry = self.entry(&mut steers, session_id);
         entry.sender = sender;
         let queued = std::mem::take(&mut entry.pending);
+        self.mirror(session_id, &[]);
         drop(steers);
         ChildTurnSteer {
             session_id: session_id.to_string(),
@@ -332,7 +393,7 @@ impl ChildSteers {
     /// channel took it: the caller then decides between resuming the
     /// task and holding the message for its next resume.
     fn steer(&self, session_id: &str, text: String) -> bool {
-        let mut steers = lock_unpoisoned(&self.0);
+        let mut steers = lock_unpoisoned(&self.steers);
         let Some(entry) = steers.get_mut(session_id) else {
             return false;
         };
@@ -345,23 +406,25 @@ impl ChildSteers {
             return false;
         }
         entry.pending.push(text);
+        let pending = entry.pending.clone();
+        self.mirror(session_id, &pending);
         true
     }
 
     /// Hold a message for a child that cannot be steered right now.
     fn queue(&self, session_id: &str, text: String) {
-        lock_unpoisoned(&self.0)
-            .entry(session_id.to_string())
-            .or_default()
-            .pending
-            .push(text);
+        let mut steers = lock_unpoisoned(&self.steers);
+        let entry = self.entry(&mut steers, session_id);
+        entry.pending.push(text);
+        let pending = entry.pending.clone();
+        self.mirror(session_id, &pending);
     }
 
     /// Whether this exact text is still waiting for the child. The
     /// message verb checks it after a resume it delegated declined, to
     /// say honestly that the message is parked rather than delivered.
     fn holds(&self, session_id: &str, text: &str) -> bool {
-        lock_unpoisoned(&self.0)
+        lock_unpoisoned(&self.steers)
             .get(session_id)
             .is_some_and(|entry| entry.pending.iter().any(|held| held == text))
     }
@@ -370,18 +433,20 @@ impl ChildSteers {
     /// for nothing — matched by text, the way the root's pending strip
     /// clears itself from the same `Steered` event.
     fn delivered(&self, session_id: &str, text: &str) {
-        let mut steers = lock_unpoisoned(&self.0);
+        let mut steers = lock_unpoisoned(&self.steers);
         if let Some(entry) = steers.get_mut(session_id)
             && let Some(index) = entry.pending.iter().position(|held| held == text)
         {
             entry.pending.remove(index);
+            let pending = entry.pending.clone();
+            self.mirror(session_id, &pending);
         }
         Self::prune(&mut steers, session_id);
     }
 
     /// How many messages this task has not read yet.
     fn pending(&self, session_id: &str) -> usize {
-        lock_unpoisoned(&self.0)
+        lock_unpoisoned(&self.steers)
             .get(session_id)
             .map_or(0, |entry| entry.pending.len())
     }
@@ -390,10 +455,12 @@ impl ChildSteers {
     /// never started goes back to the head of the queue, ahead of
     /// whatever was said while it was running.
     fn end(&self, session_id: &str, restored: Vec<String>) {
-        let mut steers = lock_unpoisoned(&self.0);
+        let mut steers = lock_unpoisoned(&self.steers);
         if let Some(entry) = steers.get_mut(session_id) {
             entry.sender = None;
             entry.pending.splice(0..0, restored);
+            let pending = entry.pending.clone();
+            self.mirror(session_id, &pending);
         }
         Self::prune(&mut steers, session_id);
     }
@@ -583,6 +650,10 @@ impl SubagentSpawner {
     /// Persist every published notification to this directory until its
     /// delivery is provable from the parent session's log.
     pub fn with_outbox_dir(mut self, dir: std::path::PathBuf) -> Self {
+        // A parked steer is this session owing a message elsewhere,
+        // which is what the outbox directory is for; it keeps its own
+        // subdirectory so neither reader has to skip the other's files.
+        self.child_steers = self.child_steers.clone().with_dir(dir.join("steers"));
         self.outbox_dir = Some(dir);
         self
     }
