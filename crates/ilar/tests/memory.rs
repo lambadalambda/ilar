@@ -155,15 +155,26 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
     assert!(next.contains("Tea: the person likes earl grey"), "{next}");
 }
 
-/// One rule, said everywhere a note gets written.
+/// One rule, said everywhere a note gets written — and the section
+/// says when to write at all, which is the thing a model otherwise
+/// agrees with and never does.
 #[test]
 fn the_summary_rule_is_in_the_tool_and_the_prompt() {
     let tool = ilar::memory::MemoryTool::new(Arc::new(MemoryStore::new(
         std::env::temp_dir().join("never-written"),
     )));
     assert!(tool.description().contains(SUMMARY_RULE));
+    assert!(
+        tool.description()
+            .contains("amend it rather than file a second")
+    );
     assert!(PROMPT_SECTION.contains(SUMMARY_RULE));
     assert!(PROMPT_SECTION.starts_with("# Remembering\n"));
+    let section = PROMPT_SECTION.as_str();
+    assert!(section.contains("corrects you"), "{section}");
+    assert!(section.contains("before you finish the reply"), "{section}");
+    assert!(section.contains("for now"), "the scope words: {section}");
+    assert!(section.contains("amend the note"), "{section}");
 }
 
 fn memory_recalls(store: &ilar::session::SessionStore, id: &str) -> Vec<Vec<String>> {

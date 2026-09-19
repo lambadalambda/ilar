@@ -225,6 +225,18 @@ impl NoteKind {
 /// listing skips because it is not a `.md` file.
 pub const FORGOTTEN: &str = ".forgotten";
 
+/// Whether a `memory` tool result says something was written — a
+/// `show` reads, and an entry that was already there changed nothing.
+/// A reader of the tool's results cannot tell from the call alone, so
+/// the answer lives next to the strings it reads.
+pub fn was_a_write(result: &str) -> bool {
+    [
+        "added", "replaced", "removed ", "noted ", "amended ", "forgot ",
+    ]
+    .iter()
+    .any(|verb| result.starts_with(verb))
+}
+
 /// What an [`amend`](MemoryStore::amend) changes; `None` keeps what
 /// the note says. The id and `when` are not here: they are the note's
 /// identity and its age, and neither is a thing to rewrite.
@@ -568,12 +580,18 @@ impl MemoryStore {
             when,
             body: body.trim().into(),
         };
-        write_atomically(&self.note_path(&note.id), note_file(&note).as_bytes())?;
+        write_atomically(&self.note_path(&note.id)?, note_file(&note).as_bytes())?;
         Ok(note)
     }
 
-    fn note_path(&self, id: &str) -> PathBuf {
-        self.dir.join("notes").join(format!("{id}.md"))
+    /// A note's file. The id is checked first: it reaches this from a
+    /// model's tool call, and `..` in it would name a file in another
+    /// store — or anywhere.
+    fn note_path(&self, id: &str) -> Result<PathBuf> {
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            bail!("{id:?} is not a note id; ids come from memory_search");
+        }
+        Ok(self.dir.join("notes").join(format!("{id}.md")))
     }
 
     /// Rewrite a note in place, changing only what `change` names. The
@@ -581,13 +599,17 @@ impl MemoryStore {
     /// it, and recency still measures from when the fact was learned,
     /// not from when the words were fixed.
     pub fn amend(&self, id: &str, change: Amendment<'_>) -> Result<Note> {
+        let path = self.note_path(id)?;
         let _write = self.write.lock().unwrap();
-        let path = self.note_path(id);
-        let note = std::fs::read_to_string(&path)
-            .ok()
-            .as_deref()
-            .and_then(parse_note)
-            .ok_or_else(|| anyhow::anyhow!("no note with id {id}; ids come from memory_search"))?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                bail!("no note with id {id}; ids come from memory_search")
+            }
+            Err(error) => return Err(error).with_context(|| format!("reading note {id}")),
+        };
+        let note = parse_note(&text)
+            .ok_or_else(|| anyhow::anyhow!("note {id} is not readable as a note"))?;
         let kind = change.kind.map(NoteKind::as_str).unwrap_or(&note.kind);
         let amended = Note {
             kind: kind.to_string(),
@@ -604,14 +626,23 @@ impl MemoryStore {
     /// or opens with it again — and into `notes/.forgotten/`, so a
     /// note retired by mistake is a move away rather than gone.
     pub fn forget(&self, id: &str) -> Result<()> {
+        let path = self.note_path(id)?;
         let _write = self.write.lock().unwrap();
-        let path = self.note_path(id);
         if !path.is_file() {
             bail!("no note with id {id}; ids come from memory_search");
         }
         let kept = self.dir.join("notes").join(FORGOTTEN);
         std::fs::create_dir_all(&kept).with_context(|| format!("creating {}", kept.display()))?;
         let to = kept.join(format!("{id}.md"));
+        // A note forgotten, put back by hand and forgotten again would
+        // otherwise overwrite the first copy — the one thing this
+        // directory exists to keep.
+        if to.exists() {
+            bail!(
+                "{} already holds a note {id}; move it aside first",
+                to.parent().unwrap_or(&to).display()
+            );
+        }
         std::fs::rename(&path, &to).with_context(|| format!("forgetting note {id}"))?;
         Ok(())
     }
@@ -1609,5 +1640,88 @@ mod tests {
         );
         let again = store.forget(&wrong.id).unwrap_err();
         assert!(again.to_string().contains("no note"), "{again}");
+    }
+
+    /// An id reaches the store from a model's tool call, so it is not
+    /// a path fragment to be trusted: one that could name a file
+    /// outside the archive is refused before anything opens it.
+    #[test]
+    fn an_id_that_is_not_an_id_never_names_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().join("store"));
+        let elsewhere = dir.path().join("elsewhere.md");
+        std::fs::write(&elsewhere, "---\nid: x\nkind: event\ntitle: t\nsummary: s\nwhen: 2026-09-19T12:00:00Z\n---\n\nbody\n").unwrap();
+        for id in ["../../elsewhere", "", "a/b", "a.md"] {
+            let amended = store.amend(id, Amendment::default()).unwrap_err();
+            assert!(
+                amended.to_string().contains("not a note id"),
+                "{id}: {amended}"
+            );
+            let forgotten = store.forget(id).unwrap_err();
+            assert!(
+                forgotten.to_string().contains("not a note id"),
+                "{id}: {forgotten}"
+            );
+        }
+        assert!(elsewhere.is_file(), "nothing outside the archive moved");
+    }
+
+    /// A note carries whatever a body holds, including the frontmatter
+    /// fence, and comes back the same after an amendment — which also
+    /// flattens a title that arrived with a line break in it.
+    #[test]
+    fn a_note_survives_a_body_that_looks_like_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let when = at("2026-03-01T09:30:00Z");
+        let body = "First.\n\n---\nid: not-really\n---\n\nStill the same note.";
+        let note = store
+            .note(
+                NoteKind::Solution,
+                "Fence",
+                "a body with a fence",
+                body,
+                when,
+            )
+            .unwrap();
+        assert_eq!(
+            store.get(std::slice::from_ref(&note.id)).unwrap()[0].body,
+            body
+        );
+
+        store
+            .amend(
+                &note.id,
+                Amendment {
+                    title: Some("Fence\nand more"),
+                    ..Amendment::default()
+                },
+            )
+            .unwrap();
+        // Read back from disk, not from what amend returned.
+        let read = store.get(std::slice::from_ref(&note.id)).unwrap();
+        assert_eq!(read[0].title, "Fence and more");
+        assert_eq!(read[0].body, body, "the body is untouched");
+        assert_eq!(read[0].when, when, "and so is the date it was learned");
+    }
+
+    #[test]
+    fn only_a_memory_write_reads_as_one() {
+        for wrote in [
+            "added",
+            "replaced",
+            "removed 1: \"x\"",
+            "noted 20260919-abc (event)",
+            "amended 20260919-abc (event)",
+            "forgot 20260919-abc",
+        ] {
+            assert!(was_a_write(wrote), "{wrote}");
+        }
+        for read in [
+            "already there, unchanged",
+            "MEMORY.md (0 of 2200 characters):\n",
+        ] {
+            assert!(!was_a_write(read), "{read}");
+        }
     }
 }

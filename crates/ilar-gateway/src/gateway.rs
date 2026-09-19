@@ -1148,6 +1148,17 @@ impl Gateway {
     /// and one line to the chat about what was kept.
     async fn review(&self, seat: &crate::driver::Seat) {
         let episode = seat.episode.lock().unwrap().clone();
+        // The model kept its own memory: it already answered the
+        // question this asks. The episode goes with it — left standing
+        // it would suppress every later review on this seat too.
+        if episode.wrote_memory {
+            *seat.episode.lock().unwrap() = crate::review::Episode::default();
+            log(&format!(
+                "{}: review skipped: the model kept its own memory",
+                seat.key
+            ));
+            return;
+        }
         if !episode.worth_reviewing(self.settings.review.min_tool_calls) {
             return;
         }

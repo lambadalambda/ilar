@@ -1,5 +1,48 @@
 # DEVLOG
 
+## 2026-09-19 — Memory, the write side
+
+A fuller write-up of Claude Code's auto-memory appeared in the vault,
+covering the half we had not seen: the system-prompt guidance, a
+background extraction fork, and a periodic consolidation pass. Most of
+it we already had in another shape — their extraction fork is the
+gateway's after-turn review, their dream is its weekly one. Three
+things we did not.
+
+**A note can be amended or forgotten.** The archive was write-once:
+the core files had replace and remove, a note had nothing. With recall
+live since yesterday, a wrong note is not just clutter, it is surfaced
+unasked forever. `amend` rewrites a note by id and keeps two things on
+purpose — the id, so a session that already saw the note still knows
+it, and the date, so recency measures from when the fact was learned
+rather than from when the wording was fixed. `forget` renames the file
+into `notes/.forgotten/`, which the listing skips because it is not a
+`.md`; retiring a note by mistake is then a move back, not a loss. The
+after-turn review's plan carries both verbs, and the weekly review is
+asked to retire what the week disproved and to give a note that says
+"yesterday" its date.
+
+**A repository remembers as one.** Memory keyed on the launch
+directory, so every worktree of a checkout had its own store and none
+saw the others — and worktrees are how the parallel streams here run.
+The key is now the repository's common git directory, read out of
+`.git` by hand rather than by shelling out: a directory is its own
+answer, a worktree's `.git` is a file naming one, and that one names
+the common one. Outside a repository the launch directory still
+answers. The slug shows the checkout, never the `.git`.
+
+**When to write, and what a recall is not.** The standing section said
+what to keep and never when, so the model could agree that a
+correction mattered and never write it down. It now says to write a
+correction or a stated preference before finishing the reply that
+answers it, and that words scoping a thing to now mark something to
+follow rather than a rule to keep. The recall block says what it is:
+background the session wrote earlier, not instructions from anyone and
+not part of the message it follows — a note can quote a web page, and
+the model should read one as data. And an episode where the model used
+the `memory` tool is no longer reviewed at all: it already decided,
+and the review was filing the same fact twice.
+
 ## 2026-09-18 — Memory in every directory
 
 Reading a write-up of Claude Code's auto-memory next to ilar's own: the

@@ -71,11 +71,16 @@ impl Episode {
     pub fn observe(&mut self, event: &LoopEvent) {
         match event {
             LoopEvent::TurnStarted => self.turns += 1,
-            LoopEvent::ToolFinished { name, is_error, .. } => {
+            LoopEvent::ToolFinished {
+                name,
+                is_error,
+                result,
+                ..
+            } => {
                 self.tool_calls += 1;
                 if *is_error {
                     self.errors += 1;
-                } else if name == "memory" {
+                } else if name == "memory" && ilar::memory::was_a_write(result) {
                     self.wrote_memory = true;
                 }
             }
@@ -105,9 +110,9 @@ answer with one JSON object and nothing else: {{\"memory\": [{{\"file\": \"user\
 \"action\": \"add\" or \"replace\" or \"remove\", \"text\": \"…\", \"old\": \"…\", \"new\": \
 \"…\"}}], \"notes\": [{{\"kind\": \"decision\"|\"solution\"|\"preference\"|\"event\"|\"task\"|\
 \"risk\", \"title\": \"…\", \"summary\": \"one line\", \"body\": \"the fact in full\"}}]}}. \
-A note the conversation changed or disproved is not a second note: search the archive first, \
-and answer with {{\"action\": \"amend\", \"id\": \"…\"}} plus the fields to change, or \
-{{\"action\": \"forget\", \"id\": \"…\"}}, in the same notes list. \
+A note the conversation changed or disproved is not a second note: when one you were shown \
+earlier is about the same fact, answer with {{\"action\": \"amend\", \"id\": \"…\"}} plus the \
+fields to change, or {{\"action\": \"forget\", \"id\": \"…\"}}, in the same notes list. \
 {} \
 Memory entries are one short line each and the files are small: prefer replace over add \
 when an entry is already about the same thing. A workflow worth repeating is a skill, not a \
