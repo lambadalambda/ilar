@@ -1199,6 +1199,49 @@ impl Tool for MemoryGetTool {
 mod tests {
     use super::*;
 
+    /// Every worktree of a repository, and every directory inside one,
+    /// remembers into the same store — the parallel streams run here
+    /// are worktrees of one checkout, and they are one project.
+    #[test]
+    fn a_repository_s_worktrees_and_subdirectories_share_one_memory() {
+        let guard = tempfile::tempdir().unwrap();
+        let root = guard.path().canonicalize().unwrap();
+        let state = root.join("state");
+        let main = root.join("main");
+        let deep = main.join("crates").join("ilar");
+        // A linked worktree, as git lays one out: `.git` is a file
+        // naming a directory under the main checkout's `.git`, and
+        // that directory names the common one.
+        let linked = root.join("wt-feature");
+        let its_git_dir = main.join(".git").join("worktrees").join("feature");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::create_dir_all(&its_git_dir).unwrap();
+        std::fs::write(its_git_dir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", its_git_dir.display()),
+        )
+        .unwrap();
+
+        let checkout = dir_for(&state, &main);
+        assert_eq!(
+            dir_for(&state, &deep),
+            checkout,
+            "a subdirectory is the same project"
+        );
+        assert_eq!(dir_for(&state, &linked), checkout, "so is a worktree of it");
+        // The name says which checkout, not that it is a `.git`.
+        let name = checkout.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.contains("main-"), "{name}");
+        assert!(!name.contains(".git"), "{name}");
+
+        // A directory that is not in a repository keeps its own.
+        let plain = root.join("elsewhere");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_ne!(dir_for(&state, &plain), checkout);
+    }
+
     #[test]
     fn a_directory_s_memory_is_one_slug_however_it_is_spelled() {
         let dir = tempfile::tempdir().unwrap();
