@@ -71,9 +71,10 @@ remove core entries that are no longer true; file as notes what is worth finding
 not worth the core; amend notes the week corrected rather than filing second ones about the \
 same thing, and forget the ones it disproved; rewrite a note that says \"yesterday\" or \"last \
 week\" to name the date, since it will be read months from now; and where two of your skills \
-overlap, merge them with skill_manage — patch the one that stays, delete the other. Skills named stale below have not been used in a while: \
-delete the ones you would not reach for again. Send one short message with what you changed, \
-or that nothing needed changing; do nothing else.";
+overlap, merge them with skill_manage — patch the one that stays, delete the other. Skills \
+named stale below have not been used in a while: delete the ones you would not reach for \
+again. Send one short message with what you changed, or that nothing needed changing; do \
+nothing else.";
 
 /// What the sweep did and found.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

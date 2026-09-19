@@ -138,9 +138,18 @@ in one is what the next needs. Outside a repository the key is the
 canonical launch directory, and two spellings of it share a memory.
 The slug shows the checkout it belongs to. Sessions still group by
 directory, so a memory and a session list need not cover the same
-ground; and a memory written under an older ilar, which keyed every
-directory separately, stays under its own slug. The assistant ([ilar-gateway](gateway.md#memory-that-outlives-a-session))
-keeps one memory under its home instead, with a few rules of its own.
+ground.
+
+An ilar before 0.3.0 keyed every directory on its own, so in a
+repository the store moves once, on the first run of a newer build —
+every checkout's, not only those launched from a subdirectory. Nothing
+is migrated and nothing is lost: the old store keeps its own slug
+beside the new one, two directories with the same visible name and
+different hashes, and its files can be moved across by hand.
+
+The assistant keeps one memory under its home instead, with a few
+rules of its own; see
+[ilar-gateway](gateway.md#memory-that-outlives-a-session).
 
 Two tiers. The core is two small files with hard caps, `MEMORY.md`
 (about the world, 2,200 characters) and `USER.md` (about the person,
@@ -176,8 +185,9 @@ write: a correction or a stated preference goes in before the reply
 that answers it, since the end of a session is a place nobody reaches,
 while words that scope a thing to now mark something to follow here
 rather than a rule to keep. It also says to amend a note rather than
-file a second about the same fact. And one rule for a note's summary: search matches words, not meaning, across the
-whole note and shows the summary, so the summary carries the words a
+file a second about the same fact. And one rule for a note's summary:
+search matches words, not meaning, across the whole note and shows the
+summary, so the summary carries the words a
 future question would use — ticket ids, hostnames, error strings, file
 names. The `memory` tool's description and the assistant's after-turn
 review say the same rule, so a note is found the same way whoever
