@@ -1,5 +1,28 @@
 # DEVLOG
 
+## 2026-09-19 — The docs, and a multiplication
+
+Two more out of the sweeps, both about telling the truth.
+
+**The interface guide said things the code had stopped doing.** Six
+claims, checked one at a time. Five were the doc's fault: attachments
+were said to ride only a fresh turn when a draft's attachments travel
+as a steer or a queued message too; a session switch was said to be
+refused while a stash waits, and a test has pinned the opposite for a
+while; the status-line example printed compact figures the wide line
+never uses; the session picker's row was said to carry the last words
+said, which it no longer does, and the preview that replaced them
+exists only from 96 columns; and a held result claims the notice line
+just as an undeliverable one does. The sixth was the code's: a refusal
+that said "images send with a fresh message" while the draft's images
+were in fact going out with the steer.
+
+**`2 * 3 * 4` is arithmetic.** A single asterisk opened emphasis
+wherever the next one happened to be, so a model explaining a product
+italicised the middle number. CommonMark's flanking rule, in one
+condition: an asterisk opens only when a word follows it and closes
+only when one precedes it. Intraword emphasis still works.
+
 ## 2026-09-19 — Defects out of the sweeps
 
 The four sweep milestones are mostly polish, but real defects were
