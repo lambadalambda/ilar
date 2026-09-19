@@ -3670,16 +3670,29 @@ impl Tool for TasksTool {
             // one is matched to its row; a bare id would also match a
             // sibling's result that merely mentions this task.
             let undelivered = spawner.undelivered_results(&ctx.session_id);
+            let children: Vec<_> = children.into_iter().take(TASK_LISTING_LIMIT).collect();
+            // A listing reads up to twenty children's logs, and a big
+            // child is a big log. Inline, that is a provider step
+            // waiting on a runtime worker doing file I/O for what the
+            // description calls a cheap read-only listing.
+            let ids: Vec<String> = children.iter().map(|child| child.id.clone()).collect();
+            let store = spawner.store.clone();
+            let loaded = crate::tools::blocking_scan(move |cancelled| {
+                ids.iter()
+                    .map(|id| store.load_until(id, &cancelled).ok())
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
             let mut lines = children
                 .into_iter()
-                .take(TASK_LISTING_LIMIT)
-                .map(|child| {
+                .zip(loaded.into_iter().chain(std::iter::repeat_with(|| None)))
+                .map(|(child, session)| {
                     let running = spawner.session_is_active(&child.id);
                     let delivering = spawner
                         .running_tasks()
                         .iter()
                         .any(|task| task.delivering && task.session_id == child.id);
-                    let session = spawner.store.load(&child.id).ok();
                     let run = session
                         .as_ref()
                         .map_or(&[][..], |session| last_run(session.events()));
