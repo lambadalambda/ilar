@@ -72,8 +72,9 @@ pub(crate) enum ToolState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum ToolKind {
+    #[default]
     Tool,
     Agent {
         name: String,
@@ -1067,15 +1068,35 @@ pub(crate) fn complete_open_thought(lines: &mut [Line_]) -> Option<usize> {
 }
 
 /// A fresh running tool row.
+/// What a caller already knows about a tool row when it mints one.
+///
+/// The live path knows nothing but the call's identity and learns the
+/// rest from later events; the restore path has the whole call in hand
+/// and used to spell the seventeen-field variant out itself, which is
+/// how the two drifted over what a fresh row even is.
+#[derive(Default)]
+pub(crate) struct ToolSeed {
+    pub(crate) kind: ToolKind,
+    pub(crate) arguments: String,
+    pub(crate) argument_detail: String,
+    pub(crate) diff: Vec<diff::DiffLine>,
+}
+
 fn new_tool_row(id: &str, group_id: String, name: &str) -> Line_ {
+    new_seeded_tool_row(id, group_id, name, ToolSeed::default())
+}
+
+/// The one place a tool row is born. Everything not in the seed is a
+/// default that both paths share by construction.
+pub(crate) fn new_seeded_tool_row(id: &str, group_id: String, name: &str, seed: ToolSeed) -> Line_ {
     Line_::Tool {
         id: id.to_string(),
         group_id,
         name: name.to_string(),
-        kind: ToolKind::Tool,
-        arguments: String::new(),
-        argument_detail: String::new(),
-        diff: Vec::new(),
+        kind: seed.kind,
+        arguments: seed.arguments,
+        argument_detail: seed.argument_detail,
+        diff: seed.diff,
         tail: String::new(),
         result: None,
         state: ToolState::Running,

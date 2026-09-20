@@ -7,7 +7,7 @@
 use ilar::session::SessionStore;
 
 use crate::diff;
-use crate::transcript::{Line_, ToolKind, ToolProgress, ToolState, kept_result_detail};
+use crate::transcript::{Line_, ToolKind, ToolState};
 
 #[derive(Default)]
 pub(crate) struct RestoredSessionView {
@@ -573,25 +573,23 @@ fn restored_session_invocation_view(
                                     ilar::agent::summarize_tool_input(name, input),
                                 )
                             };
-                            lines.push(Line_::Tool {
-                                id: id.clone(),
-                                group_id: format!("{message_id}:{tool_run}"),
-                                name: name.clone(),
-                                kind,
-                                arguments,
-                                argument_detail: ilar::agent::tool_argument_detail(name, input),
-                                diff: diff::tool_diff_value(name, input),
-                                tail: String::new(),
-                                result: None,
-                                state: ToolState::Running,
-                                progress: ToolProgress::None,
-                                expanded: false,
-                                full: false,
-                                child_lines: Vec::new(),
-                                child_group: 0,
-                                child_running: false,
-                                child_session_id: None,
-                            });
+                            // The live path's constructor, seeded with
+                            // what only a replay knows at birth: the
+                            // live row learns its arguments and its
+                            // diff from later events. Spelling the
+                            // variant out here is how the two drifted
+                            // over what a fresh row is.
+                            lines.push(crate::transcript::new_seeded_tool_row(
+                                id,
+                                format!("{message_id}:{tool_run}"),
+                                name,
+                                crate::transcript::ToolSeed {
+                                    kind,
+                                    arguments,
+                                    argument_detail: ilar::agent::tool_argument_detail(name, input),
+                                    diff: diff::tool_diff_value(name, input),
+                                },
+                            ));
                         }
                         // Why the turn stopped. Without it a resumed
                         // session that died mid-turn just ends, and the
@@ -636,49 +634,36 @@ fn restored_session_invocation_view(
                 child_session_id,
                 ..
             } => {
-                if let Some((state, result, stored_child_session)) =
-                    lines.iter_mut().rev().find_map(|line| match line {
-                        Line_::Tool {
-                            id,
-                            state,
-                            result,
-                            child_session_id,
-                            ..
-                        } if id == tool_use_id => Some((state, result, child_session_id)),
-                        _ => None,
-                    })
-                {
-                    *state = if *is_error {
-                        ToolState::Failed
-                    } else {
-                        ToolState::Succeeded
-                    };
-                    // Redacted like the live row: replay is a display
-                    // too, and the persisted body keeps raw values by
-                    // design — showing them here would undo the live
-                    // redaction at the first reopen.
-                    let content = ilar::agent::redact_tool_result(
-                        call_inputs
-                            .get(tool_use_id)
-                            .unwrap_or(&serde_json::Value::Null),
-                        content,
-                    );
-                    // The same markers the live ToolFinished row appended,
-                    // from the same helper — and kept the way that row
-                    // keeps them: the live path hands the whole
-                    // description, markers included, to
-                    // `kept_result_detail`, so a restored transcript that
-                    // bounded only the text would keep a trailing blank
-                    // line the live row folds away. The stored content is
-                    // the full result, so this is where anything past the
-                    // publish site's 16 KiB streaming cut becomes
-                    // readable again (up to the 256 KiB keep-cap).
-                    *result = Some(kept_result_detail(&format!(
-                        "{content}{}",
-                        ilar::image::markers(images)
-                    )));
-                    *stored_child_session = child_session_id.clone();
-                }
+                // Redacted like the live row: replay is a display too,
+                // and the persisted body keeps raw values by design —
+                // showing them here would undo the live redaction at
+                // the first reopen.
+                let content = ilar::agent::redact_tool_result(
+                    call_inputs
+                        .get(tool_use_id)
+                        .unwrap_or(&serde_json::Value::Null),
+                    content,
+                );
+                // The same markers the live ToolFinished row appends,
+                // handed over whole: the live path gives the entire
+                // description, markers included, to `kept_result_detail`,
+                // so bounding only the text here would keep a trailing
+                // blank line the live row folds away. The stored content
+                // is the full result, so this is where anything past the
+                // publish site's 16 KiB streaming cut becomes readable
+                // again (up to the 256 KiB keep-cap).
+                //
+                // And the settling itself is the live path's, rather
+                // than these rules written out a second time: it also
+                // clears the progress and refuses a row that has
+                // already finished, which this one did not.
+                crate::transcript::finish_tool_row(
+                    &mut lines,
+                    tool_use_id,
+                    *is_error,
+                    &format!("{content}{}", ilar::image::markers(images)),
+                    child_session_id,
+                );
             }
             ilar::session::SessionEvent::ModelChange { model, variant, .. } => {
                 let selection = variant
@@ -999,6 +984,81 @@ mod tests {
         };
         assert_eq!(state(Liveness::Settled), ToolState::Failed);
         assert_eq!(state(Liveness::Running), ToolState::Running);
+    }
+
+    /// A row a replay settles is the row the live path would have
+    /// settled. Both used to write the rules out — the restore path's
+    /// copy took the newest row with a matching id whatever its state,
+    /// and never cleared the progress — so this is the drift that
+    /// minted the focus view's settle bug.
+    #[test]
+    fn a_restored_row_settles_exactly_as_the_live_one_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "zai/glm-4.7".into(),
+                content: vec![ilar::session::ContentBlock::ToolCall {
+                    id: "task-1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({ "command": "cargo test" }),
+                    item_id: None,
+                }],
+                usage: ilar::session::Usage::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::ToolResult {
+                id: new_id(),
+                tool_use_id: "task-1".into(),
+                content: "ok\n".into(),
+                is_error: false,
+                images: Vec::new(),
+                child_session_id: Some("child-9".into()),
+                state: None,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let view = restored_session_view_with_store(
+            &store.load(&session_id).unwrap(),
+            &store,
+            Liveness::Settled,
+        );
+        let Some(Line_::Tool {
+            state,
+            progress,
+            result,
+            child_session_id,
+            ..
+        }) = view
+            .lines
+            .iter()
+            .find(|line| matches!(line, Line_::Tool { id, .. } if id == "task-1"))
+        else {
+            panic!("the tool row is restored: {:?}", view.lines);
+        };
+        assert_eq!(*state, ToolState::Succeeded);
+        // Cleared by `finish_tool_row`, which the restore path now
+        // calls instead of setting the three fields it remembered.
+        assert_eq!(*progress, crate::transcript::ToolProgress::None);
+        assert_eq!(child_session_id.as_deref(), Some("child-9"));
+        assert!(result.as_deref().unwrap_or_default().contains("ok"));
     }
 
     /// Replay is a display too: a secret the arguments hid must not
@@ -1995,25 +2055,15 @@ mod tests {
             ilar::text::bounded_detail(raw),
             ilar::image::markers(images)
         );
-        let mut live = vec![Line_::Tool {
-            id: "call-1".into(),
-            group_id: "g".into(),
-            name: "bash".into(),
-            kind: ToolKind::Tool,
-            arguments: String::new(),
-            argument_detail: "{}".into(),
-            diff: Vec::new(),
-            tail: String::new(),
-            result: None,
-            state: ToolState::Running,
-            progress: ToolProgress::None,
-            expanded: false,
-            full: false,
-            child_lines: Vec::new(),
-            child_group: 0,
-            child_running: false,
-            child_session_id: None,
-        }];
+        let mut live = vec![crate::transcript::new_seeded_tool_row(
+            "call-1",
+            "g".into(),
+            "bash",
+            crate::transcript::ToolSeed {
+                argument_detail: "{}".into(),
+                ..Default::default()
+            },
+        )];
         crate::transcript::finish_tool_row(&mut live, "call-1", false, &published, &None);
         let Some(Line_::Tool {
             result: Some(live_result),
