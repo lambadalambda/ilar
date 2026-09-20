@@ -81,3 +81,24 @@ Still open: `held_notifications` unbounded and the drag-resize debounce
 (both want a number), the five O(entries) scans per frame (which
 belong with [[live-rows-rerender-every-frame]]), and the `/command`
 subtask's full parent-log load.
+
+## Progress (2026-09-20, later)
+
+The `/command` subtask's parent-log load is struck, with the reasons
+spelled out so it is not picked up again as a one-liner.
+
+The issue's own suggestion — "pass `app.current_model` in the request"
+— is wrong, not merely eager. `input.model` outranks an agent
+definition's own `model`, and the TUI has not read the definitions at
+the point where it builds the request, so filling the field would
+silently override an agent pinned to a model. The comment at the
+construction site now says so.
+
+Making the lookup cheap instead is the honest fix and is not small.
+`head()` gives the *opening* model, which a later `ModelChange` makes
+wrong. The replay checkpoint does cache `effective_model`, but only
+exists after a compaction. And a tail scan for the last `ModelChange`
+is wrong in the presence of a rewind, which folds events away — the
+real path handles that and a shortcut would have to as well. What is
+left is an index that records the effective model per session, which
+is a store change with its own issue's worth of care.
