@@ -1319,6 +1319,30 @@ async fn a_restart_tells_the_chat_the_turn_it_dropped() {
     );
 }
 
+/// An `/abort` that lands a second before a restart is still an
+/// `/abort`. The reply used to decide by reading the gateway's own
+/// shutdown flag when it came to answer, so the person who asked for
+/// the turn to stop was told the gateway had stopped it and to send
+/// the prompt again — the opposite of what they wanted.
+///
+/// A unit, not a scenario: the delivery usually wins the race against
+/// the shutdown, so a timed integration test passes either way and
+/// pins nothing.
+#[test]
+fn an_abort_just_before_a_restart_is_still_the_persons_abort() {
+    use ilar_gateway::gateway::{ABORTED_REPLY, RESTARTING_REPLY, aborted_reply};
+
+    // Nobody asked, and the gateway is going down: the prompt was
+    // dropped mid-flight and nothing re-runs it.
+    assert_eq!(aborted_reply(false, true), RESTARTING_REPLY);
+    // Nobody asked and nothing is shutting down — an abort from
+    // somewhere else, the watchdog say.
+    assert_eq!(aborted_reply(false, false), ABORTED_REPLY);
+    // The person asked. Both of these used to say "send that again".
+    assert_eq!(aborted_reply(true, false), ABORTED_REPLY);
+    assert_eq!(aborted_reply(true, true), ABORTED_REPLY);
+}
+
 #[tokio::test]
 async fn a_status_line_follows_the_turn_and_vanishes_before_the_reply() {
     use ilar_gateway::channel::Seen;

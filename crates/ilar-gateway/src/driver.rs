@@ -115,6 +115,13 @@ pub struct Seat {
     /// The running turn's own cancellation, for `/abort`; `None` while
     /// the seat is idle.
     turn_cancel: Mutex<Option<CancellationToken>>,
+    /// Whether the cancellation now in flight was asked for from this
+    /// chat. The reply used to decide by reading the gateway's own
+    /// shutdown flag at delivery time, so an `/abort` that landed a
+    /// second before a restart was answered "the gateway is
+    /// restarting; send that again" — which it was not, and the person
+    /// had not asked for it back.
+    aborted_from_chat: std::sync::atomic::AtomicBool,
     /// Steers handed to the turn and not yet read by the model. Cleared
     /// as the loop reports each one delivered; whatever is left when
     /// the turn ends is the caller's to run again.
@@ -319,6 +326,7 @@ impl Driver {
             turn: tokio::sync::Mutex::new(()),
             steer: Mutex::new(None),
             turn_cancel: Mutex::new(None),
+            aborted_from_chat: std::sync::atomic::AtomicBool::new(false),
             undelivered: Mutex::new(Vec::new()),
             grants,
             cancel: cancel.clone(),
@@ -511,6 +519,8 @@ impl Driver {
         let (steer_tx, steer_rx) = steer_channel();
         *seat.steer.lock().unwrap() = Some(steer_tx);
         let cancel = seat.cancel.child_token();
+        seat.aborted_from_chat
+            .store(false, std::sync::atomic::Ordering::Release);
         *seat.turn_cancel.lock().unwrap() = Some(cancel.clone());
         let outcome = turn(
             &seat.runtime,
@@ -582,11 +592,21 @@ impl Driver {
     pub fn abort(&self, seat: &Seat) -> bool {
         match seat.turn_cancel.lock().unwrap().as_ref() {
             Some(cancel) => {
+                seat.aborted_from_chat
+                    .store(true, std::sync::atomic::Ordering::Release);
                 cancel.cancel();
                 true
             }
             None => false,
         }
+    }
+
+    /// Whether the abort that just ended a turn came from the chat,
+    /// taken rather than read: the next turn on this seat starts with
+    /// the question unanswered again.
+    pub fn abort_was_asked_for(&self, seat: &Seat) -> bool {
+        seat.aborted_from_chat
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     /// Answer the secret ask waiting on the seat, if any: the grant

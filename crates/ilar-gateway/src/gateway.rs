@@ -71,6 +71,21 @@ pub const ABORTED_REPLY: &str = "Aborted.";
 /// person is the one who knows whether it still matters.
 pub const RESTARTING_REPLY: &str = "Aborted: the gateway is restarting; send that again.";
 
+/// Which of the two a cancelled turn is told.
+///
+/// What the person did beats what the process is doing. This read only
+/// `shutting_down`, at delivery time, so an `/abort` that landed a
+/// second before a restart was answered "the gateway is restarting;
+/// send that again" — the opposite of what was asked for, and an
+/// invitation to re-run work the person had just stopped.
+pub fn aborted_reply(asked_for: bool, shutting_down: bool) -> &'static str {
+    if asked_for || !shutting_down {
+        ABORTED_REPLY
+    } else {
+        RESTARTING_REPLY
+    }
+}
+
 /// The same for a subagent's report, which nobody has to send again:
 /// its outbox entry stays and the next start delivers it.
 pub const RESTARTING_FOLLOW_UP: &str =
@@ -586,7 +601,8 @@ impl Gateway {
             Ok(report) if report.outcome == ilar::agent::TurnOutcome::Aborted => {
                 log(&format!("{key}: turn aborted"));
                 self.keep_handovers(seat, &report);
-                self.deliver(&seat.channel, &seat.chat_id, self.aborted_reply())
+                let asked_for = self.driver.abort_was_asked_for(seat);
+                self.deliver(&seat.channel, &seat.chat_id, self.aborted_reply(asked_for))
                     .await;
             }
             Ok(report) => {
@@ -637,12 +653,8 @@ impl Gateway {
     /// What a cancelled turn is told. The gateway stopping is not the
     /// person's `/abort`: their prompt was dropped mid-flight and
     /// nothing re-runs it, so the reply says to send it again.
-    fn aborted_reply(&self) -> &'static str {
-        if self.cancel.is_cancelled() {
-            RESTARTING_REPLY
-        } else {
-            ABORTED_REPLY
-        }
+    fn aborted_reply(&self, asked_for: bool) -> &'static str {
+        aborted_reply(asked_for, self.cancel.is_cancelled())
     }
 
     /// `/grant`, `/password` or `/deny`: the ask standing on this
