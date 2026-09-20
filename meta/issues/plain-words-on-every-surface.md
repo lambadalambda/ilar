@@ -48,3 +48,42 @@ undo or deny.
 Done 2026-09-15 (stream C of the sweep): Enter everywhere, one
 double-press phrasing, Esc close where it is not undo or deny. The
 original list above is still open.
+
+## Outcome (2026-09-20)
+
+**The jargon, all of it.** `outbox adoption failed`, `the outbox
+redelivers it when this session next opens`, `stall watchdog: provider
+silent for Ns — aborting the turn`, `goal round cap (25) reached
+without GOAL_ACHIEVED`, `resume failed turn from current context` and
+`cannot reach it while it is busy` each now say what happened rather
+than which part of the program it happened in. The `GOAL_ACHIEVED`
+sentinel no longer leaks, and a test asserts it cannot.
+
+Two of the issue's entries were already fixed: the warn half of the
+stall notice says `Esc aborts, Ctrl-R then resumes the turn`, and
+`retry-resume` survives only in code comments. `completion arrives as
+a notification` is a doc comment on a field, not a string anyone sees.
+
+**The inconsistencies.** `Thought`/`Thinking` are lowercase like every
+other row label, and so is the question modal's title — it was the one
+overlay that shouted. Tools disclosed with `▶ ▾ ▼` where everything
+else uses `▸ ▾`, and the third triangle was indistinguishable from the
+second; there is one pair now and the third state is the word `full`
+at the end of the details, where truncation takes it before it takes
+the call. `line(s)` made the reader do the grammar. `click to expand`
+named one of the two ways. The aside's footer offered `Esc close`
+where Enter and `q` close it too. The palette's `Switch session` row
+had a blank shortcut column and now names `/sessions`. The question
+footer said `next` on the last question, where Enter sends, and called
+Shift-Tab `BackTab` — the terminal's name for the key, not the
+keyboard's.
+
+Left as it was: the pending manager's footer, which the 09-15 sweep
+already normalised, and `Ctrl-N/Ctrl-P` coverage, which belongs to the
+help overlay and landed there.
+
+Worth knowing: shortening the question footer was forced by a test
+written the day before, which measures the footer against the modal it
+is drawn in. `Shift-Tab back` is three cells longer than `BackTab
+back` and pushed it to 76 in a 74-cell frame — the footer would have
+lost `Esc cancel` at every terminal width.
