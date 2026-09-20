@@ -89,10 +89,26 @@ so it yields Enter with a shift modifier whether or not we pushed any
 flags. The key works and the capability check denies it.
 
 So the keystroke gets the last word. A modified Enter reaching the
-dispatcher could not have been a bare carriage return, and that is
-precisely the property Shift-Enter and Ctrl-M both depend on. The first
-one pressed upgrades the flag and both come back. A handshake is
+dispatcher could not have been a bare carriage return. A handshake is
 evidence about a terminal; an arriving key is proof.
+
+**And then the review caught me generalising that proof too far.** I
+had one flag carrying both claims, so a single Shift-Enter would also
+have started advertising Ctrl-M. The reviewer read tmux's manual rather
+than my commit message: `always` forces modifyOtherKeys *mode 1*, which
+modifies only keys with no well-known representation. CR has one. I
+measured it and they were right — under the recommended settings
+Shift-Enter comes through as `CSI 13;2u` and Ctrl-M comes through as a
+bare `\r`. One press of Shift-Enter would have put Ctrl-M in the help,
+and the next press of *that* would have sent the draft. The exact bug
+the branch exists to kill, reintroduced by the fix for it.
+
+The two claims are separate fields now and each binding says which it
+depends on. The lesson is narrower than "test more": a capability proof
+is about the key you saw, not about the protocol you inferred behind
+it. Three smaller things from the same review — the proof evaporating
+on a session switch, `--view` never reading the handshake at all, and a
+question footer long enough to clip `Esc cancel` off its own modal.
 
 ## 2026-09-20 — The test suite was writing into the repo
 

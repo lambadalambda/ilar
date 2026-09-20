@@ -74,10 +74,32 @@ the report. Probing tenco's tmux settled it:
   buffer, so it yields Enter+SHIFT whether or not the flags were
   pushed.
 
-So the key works and the handshake denies it. `disambiguates_enter`
-takes a modified Enter reaching the dispatcher as proof — it could not
-have been a bare CR — and upgrades the flag. That is the same
-capability Ctrl-M needs, so both bindings come back together.
+So the key works and the handshake denies it. A modified Enter reaching
+the dispatcher is taken as proof — it could not have been a bare CR.
+
+### And the proof does not generalise
+
+The review caught the first version letting one flag carry both claims.
+tmux's `always` forces modifyOtherKeys **mode 1**, which modifies only
+keys with no well-known representation, and CR has one. Measured on
+tenco under the recommended settings:
+
+| key | bytes |
+| --- | --- |
+| Shift-Enter | `ESC [ 1 3 ; 2 u` |
+| Ctrl-M | `\r` |
+| Enter | `\r` |
+
+One Shift-Enter would have advertised Ctrl-M, and pressing that would
+have sent the draft — the defect this issue is about, reintroduced by
+its own fix. `TerminalKeys` holds `enhanced` and `modified_enter`
+apart, and each help binding declares which it needs.
+
+Three more from the same review: the proof is hoisted out of the
+per-session loop so a session switch does not drop it; `watch::run`
+sets the handshake it had been ignoring; and the free-text question
+footer is short enough to fit the modal it is drawn in, which the long
+form was not — it clipped `Esc cancel` at every terminal width.
 
 Left alone: tenco's `~/.tmux.conf` gained `extended-keys always` and
 `extended-keys-format csi-u`, which is where the original report came
