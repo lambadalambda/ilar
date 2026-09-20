@@ -354,6 +354,20 @@ fn push_image_gap(text: &mut String) {
     text.push_str(IMAGE_GAP);
 }
 
+/// Append a run to a buffer of runs, as its own paragraph. Blocks are
+/// separate things said: two of them glued together make one word out
+/// of the end of the first and the start of the second, which is a
+/// token sequence nothing was trained on.
+fn push_paragraph(buffer: &mut String, run: &str) {
+    if run.is_empty() {
+        return;
+    }
+    if !buffer.is_empty() {
+        buffer.push_str("\n\n");
+    }
+    buffer.push_str(run);
+}
+
 /// One image as the chat-completions part.
 fn image_part(image: &crate::session::ImageContent) -> serde_json::Value {
     serde_json::json!({
@@ -414,7 +428,9 @@ fn openai_message(
     let mut tool_results = Vec::new();
     for block in &msg.content {
         match block {
-            ContentBlock::Text { text } => content_text.push_str(text),
+            // A merged pair of user events — a task notification and
+            // the prompt after it — is two things said, not one.
+            ContentBlock::Text { text } => push_paragraph(&mut content_text, text),
             // Vision models get the real part; the placeholder keeps a
             // session with images usable on a text-only model.
             ContentBlock::Image { image } if vision => image_parts.push(image_part(image)),
@@ -423,12 +439,7 @@ fn openai_message(
             // (`StepAccumulator::content_blocks`); a local diagnostic
             // is the thinking of a model that does not.
             ContentBlock::Thinking { text, .. } if replay_thinking.is_some() => {
-                // One run of thought per block; several go back as
-                // paragraphs rather than glued into one word.
-                if !thinking.is_empty() {
-                    thinking.push_str("\n\n");
-                }
-                thinking.push_str(text);
+                push_paragraph(&mut thinking, text);
             }
             ContentBlock::Thinking { .. }
             | ContentBlock::ReasoningSummary { .. }
@@ -1088,6 +1099,54 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// Two user events in a row are merged into one message with two
+    /// text blocks — compaction, a topic, an aside and every delivered
+    /// task notification make that pair. Concatenated bare they reach
+    /// the model as `…</task-notification>fix the bug`, a token run
+    /// nothing was trained on. The neighbouring arms already know it:
+    /// the image gap prepends a newline and thinking a blank line.
+    #[test]
+    fn adjacent_text_blocks_reach_the_model_as_paragraphs() {
+        let message = ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "<task-notification>the build is green</task-notification>".into(),
+                },
+                ContentBlock::Text {
+                    text: "fix the bug".into(),
+                },
+            ],
+        };
+        let wire = openai_message(&message, false, None);
+        let content = wire[0]["content"].as_str().unwrap();
+        assert_eq!(
+            content,
+            "<task-notification>the build is green</task-notification>\n\nfix the bug"
+        );
+    }
+
+    /// An empty block adds no paragraph break of its own.
+    #[test]
+    fn an_empty_text_block_is_not_a_paragraph() {
+        let message = ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: String::new(),
+                },
+                ContentBlock::Text {
+                    text: "fix the bug".into(),
+                },
+                ContentBlock::Text {
+                    text: String::new(),
+                },
+            ],
+        };
+        let wire = openai_message(&message, false, None);
+        assert_eq!(wire[0]["content"].as_str().unwrap(), "fix the bug");
     }
 
     #[test]

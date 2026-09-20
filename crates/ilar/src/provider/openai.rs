@@ -189,11 +189,18 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
     };
     let mut parts: Vec<serde_json::Value> = Vec::new();
     let push_text = |parts: &mut Vec<serde_json::Value>, t: &str| match parts.last_mut() {
-        Some(last) if last["type"] == text_part => {
-            let merged = format!("{}{t}", last["text"].as_str().unwrap_or_default());
-            last["text"] = serde_json::json!(merged);
-        }
         _ if t.is_empty() => {}
+        // Two blocks are two things said. A merged pair of user events
+        // — a task notification and the prompt after it — must not
+        // arrive as one word, so the merge is a paragraph break rather
+        // than a concatenation.
+        Some(last) if last["type"] == text_part => {
+            // Never empty: the only arm that creates a text part
+            // refuses an empty run, and the guard above refuses one
+            // here, so this is always two runs to join.
+            let previous = last["text"].as_str().unwrap_or_default();
+            last["text"] = serde_json::json!(format!("{previous}\n\n{t}"));
+        }
         _ => parts.push(serde_json::json!({"type": text_part, "text": t})),
     };
     let flush_parts = |parts: &mut Vec<serde_json::Value>, items: &mut Vec<serde_json::Value>| {
@@ -896,6 +903,34 @@ mod tests {
     /// bare `{role, content}` pairs and anonymous calls left the backend
     /// synthesizing identity per request, and cache reads collapsed as
     /// soon as a step appended more than a couple of calls.
+    /// Two user events in a row merge into one message with two text
+    /// blocks. Concatenated bare they reach the model as
+    /// `…</task-notification>fix the bug`. One part, two paragraphs.
+    #[test]
+    fn adjacent_text_blocks_reach_the_model_as_paragraphs() {
+        let items = wire_input_items(&ChatMessage {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "<task-notification>the build is green</task-notification>".into(),
+                },
+                ContentBlock::Text {
+                    text: String::new(),
+                },
+                ContentBlock::Text {
+                    text: "fix the bug".into(),
+                },
+            ],
+        });
+        assert_eq!(items.len(), 1);
+        let content = items[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "still one part: {content:?}");
+        assert_eq!(
+            content[0]["text"],
+            "<task-notification>the build is green</task-notification>\n\nfix the bug"
+        );
+    }
+
     #[test]
     fn replayed_items_keep_the_shape_and_identity_the_api_gave_them() {
         let message = wire_input_items(&ChatMessage {
