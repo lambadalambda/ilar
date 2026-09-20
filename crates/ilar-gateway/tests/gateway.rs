@@ -1209,6 +1209,64 @@ async fn slash_unlock_answers_with_a_usage_line_and_takes_the_password_back() {
     gateway.cancel();
 }
 
+/// A password does not stop being a password because the command in
+/// front of it was misspelt: `/unlok hunter2` unlocks nothing, and the
+/// message comes back out of the chat all the same.
+#[tokio::test]
+async fn a_mistyped_unlock_takes_the_password_back_out() {
+    use ilar_gateway::channel::Seen;
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(dir.path(), vec![]);
+    fake.inject("/unlok open sesame", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    let reply = sent[0].text.as_str();
+    assert!(reply.contains("/unlok"), "{reply}");
+    assert!(reply.contains("did you mean /unlock"), "{reply}");
+    // It ran nothing: the store is where it was, and the person has to
+    // send it again.
+    assert!(reply.contains("send it again"), "{reply}");
+    // The reach that catches /unlok catches /lock and /block too, so
+    // the advice is conditional: nobody is told to go audit their
+    // devices for a password they never sent.
+    assert!(
+        reply.contains("I deleted that message, in case there was a password in it"),
+        "{reply}"
+    );
+    assert!(
+        !reply.contains("check that the password is gone"),
+        "an unknown command was treated as a certain leak: {reply}"
+    );
+    // The guess may be wrong, and then the command list is what was
+    // wanted — as for any other unknown command.
+    assert!(reply.contains("/compact"), "{reply}");
+    assert!(
+        fake.seen().iter().any(|s| matches!(s, Seen::Deleted(_))),
+        "{:?}",
+        fake.seen()
+    );
+
+    // An unknown command with no password on it is an ordinary refusal
+    // with the help under it, and nothing is deleted for it.
+    let deletions = fake
+        .seen()
+        .iter()
+        .filter(|s| matches!(s, Seen::Deleted(_)))
+        .count();
+    fake.inject("/dance all night", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert!(sent[1].text.starts_with("No command /dance."), "{sent:?}");
+    assert_eq!(
+        fake.seen()
+            .iter()
+            .filter(|s| matches!(s, Seen::Deleted(_)))
+            .count(),
+        deletions,
+        "{:?}",
+        fake.seen()
+    );
+    gateway.cancel();
+}
+
 #[tokio::test]
 async fn slash_new_stops_the_turn_it_replaces() {
     let dir = tempfile::tempdir().unwrap();

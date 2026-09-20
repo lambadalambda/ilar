@@ -125,6 +125,19 @@ pub fn password_advice(taken_back: bool) -> &'static str {
     }
 }
 
+/// The same, for a command name that only *looked* like `/unlock`. The
+/// reach that catches `/unlok` also catches `/lock` and `/block`, and
+/// telling someone who typed one of those to go audit their devices
+/// for a leaked password is alarming and untrue. The deletion still
+/// happens — the guess is about the word, not about the risk.
+pub fn maybe_password_advice(taken_back: bool) -> &'static str {
+    if taken_back {
+        "I deleted that message, in case there was a password in it."
+    } else {
+        "Delete that message if there was a password in it."
+    }
+}
+
 /// How long a stop waits for turns in flight before giving up on them.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(15);
 /// The pause before a channel that stopped is started again.
@@ -665,6 +678,10 @@ impl Gateway {
 
     /// A slash command, answered by the gateway itself.
     async fn command(&self, key: &str, message: &Inbound, command: Command) -> String {
+        // Whatever else it was, if a password came in on it then it is
+        // in the chat's history now: out it comes first, and every arm
+        // below says whether that worked.
+        let taken_back = command.carries_a_secret() && self.delete_inbound(message).await;
         match command {
             Command::Help => commands::HELP.to_string(),
             Command::Pending => match self.pending.list() {
@@ -700,11 +717,20 @@ impl Gateway {
                 Err(error) => failed_reply("/reject", &error),
             },
             Command::Unknown(name) => format!("No command /{name}.\n{}", commands::HELP),
+            // A misspelt `/unlock` or `/password` ran nothing, so say
+            // that first: the store is still sealed, or the ask is
+            // still standing, and the person is waiting on it. The help
+            // goes under it as it does under any unknown command — the
+            // guess may be wrong, and then the list is what was wanted.
+            Command::MistypedSecret { typed, meant } => format!(
+                "No command /{typed} — did you mean /{meant}? Nothing ran; send it again. {}\n{}",
+                maybe_password_advice(taken_back),
+                commands::HELP
+            ),
             // A password typed after `/grant` answers nothing, and it
-            // is in the chat's history all the same: out it comes, as
-            // `/password` and `/unlock` do it.
+            // is in the chat's history all the same: said as such, and
+            // already taken back out above.
             Command::Misread(text) if text == commands::PASSWORD_AFTER_THE_YES => {
-                let taken_back = self.delete_inbound(message).await;
                 format!("{text} {}", password_advice(taken_back))
             }
             Command::Misread(message) => message,
@@ -746,18 +772,15 @@ impl Gateway {
             Command::Deny => self.answer_ask(key, crate::grants::Answer::No),
             Command::Password(password) => {
                 // In the chat's history the moment it was sent, right
-                // ask or wrong: taken back out where the channel can,
-                // and said either way — as `/unlock` does.
-                let taken_back = self.delete_inbound(message).await;
+                // ask or wrong: taken back out above, and said either
+                // way — as `/unlock` does.
                 let verdict = self.answer_ask(key, crate::grants::Answer::Password(password));
                 format!("{verdict} {}", password_advice(taken_back))
             }
             Command::Usage(usage) => usage.to_string(),
             Command::Unlock(password) => {
                 // Right password or wrong, it is in the chat's history
-                // now: taken back out where the channel can, and said
-                // either way.
-                let taken_back = self.delete_inbound(message).await;
+                // now: taken back out above, and said either way.
                 let store = self.driver.secret_store();
                 let verdict = if !store.is_sealed() {
                     "The secret store is not sealed; nothing to unlock.".to_string()

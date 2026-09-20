@@ -34,9 +34,29 @@ pub enum Command {
     /// Drop a staged plan by id, or `all`.
     Reject(String),
     Unknown(String),
+    /// A misspelt `/unlock` or `/password` that carried an argument:
+    /// nothing was unlocked and the argument was probably the password.
+    MistypedSecret {
+        typed: String,
+        meant: &'static str,
+    },
     /// A known command whose argument does not read as one: the text is
     /// the whole reply, since "No command /grant" would be a lie.
     Misread(String),
+}
+
+impl Command {
+    /// Whether the message this was parsed from has a password in it,
+    /// and so is taken back out of the chat before anything else. Wrong
+    /// password, wrong command, wrong spelling: it is in the history
+    /// all the same.
+    pub fn carries_a_secret(&self) -> bool {
+        match self {
+            Command::Password(_) | Command::Unlock(_) | Command::MistypedSecret { .. } => true,
+            Command::Misread(text) => text == PASSWORD_AFTER_THE_YES,
+            _ => false,
+        }
+    }
 }
 
 /// What a person on a chat does about a sealed secret store, for every
@@ -84,9 +104,18 @@ pub fn parse(text: &str) -> Option<Command> {
         ("pending", _) => Command::Pending,
         ("approve", argument) => Command::Approve(argument.unwrap_or("all").to_string()),
         ("reject", argument) => Command::Reject(argument.unwrap_or("all").to_string()),
-        // Echoed as it was typed: the refusal is about a word the
-        // person wrote, not about our lowercasing of it.
-        (_, _) => Command::Unknown(name.to_string()),
+        // A near-miss of a command that takes a password, with
+        // something after it: that something is the password, and no
+        // command ran to take it back out. Echoed as it was typed
+        // otherwise — the refusal is about a word the person wrote,
+        // not about our lowercasing of it.
+        (_, argument) => match argument.and_then(|_| mistyped_secret(&lowercase)) {
+            Some(meant) => Command::MistypedSecret {
+                typed: name.to_string(),
+                meant,
+            },
+            None => Command::Unknown(name.to_string()),
+        },
     })
 }
 
@@ -131,6 +160,18 @@ fn parse_grant(argument: &str) -> Result<ilar::secrets::Grant, String> {
 pub const PASSWORD_AFTER_THE_YES: &str = "/grant takes a span and nothing else: once, session \
                                           or always. The password is asked for after the yes — \
                                           /password <pw> when sudo asks for it.";
+
+/// The password-taking command a word was probably trying to be:
+/// `/unlok hunter2` unlocks nothing and leaves the password in the
+/// chat. Two edits, the same reach as a misspelt span. A false match
+/// costs an unknown command's message, which did nothing anyway; a
+/// miss costs a password sitting in the history for good.
+fn mistyped_secret(word: &str) -> Option<&'static str> {
+    const WITH_A_PASSWORD: [&str; 2] = ["unlock", "password"];
+    WITH_A_PASSWORD
+        .into_iter()
+        .find(|command| edits_within(word, command, 2))
+}
 
 /// The span a word was probably trying to be: within two edits of one,
 /// and long enough for that to mean something. A password is left
@@ -309,6 +350,71 @@ mod tests {
         assert_eq!(parse("/"), None);
         assert_eq!(parse("what about /new?"), None);
         assert_eq!(parse("1/2 done"), None);
+    }
+
+    /// A misspelt `/unlock` or `/password` unlocks nothing and leaves
+    /// the password in the chat, so it is named as one: the gateway
+    /// takes the message back out on `carries_a_secret`.
+    #[test]
+    fn a_mistyped_unlock_is_still_a_password_in_the_chat() {
+        for (typed, meant) in [
+            ("/unlok open sesame", "unlock"),
+            ("/unlcok open sesame", "unlock"),
+            ("/Unlokc open sesame", "unlock"),
+            ("/pasword hunter2", "password"),
+            ("/passwrod hunter2", "password"),
+        ] {
+            let Some(command) = parse(typed) else {
+                panic!("{typed} did not parse");
+            };
+            assert_eq!(
+                command,
+                Command::MistypedSecret {
+                    typed: typed[1..].split_whitespace().next().unwrap().to_string(),
+                    meant,
+                },
+                "{typed}"
+            );
+            assert!(command.carries_a_secret(), "{typed}");
+        }
+        // Nothing after it is nothing to take back: an ordinary refusal
+        // with the help under it, which names /unlock.
+        assert_eq!(parse("/unlok"), Some(Command::Unknown("unlok".into())));
+        assert!(!parse("/unlok").unwrap().carries_a_secret());
+        // A word that is not trying to be either of them keeps its own
+        // refusal, argument or no argument.
+        assert_eq!(
+            parse("/dance all night"),
+            Some(Command::Unknown("dance".into()))
+        );
+        assert!(!parse("/dance all night").unwrap().carries_a_secret());
+    }
+
+    /// Every message with a password in it is taken back out, whichever
+    /// way it was typed — the gateway asks the command, not the text.
+    #[test]
+    fn every_password_bearing_command_says_so() {
+        for typed in [
+            "/unlock open sesame",
+            "/password hunter2",
+            "/grant session hunter2",
+            "/unlok open sesame",
+        ] {
+            assert!(parse(typed).unwrap().carries_a_secret(), "{typed}");
+        }
+        for typed in [
+            "/unlock",
+            "/password",
+            "/grant session",
+            "/new",
+            "/help",
+            "/dance",
+        ] {
+            assert!(!parse(typed).unwrap().carries_a_secret(), "{typed}");
+        }
+        // The misspelt span is named, not deleted: it is a typo of a
+        // word, not a password.
+        assert!(!parse("/grant sesion").unwrap().carries_a_secret());
     }
 
     /// Every alias the parser takes is a command a person can find.
