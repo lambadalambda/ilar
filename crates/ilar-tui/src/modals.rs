@@ -807,7 +807,11 @@ static HELP_SECTIONS: &[HelpSection] = &[
         title: "Input",
         bindings: &[
             binding!("Enter", "send message"),
-            binding!("Shift-Enter / Ctrl-J", "insert newline"),
+            binding!(
+                "Shift-Enter / Ctrl-J",
+                "insert newline",
+                portable = "Ctrl-J"
+            ),
             binding!(
                 "Esc / Ctrl-C",
                 "dismiss overlay · deny a grant · abort turn · clear input (a multi-line draft stashes)"
@@ -836,6 +840,10 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
             binding!("Up / Down", "scroll line (at the edges of the draft)"),
             binding!("mouse wheel / drag", "scroll · select and copy"),
+            binding!(
+                "Shift-drag",
+                "select with the terminal instead of ilar (ilar holds the mouse while it runs)"
+            ),
             binding!("click ▸/▾", "fold or expand tool details"),
         ],
     },
@@ -3694,6 +3702,25 @@ mod tests {
         );
         // F2 is portable and must always be offered.
         assert!(rendered(false).contains("F2"));
+
+        // Same rule, same reason: without the protocol the terminal
+        // sends one byte for Enter and Shift-Enter, so pressing the
+        // chord sends the draft. Ctrl-J is the line feed and survives
+        // any terminal, so it is offered either way.
+        assert!(rendered(true).contains("Shift-Enter / Ctrl-J"));
+        assert!(
+            !rendered(false).contains("Shift-Enter"),
+            "Shift-Enter is indistinguishable from Enter without keyboard enhancement"
+        );
+        assert!(rendered(false).contains("Ctrl-J"));
+
+        // ilar holds the mouse for its own selection, which takes the
+        // terminal's away; the way back is worth writing down.
+        assert!(
+            rendered(false).contains("Shift-drag"),
+            "{}",
+            rendered(false)
+        );
     }
 
     #[test]

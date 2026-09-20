@@ -232,29 +232,58 @@ mod tests {
     /// send footer would be a promise the view cannot keep.
     #[test]
     fn the_read_only_prompt_offers_no_send() {
+        // "Enter send ·" with the separator: the welcome line in the
+        // transcript says "Enter sends, …" and is not the footer.
+        let watching = screen(true, true);
+        assert!(watching.contains("read-only · q leaves"), "{watching}");
+        assert!(!watching.contains("Enter send ·"), "{watching}");
+        let live = screen(false, true);
+        assert!(live.contains("Enter send ·"), "{live}");
+        assert!(!live.contains("read-only · q leaves"), "{live}");
+    }
+
+    fn screen(read_only: bool, keyboard_enhanced: bool) -> String {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let screen = |read_only: bool| {
-            let mut app = App::new();
-            app.read_only = read_only;
-            let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
-            terminal.draw(|frame| app.render(frame)).unwrap();
-            terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect::<String>()
-        };
-        // "Enter send ·" with the separator: the welcome line in the
-        // transcript says "Enter sends, …" and is not the footer.
-        let watching = screen(true);
-        assert!(watching.contains("read-only · q leaves"), "{watching}");
-        assert!(!watching.contains("Enter send ·"), "{watching}");
-        let live = screen(false);
-        assert!(live.contains("Enter send · Shift-Enter"), "{live}");
-        assert!(!live.contains("read-only · q leaves"), "{live}");
+        let mut app = App::new();
+        app.read_only = read_only;
+        app.keyboard_enhanced = keyboard_enhanced;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    /// A terminal that cannot report Shift-Enter is never offered it —
+    /// pressing it there sends the draft, which reads as ilar swallowing
+    /// a keystroke rather than as a key the terminal does not have. The
+    /// welcome line is written before the terminal has been asked, so it
+    /// names only the key that always works.
+    #[test]
+    fn the_prompt_offers_only_the_newline_keys_that_arrive() {
+        let enhanced = screen(false, true);
+        assert!(
+            enhanced.contains("Enter send · Shift-Enter/Ctrl-J newline"),
+            "{enhanced}"
+        );
+
+        let plain = screen(false, false);
+        assert!(plain.contains("Enter send · Ctrl-J newline"), "{plain}");
+        assert!(
+            !plain.contains("Shift-Enter"),
+            "a key this terminal cannot send was offered: {plain}"
+        );
+        // Including the welcome line, which is the first thing read and
+        // is built before the question has been asked.
+        assert!(
+            !screen(false, true).contains("Enter sends, Shift-Enter"),
+            "the welcome line promises a key it cannot know about"
+        );
     }
 }

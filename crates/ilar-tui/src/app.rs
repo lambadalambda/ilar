@@ -766,8 +766,11 @@ impl App {
     pub(crate) fn new() -> Self {
         Self {
             lines: vec![Line_::System(
-                "ilar — Enter sends, Shift-Enter/Ctrl-J newline, Ctrl-P commands, PgUp/PgDn scroll"
-                    .into(),
+                // Ctrl-J, not Shift-Enter: this line is written before
+                // the terminal has been asked what it can report, and
+                // Ctrl-J is the newline that needs no asking. The
+                // footer names Shift-Enter where it works.
+                "ilar — Enter sends, Ctrl-J newline, Ctrl-P commands, PgUp/PgDn scroll".into(),
             )],
             input: InputBuffer::default(),
             history: history::PromptHistory::in_memory(),

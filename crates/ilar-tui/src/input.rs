@@ -484,6 +484,23 @@ fn moved(moved: bool) -> PromptAction {
     }
 }
 
+/// How to name the keys that put a newline in a draft, to someone
+/// about to press one.
+///
+/// Shift-Enter needs the kitty keyboard protocol: without it a terminal
+/// sends the same byte for Enter and Shift-Enter, the modifier never
+/// arrives, and the arm below sends the draft instead. tmux ships with
+/// `extended-keys off`, so this is the common case, not the exotic one.
+/// Naming a key the terminal cannot report reads as ilar losing
+/// keystrokes. Ctrl-J is the literal line feed and always arrives.
+pub(crate) fn newline_keys(keyboard_enhanced: bool) -> &'static str {
+    if keyboard_enhanced {
+        "Shift-Enter/Ctrl-J"
+    } else {
+        "Ctrl-J"
+    }
+}
+
 pub(crate) fn handle_prompt_key(input: &mut InputBuffer, key: KeyEvent) -> PromptAction {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -986,6 +1003,32 @@ mod tests {
         );
         input.insert("X");
         assert_eq!(input.text(), "one\nXtwo\nthree");
+    }
+
+    /// A terminal that cannot report Shift-Enter is not told about it:
+    /// pressing it there sends the draft, which reads as a lost
+    /// keystroke rather than as a key this terminal does not have.
+    #[test]
+    fn the_newline_keys_offered_are_the_ones_that_arrive() {
+        assert_eq!(newline_keys(true), "Shift-Enter/Ctrl-J");
+        assert_eq!(newline_keys(false), "Ctrl-J");
+        // Whichever is shown, Ctrl-J is among them: it is the literal
+        // line feed and needs no protocol at all.
+        for enhanced in [true, false] {
+            assert!(newline_keys(enhanced).contains("Ctrl-J"));
+            // The shorter one is never wider, so a footer that fits the
+            // enhanced form fits this one too.
+            assert!(newline_keys(false).len() <= newline_keys(enhanced).len());
+        }
+        let mut input = InputBuffer::default();
+        assert_eq!(
+            handle_prompt_key(
+                &mut input,
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)
+            ),
+            PromptAction::Edited
+        );
+        assert_eq!(input.text(), "\n");
     }
 
     /// The edges of a multiline draft are not dead keys: `move_vertical`

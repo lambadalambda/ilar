@@ -3,6 +3,31 @@
 Press **F1** any time for the full keybinding reference. This page
 covers the parts that deserve more than a one-line hint.
 
+## Keys your terminal has to be able to send
+
+Some chords do not survive an ordinary terminal. Without the kitty
+keyboard protocol, **Shift-Enter** arrives as a plain Enter and
+**Ctrl-M** arrives as Enter too, so pressing either would send the
+draft. ilar asks the terminal what it can report at startup and offers
+only what it will get: the footer and F1 name **Shift-Enter/Ctrl-J** on
+a terminal that can tell them apart and **Ctrl-J** alone on one that
+cannot. Ctrl-J is the literal line feed and always works, so a draft
+can always gain a line.
+
+tmux is the usual reason a capable terminal looks incapable: it ships
+with `extended-keys off` and will not pass modified keys through. If
+Shift-Enter sends instead of inserting a newline, put this in
+`~/.tmux.conf` — these are server options, so `-s`:
+
+```
+set -s extended-keys always
+set -s extended-keys-format csi-u
+```
+
+`always` rather than `on`: `on` forwards extended keys only once the
+application has asked for them, and the asking is itself a query that
+may not survive a nested tmux or a slow link.
+
 ## Starting
 
 A bare `ilar` in a directory you have worked in before offers that
@@ -426,7 +451,12 @@ diffs for the tools that change files — an `edit` as a real diff, a
 `write` as the body it wrote, labelled `rewrite` when it replaced a
 file that was already there. **Ctrl-F** searches it, **Ctrl-O** opens any link it
 contains, mouse drag selects and copies, and the palette's "Export
-transcript" writes the session as a Markdown file. Tool rows expand on
+transcript" writes the session as a Markdown file. ilar holds the mouse
+for as long as it runs, which is what its own selection needs and which
+takes the terminal's away: hold **Shift** while dragging to get the
+terminal's selection back. Over SSH a copy travels by OSC 52, so it
+lands on the clipboard of the machine you are sitting at rather than
+the one ilar is running on. Tool rows expand on
 click (or Enter targeting) to show arguments, diffs and output — and a
 truncated block's "… more" row is itself clickable, advancing the
 expansion right where the eye stopped; grouped tool calls align their

@@ -306,7 +306,7 @@ impl QuestionModal {
             .collect()
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame<'_>, available: Rect) {
+    pub(crate) fn render(&self, frame: &mut Frame<'_>, available: Rect, keyboard_enhanced: bool) {
         if available.width == 0 || available.height == 0 || self.request.questions.is_empty() {
             return;
         }
@@ -324,7 +324,7 @@ impl QuestionModal {
             area,
             &title,
             theme::MARKUP,
-            question_footer(question),
+            &question_footer(question, keyboard_enhanced),
         ) else {
             return;
         };
@@ -483,13 +483,14 @@ fn append_choices<'a>(
 
 /// Padded like every other `modal_frame` footer: it is right-aligned in
 /// the bottom border and would otherwise butt into the corner.
-fn question_footer(question: &Question) -> &'static str {
+fn question_footer(question: &Question, keyboard_enhanced: bool) -> String {
     match &question.kind {
-        QuestionKind::FreeText => {
-            " Enter next · Shift-Enter/Ctrl-J newline · ↑↓ question · BackTab back · Esc cancel "
-        }
+        QuestionKind::FreeText => format!(
+            " Enter next · {} newline · ↑↓ question · BackTab back · Esc cancel ",
+            crate::input::newline_keys(keyboard_enhanced)
+        ),
         QuestionKind::SingleChoice { .. } | QuestionKind::MultipleChoice { .. } => {
-            " ↑↓ navigate · Space select · Enter next · BackTab back · Esc cancel "
+            " ↑↓ navigate · Space select · Enter next · BackTab back · Esc cancel ".to_string()
         }
     }
 }
@@ -819,9 +820,18 @@ mod tests {
     }
 
     fn screen(modal: &QuestionModal, width: u16, height: u16) -> String {
+        screen_with(modal, width, height, true)
+    }
+
+    fn screen_with(
+        modal: &QuestionModal,
+        width: u16,
+        height: u16,
+        keyboard_enhanced: bool,
+    ) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| modal.render(frame, frame.area()))
+            .draw(|frame| modal.render(frame, frame.area(), keyboard_enhanced))
             .unwrap();
         terminal.backend().buffer().content.iter().enumerate().fold(
             String::new(),
@@ -844,6 +854,35 @@ mod tests {
         assert!(output.contains("[ ] Rust"));
         assert!(output.contains("Fast and friendly"));
         assert!(output.contains("Enter next"));
+    }
+
+    /// The footer of a free-text question offers Shift-Enter only where
+    /// the terminal can report it; Ctrl-J is offered either way.
+    #[test]
+    fn the_free_text_footer_offers_the_keys_that_arrive() {
+        let free_text = QuestionRequest {
+            questions: vec![Question {
+                id: "q".into(),
+                prompt: "Say something".into(),
+                description: None,
+                required: false,
+                kind: QuestionKind::FreeText,
+            }],
+        };
+        let modal = QuestionModal::new(free_text);
+
+        let enhanced = screen_with(&modal, 100, 24, true);
+        assert!(
+            enhanced.contains("Shift-Enter/Ctrl-J newline"),
+            "{enhanced}"
+        );
+
+        let plain = screen_with(&modal, 100, 24, false);
+        assert!(plain.contains("Ctrl-J newline"), "{plain}");
+        assert!(
+            !plain.contains("Shift-Enter"),
+            "a key this terminal cannot send was offered: {plain}"
+        );
     }
 
     #[test]
