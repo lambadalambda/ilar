@@ -441,3 +441,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [exec names its session](issues/exec-names-its-session.md) — the session leads on stderr or as the first JSON event, tool rows carry their argument, and a turn that stopped short says why
 - [x] [A test run caches into the checkout](issues/a-test-run-caches-into-the-checkout.md) — a guessed state directory is never written to, and a fixture stopped naming Lemonade's live port
 - [x] [The footer names keys the terminal cannot send](issues/the-footer-names-keys-the-terminal-cannot-send.md) — one function decides the newline keys; a modified Enter upgrades the flag the kitty query denied
+- [x] [A tool summary redacts only its generic path](issues/a-tool-summary-redacts-only-its-generic-path.md) — every arm's free text goes through the one redaction policy, not just the fallthrough
+- [x] [exec names a session it then deletes](issues/exec-names-a-session-it-then-deletes.md) — the id is published on the turn's first event, which the user-message append precedes

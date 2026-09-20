@@ -57,7 +57,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
 - [ ] [The replay sweep](issues/the-replay-sweep.md)
-- [ ] [A tool summary redacts only its generic path](issues/a-tool-summary-redacts-only-its-generic-path.md)
 
 ## Milestone 14 — Agents are places
 
@@ -107,7 +106,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Plain words on every surface](issues/plain-words-on-every-surface.md)
 - [ ] [Pickers show the deciding field](issues/pickers-show-the-deciding-field.md)
 - [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
-- [ ] [exec names a session it then deletes](issues/exec-names-a-session-it-then-deletes.md)
 
 ## Milestone 21 — The assistant
 

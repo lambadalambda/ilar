@@ -40,3 +40,30 @@ is `{"type":"session","id":"X"}`, exit is 1, and
   during provider resolution says anything at all, which is what the
   line was for. Keeping the session is probably the better half of the
   trade — an empty session is cheap.
+
+## Outcome (2026-09-20)
+
+The note above picked the wrong half, and trying it showed why.
+Keeping the session does not stop `--continue` opening it:
+`latest_session_in` scans the directory when the pointer says nothing,
+so skipping `remember_last` changes nothing and a failed run would
+leave an empty session as the next `ilar --continue`'s answer. That is
+worse than the defect.
+
+So: emit on the first event. `run_turn` publishes `TurnStarted` after
+appending the user message (`turn.rs:1533` then `:1600`), so the first
+event exec receives means the session is durable — no id is ever
+advertised that the run's own exit removes. A run that dies before then
+prints no id, which is honest: there is no work to point at.
+
+Notices now lead, which is right on its own terms — one may be why the
+turn went the way it did, and they are said even when no turn happens.
+`--json | head -1` is therefore no longer the way to read the id;
+docs/sessions.md says `jq -r 'select(.type=="session").id'` instead.
+
+Pinned by `a_turn_that_never_starts_names_no_session`, which drives a
+resolver with no provider for anything and asserts both that no id was
+printed and that the session really is the disposable kind — so if
+`run_turn` ever appends before resolving, the test says the premise
+moved rather than silently over-protecting. `SessionStore::is_unspoken_root`
+is public for that assertion.

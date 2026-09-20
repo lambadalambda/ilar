@@ -58,6 +58,35 @@ that moved most are the two that had been issuing one call per request
 97% of the time, which is who the sentence was written for. Worth
 remembering that the aggregate would have closed this as a failure.
 
+## 2026-09-20 — Two from yesterday's review
+
+**A redacted projection that only redacted half the time.** Four
+surfaces treat `summarize_tool_input` as safe to publish, and `ilar
+exec` made that matter more by putting it on stderr, which people
+redirect into files. It redacted in the generic fallthrough and nowhere
+else: a tool with an arm of its own returned its free text as written,
+so a `task_message` body or a `grep` pattern carried a credentialed URL
+straight through. Every arm's string lookup goes through the one policy
+now, which also retired two hand-rolled `redact_command` calls — the
+same pair that had drifted apart once before.
+
+**An id the run deleted.** `exec` printed `session <id>` before the
+turn, and `run_turn` resolves the provider before it writes anything,
+so a bad key left the session empty and the run's own exit removed it.
+A script that captured the id got one that would not open.
+
+The issue recommended keeping the empty session instead. I tried that
+and it is wrong: `latest_session_in` scans the directory when the
+pointer is silent, so a failed run would leave an empty session as the
+next `--continue`'s answer. Worse than the defect. The right fix is to
+print the id on the turn's first event, since `TurnStarted` is
+published after the user message is appended. A run that dies before
+then names no session — honest, because there is no work to point at.
+
+Notices lead now, which they should. The cost is that `--json | head -1`
+is no longer the way to read the id, so the docs say to select on the
+event type instead.
+
 ## 2026-09-20 — Keys the terminal cannot send
 
 A report that newlines and mark-to-copy did not work on tenco. Neither

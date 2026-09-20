@@ -36,3 +36,21 @@ far more often than a terminal transcript is.
 - Pre-existing; found by the review of the `small-three` branch,
   2026-09-20, which added the fourth consumer. Not fixed there because
   it changes a function four surfaces share.
+
+## Outcome (2026-09-20)
+
+Fixed at the source, as asked: the `string` closure every arm uses now
+goes through `redacted_argument`, and so do the two places that read
+free text without it — the `question` arm's first prompt and
+`summarize_task_input`'s description. The `bash` and `service` arms'
+explicit `redact_command` calls went with it; they were doing by hand
+what the policy already does, which is how the two had drifted apart
+before.
+
+Pinned by `every_arm_redacts_its_free_text_not_only_the_generic_one`,
+which walks eight tools and asserts a credentialed URL survives none of
+them while the rest of the value survives all of them. Verified by
+restoring the old closure on tenco and watching three tests fail.
+
+The four consumers are unchanged, and `ilar-tui/src/exec.rs` no longer
+hedges about what the summary guarantees.
