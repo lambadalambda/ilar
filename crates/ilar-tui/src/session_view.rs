@@ -31,8 +31,9 @@ pub(crate) struct RestoredSessionView {
 /// recorded a failure, one whose tool call nobody answered, or one
 /// whose results the provider was never told about.
 ///
-/// Walked from the end. A user message means the session moved on and
-/// nothing of that turn is left to continue; an assistant message
+/// Walked from the end. A typed user message means the session moved
+/// on and nothing of that turn is left to continue — a task result
+/// arriving is not that, and is stepped over; an assistant message
 /// carrying a `TurnError` is a failure outright, and one carrying a
 /// tool call the log stops after is a turn cut while the tool ran; a
 /// tool result at the end is a turn cut between the result and the
@@ -44,9 +45,24 @@ pub(crate) struct RestoredSessionView {
 /// — Ctrl-R resumes it" — died on reopen, and the same session said
 /// there was nothing to resume. A turn that hit `MaxIterations` stops
 /// in exactly the same shape.
+/// Whether a user message is one the delivery machinery wrote rather
+/// than one a person typed. Both envelopes, because a task result and
+/// a background job's ending travel the same channel and land the
+/// same way.
+fn is_an_arrival(text: &str) -> bool {
+    task_notification_display(text).is_some() || tool_notification_display(text).is_some()
+}
+
 pub(crate) fn ends_mid_turn(events: &[ilar::session::SessionEvent]) -> bool {
     use ilar::session::{ContentBlock, DiagnosticKind, SessionEvent};
     events.iter().rev().find_map(|event| match event {
+        // An arrival is the one user message nobody typed — a task
+        // result or a background job's ending, which ride the same
+        // delivery. It starts a turn or, salvaged, no turn at all;
+        // either way it did not end the turn it landed behind, and
+        // reading it as the session moving on took the offer away
+        // from a turn still every bit as resumable.
+        SessionEvent::UserMessage { text, .. } if is_an_arrival(text) => None,
         SessionEvent::UserMessage { .. } => Some(false),
         SessionEvent::ToolResult { .. } => Some(true),
         SessionEvent::AssistantMessage { content, .. } => Some(content.iter().any(|block| {
@@ -1519,6 +1535,43 @@ mod tests {
             ends_mid_turn(&[user(), called_tool(), interrupted_tool()]),
             "a result the provider was never told about"
         );
+
+        // A task result that lands after an interrupted turn starts no
+        // turn of its own — a salvage writes it with no turn at all —
+        // so it cannot be what ended one. Reading it as "the session
+        // moved on" took the offer away on reopen while the live one
+        // was still showing.
+        let arrival = || SessionEvent::UserMessage {
+            id: new_id(),
+            text: "<task-notification>\nTask \"build\" completed.\n</task-notification>".into(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
+        };
+        assert!(
+            ends_mid_turn(&[user(), called_tool(), interrupted_tool(), arrival()]),
+            "an arrival does not end the turn it landed behind"
+        );
+        assert!(
+            ends_mid_turn(&[user(), died(), arrival()]),
+            "nor does it undo a recorded failure"
+        );
+        // A background job's ending rides the same delivery and is the
+        // same non-event here.
+        let job_arrival = || {
+            SessionEvent::UserMessage {
+            id: new_id(),
+            text: "<tool-notification>\nBackground job job-1 (\"checks\") completed.\n</tool-notification>".into(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
+        }
+        };
+        assert!(
+            ends_mid_turn(&[user(), called_tool(), job_arrival()]),
+            "a job ending does not end the turn it landed behind"
+        );
+        // A person typing is still the session moving on, which is the
+        // rule this must not break.
+        assert!(!ends_mid_turn(&[user(), died(), arrival(), user()]));
     }
 
     #[test]
