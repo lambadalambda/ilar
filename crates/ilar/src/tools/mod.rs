@@ -1104,6 +1104,20 @@ pub trait Tool: Send + Sync {
     fn accepts_executor_workspace_lease(&self) -> bool {
         false
     }
+    /// Whether this tool belongs in the schema the model is shown right
+    /// now. Almost every tool is there for the whole session and says
+    /// so by saying nothing. A tool whose reason to exist can appear or
+    /// vanish mid-session answers for itself, rather than being decided
+    /// once when the registry was built.
+    ///
+    /// Hidden, not disabled: [`ToolRegistry::get`] ignores this, so a
+    /// model working from a schema fetched a turn ago — or from another
+    /// tool's description, which names its companions unconditionally —
+    /// still gets a real answer rather than "no such tool". A tool that
+    /// hides itself owes a sensible reply to a call that arrives anyway.
+    fn is_published(&self) -> bool {
+        true
+    }
     fn input_schema(&self) -> serde_json::Value;
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture;
     fn run_observed(
@@ -1234,6 +1248,26 @@ impl ToolRegistry {
         self.tools.iter().map(|tool| tool.name()).collect()
     }
 
+    /// The names the model was actually offered: what [`Self::definitions`]
+    /// publishes, plus `question` when a frontend is attached — the
+    /// registry's own tool list cannot hold that one. Not
+    /// [`Self::tool_names`], which is every *registered* tool, including
+    /// any that [`Tool::is_published`] hides right now.
+    ///
+    /// This is the list to answer "what could the model have called".
+    pub fn published_tool_names(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = self
+            .tools
+            .iter()
+            .filter(|tool| tool.is_published())
+            .map(|tool| tool.name())
+            .collect();
+        if self.questions.is_some() {
+            names.push(crate::question::QUESTION_TOOL_NAME);
+        }
+        names
+    }
+
     /// Registry reduced to an agent allowlist (intersection: allowlisted
     /// names absent from this registry are simply not granted).
     pub fn restricted_to(mut self, allowlist: &[String]) -> Self {
@@ -1316,12 +1350,15 @@ impl ToolRegistry {
         )
     }
 
-    /// Registry with the secrets listing attached — for a session
-    /// whose store has something to list.
-    pub fn with_secrets(self) -> Result<Self, DuplicateToolError> {
+    /// Registry with the secrets listing attached. When it shows itself
+    /// is [`secrets_tool::SecretsTool`]'s own business.
+    pub fn with_secrets(
+        self,
+        store: crate::secrets::SecretStore,
+    ) -> Result<Self, DuplicateToolError> {
         self.with_child_tool(
             ChildTool::SECRETS,
-            std::sync::Arc::new(secrets_tool::SecretsTool),
+            std::sync::Arc::new(secrets_tool::SecretsTool::new(store)),
         )
     }
 
@@ -1449,6 +1486,7 @@ impl ToolRegistry {
         let mut definitions = self
             .tools
             .iter()
+            .filter(|t| t.is_published())
             .map(|t| ToolDefinition {
                 name: t.name().into(),
                 description: t.description().into(),

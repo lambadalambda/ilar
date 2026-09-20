@@ -2470,13 +2470,10 @@ async fn run_turn_inner(
         let received_bytes = acc.tool_received_bytes.clone();
         let (lifecycle_tx, mut lifecycle_rx) = tokio::sync::mpsc::unbounded_channel();
         let completed_tx = lifecycle_tx.clone();
-        // The names the model was actually offered: `definitions()` adds
-        // question when a frontend is attached, and the registry's own
-        // tool list cannot hold it.
-        let mut known_tools = registry.tool_names();
-        if registry.question_sender().is_some() {
-            known_tools.push(crate::question::QUESTION_TOOL_NAME);
-        }
+        // The names the model was actually offered — not every name the
+        // registry holds. A tool it was not shown must not appear in
+        // the "this session has" list of a refusal.
+        let known_tools = registry.published_tool_names();
         let execution = execute_calls_observed(
             calls,
             |name| registry.get(name),

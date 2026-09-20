@@ -860,17 +860,9 @@ impl RuntimePlan {
                 .map(|memory| crate::memory::RecallConfig::new(memory.store.clone())),
             ..loop_config
         };
-        // The listing costs a tool; a machine that has never stored a
-        // secret does not pay it. A store file that exists does install
-        // it, empty or not: the same rule the children use
-        // (`SubagentSpawner::agent_registry`), and one `ilar secret set`
-        // mid-session no longer leaves the parent without the tool its
-        // bash schema points at.
-        let registry = if secrets.store().exists() {
-            registry.with_secrets()?
-        } else {
-            registry
-        };
+        // Always attached; whether it shows is the tool's own call, per
+        // turn. See `tools::secrets_tool`.
+        let registry = registry.with_secrets(secrets.store().clone())?;
         let registry = if config.agent.sudo {
             registry.with_sudo()?
         } else {

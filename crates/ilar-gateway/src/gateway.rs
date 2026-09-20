@@ -301,7 +301,7 @@ impl Gateway {
     pub fn tool_names(&self, key: &str) -> Option<Vec<&'static str>> {
         self.driver
             .seat_by_key(key)
-            .map(|seat| seat.runtime.registry.tool_names())
+            .map(|seat| seat.runtime.registry.published_tool_names())
     }
 
     /// Each agent a chat may spawn, with the tools it is restricted to

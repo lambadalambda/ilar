@@ -164,6 +164,14 @@ async fn public_channel_carries_request_and_oneshot_reply() {
 #[test]
 fn questions_are_an_explicit_non_executable_root_definition() {
     let ordinary = ToolRegistry::builtin();
+    // Every builtin publishes itself, so without a frontend the schema
+    // is exactly the registered set: `question` is the one name that
+    // appears in the schema and resolves to nothing.
+    assert_eq!(
+        ordinary.published_tool_names(),
+        ordinary.tool_names(),
+        "no builtin hides itself"
+    );
     assert_eq!(ordinary.definitions().len(), ordinary.tool_names().len());
     assert!(ordinary.get("question").is_none());
 

@@ -2517,7 +2517,7 @@ async fn every_tool_result_is_scrubbed_of_stored_values() {
         .unwrap();
     let secrets = ilar::secrets::Secrets::new(store.clone());
     let scrubbing = ctx(dir.path()).with_secrets(secrets.clone());
-    let registry = registry().with_secrets().unwrap();
+    let registry = registry().with_secrets(store.clone()).unwrap();
 
     // Through the executor, which every real call goes through.
     let calls = vec![
@@ -3027,5 +3027,36 @@ async fn a_password_wanted_after_a_passing_probe_is_still_asked_for() {
         out.content.contains("password is required"),
         "{}",
         out.content
+    );
+}
+
+/// The `secrets` tool appears and disappears with the store file, on
+/// the turn after it changes. Regression: the registry decided once,
+/// so the first `ilar secret set` of a machine's life left the running
+/// session without the tool its bash schema points at until a restart.
+#[test]
+fn the_secrets_tool_follows_the_store_file_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let store = ilar::secrets::SecretStore::open(&state);
+    let registry = registry().with_secrets(store.clone()).unwrap();
+
+    let published = |registry: &ilar::tools::ToolRegistry| {
+        registry
+            .definitions()
+            .iter()
+            .any(|definition| definition.name == "secrets")
+    };
+
+    assert!(!store.exists());
+    assert!(
+        !published(&registry),
+        "a machine that has never stored a secret pays for no listing"
+    );
+
+    store.set("TOKEN", "a token", "value").unwrap();
+    assert!(
+        published(&registry),
+        "the same registry publishes the tool once the store exists"
     );
 }
