@@ -583,18 +583,25 @@ impl Driver {
         let runtime = &seat.runtime;
         let tools = runtime.registry.definitions();
         let services = runtime.registry.running_services();
-        ilar::compaction::compact_session(
+        // The seat's, so `/new` does not wait out a compaction it is
+        // throwing away — and registered as the seat's cancellable
+        // work, so `/abort` reaches it too. A compaction is a provider
+        // call on a whole session: the one thing most worth being able
+        // to stop, and the only one `/abort` could not.
+        let cancel = seat.cancel.child_token();
+        *seat.turn_cancel.lock().unwrap() = Some(cancel.clone());
+        let outcome = ilar::compaction::compact_session(
             runtime.resolver.as_ref(),
             &runtime.store,
             &runtime.session_id,
             Some(&runtime.system_prompt),
             &tools,
             &services,
-            // The seat's, so `/new` does not wait out a compaction it
-            // is throwing away.
-            &seat.cancel.child_token(),
+            &cancel,
         )
-        .await
+        .await;
+        *seat.turn_cancel.lock().unwrap() = None;
+        outcome
     }
 
     /// Cancel the turn running on the seat; `false` when none is.
