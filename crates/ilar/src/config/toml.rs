@@ -1000,12 +1000,6 @@ impl Config {
         Ok(agents)
     }
 
-    /// Build a concrete provider for "provider/model-id", or None if the
-    /// model cannot be reached. [`Self::provider_result`] says why.
-    pub fn provider_for(&self, model: &str) -> Option<Box<dyn crate::provider::Provider>> {
-        self.provider_result(model).ok()
-    }
-
     /// The provider for "provider/model-id", or what to do about it.
     /// A malformed id, a provider nobody knows, an id that provider does
     /// not serve, a provider with no credential and a row that

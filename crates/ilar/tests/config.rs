@@ -589,17 +589,17 @@ fn invalid_agents_md_is_reported_instead_of_falling_back() {
 }
 
 #[test]
-fn provider_for_builds_concrete_providers() {
+fn provider_result_builds_concrete_providers() {
     let config = Config::default_for_tests();
-    assert!(config.provider_for("zai/glm-4.7").is_some());
-    assert!(config.provider_for("openai/gpt-5.2").is_some());
-    assert!(config.provider_for("unknown/model").is_none());
+    assert!(config.provider_result("zai/glm-4.7").is_ok());
+    assert!(config.provider_result("openai/gpt-5.2").is_ok());
+    assert!(config.provider_result("unknown/model").is_err());
 }
 
 #[test]
 fn chatgpt_auth_needs_no_api_key() {
-    // Regression: provider_for bailed on the missing api_key before
-    // reaching the chatgpt branch.
+    // Regression: the provider lookup bailed on the missing api_key
+    // before reaching the chatgpt branch.
     let (_g, dir) = tempdir();
     write(
         &dir.join("ilar.toml"),
@@ -607,7 +607,7 @@ fn chatgpt_auth_needs_no_api_key() {
     );
     let config = Loader::no_env().config_dir(dir).resolve().unwrap();
     assert!(
-        config.provider_for("openai/gpt-5.6-sol").is_some(),
+        config.provider_result("openai/gpt-5.6-sol").is_ok(),
         "chatgpt-auth provider without api_key must resolve"
     );
 }
@@ -654,8 +654,8 @@ fn one_opencode_key_reaches_both_gateways() {
         config.providers["opencode-go"].api_key.as_deref(),
         Some("ok")
     );
-    assert!(config.provider_for("opencode/glm-5.2").is_some());
-    assert!(config.provider_for("opencode-go/gpt-5.6-luna").is_some());
+    assert!(config.provider_result("opencode/glm-5.2").is_ok());
+    assert!(config.provider_result("opencode-go/gpt-5.6-luna").is_ok());
 
     let models = config.available_models();
     for id in [
@@ -704,8 +704,8 @@ fn one_opencode_key_reaches_both_gateways() {
         config.providers["opencode-go"].api_key.as_deref(),
         Some("go-only")
     );
-    assert!(config.provider_for("opencode/glm-5.2").is_none());
-    assert!(config.provider_for("opencode-go/glm-5.2").is_some());
+    assert!(config.provider_result("opencode/glm-5.2").is_err());
+    assert!(config.provider_result("opencode-go/glm-5.2").is_ok());
     let models = config.available_models();
     assert!(models.iter().all(|model| model.provider != "opencode"));
     assert!(models.iter().any(|model| model.provider == "opencode-go"));
@@ -971,7 +971,7 @@ fn project_cannot_reset_chatgpt_auth_or_inject_a_key() {
     // The user's OAuth mode still builds a client — for the Codex
     // catalog it serves. An API-key-only row is refused by name rather
     // than sent and answered with model_not_found.
-    assert!(config.provider_for("openai/gpt-5.6-sol").is_some());
+    assert!(config.provider_result("openai/gpt-5.6-sol").is_ok());
     let refused = config
         .provider_result("openai/gpt-5.2")
         .err()
@@ -1565,13 +1565,13 @@ fn an_endpoint_discovers_its_models_and_remembers_them() {
     // The wire answers to the endpoint's name: a request checks the
     // model's prefix against its dialect's, and "custom" would fail it.
     let provider = config
-        .provider_for("lemon/Qwen3.8-27B-GGUF")
+        .provider_result("lemon/Qwen3.8-27B-GGUF")
         .expect("a provider");
     assert_eq!(
         ilar::provider::Provider::provider_prefix(provider.as_ref()),
         Some("lemon")
     );
-    assert!(config.provider_for("lemon/Z-Image-Turbo").is_none());
+    assert!(config.provider_result("lemon/Z-Image-Turbo").is_err());
     assert_eq!(
         config.context_limit("lemon/Qwen3.8-27B-GGUF"),
         Some(131_072)
@@ -1585,7 +1585,7 @@ fn an_endpoint_discovers_its_models_and_remembers_them() {
         .state_dir(state)
         .resolve()
         .unwrap();
-    assert!(again.provider_for("lemon/Qwen3.8-27B-GGUF").is_some());
+    assert!(again.provider_result("lemon/Qwen3.8-27B-GGUF").is_ok());
     assert!(
         again
             .warnings
