@@ -357,6 +357,15 @@ impl Driver {
             private,
             grants,
         )?;
+        // What this launch asked for and did not get — a reasoning
+        // variant the model has no such thing as, an agent override a
+        // resumed session will not record. The TUI prints these; here
+        // they went nowhere, so a dropped setting looked like the
+        // setting not existing. The log is the gateway's only voice
+        // that is not somebody's chat.
+        for notice in &plan.notices {
+            log(&format!("session: {notice}"));
+        }
         let mut runtime = plan.start_with(&self.config, self.resolver.clone())?;
         self.restrict(&mut runtime.registry);
         Ok(runtime)

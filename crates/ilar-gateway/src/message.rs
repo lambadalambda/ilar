@@ -16,7 +16,14 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::bus::{Outbound, session_key};
+use crate::driver::log;
 use crate::routes::RouteStore;
+
+/// How long taking the chat's status line down may hold the tool call.
+/// It goes over the channel's rpc, and a wedged one hung the turn here
+/// — a line left standing a few seconds is cosmetic, a turn that never
+/// returns is not.
+const CLEAR_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Deserialize)]
 struct Input {
@@ -247,8 +254,20 @@ impl Tool for MessageTool {
             // it comes down before the reply does — and only this
             // seat's own line: a message to another chat leaves that
             // chat's running turn alone.
-            if key == home_key {
-                status.clear(&home_key).await;
+            //
+            // Bounded, because this runs inside the tool call: taking
+            // the line down goes over the channel's rpc, and a wedged
+            // one hung the whole turn here. A line left standing for a
+            // few seconds is a cosmetic fault; a turn that never
+            // returns is not.
+            if key == home_key
+                && tokio::time::timeout(CLEAR_STATUS_TIMEOUT, status.clear(&home_key))
+                    .await
+                    .is_err()
+            {
+                log(&format!(
+                    "{home_key}: status line not cleared in time; sending anyway"
+                ));
             }
             if outbound.send(message).await.is_err() {
                 return ToolOutput::error("message: the gateway is not delivering");
