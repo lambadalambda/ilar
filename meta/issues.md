@@ -58,6 +58,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
 - [ ] [The replay sweep](issues/the-replay-sweep.md)
 - [ ] [A tool summary redacts only its generic path](issues/a-tool-summary-redacts-only-its-generic-path.md)
+- [ ] [A test run caches into the checkout](issues/a-test-run-caches-into-the-checkout.md)
 
 ## Milestone 14 — Agents are places
 

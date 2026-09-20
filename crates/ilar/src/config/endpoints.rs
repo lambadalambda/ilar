@@ -155,30 +155,47 @@ pub(crate) fn discovered_rows(
 
 /// Discover an endpoint's models: the live listing when the server
 /// answers in time, the cached one otherwise. Warnings say which.
+///
+/// `state_dir` is `None` when there is no state directory worth the
+/// name — `HOME` unset and neither variable given, so the default
+/// resolved to the working directory. A listing is then used and not
+/// remembered: caching into whatever directory the process happens to
+/// be standing in is how a checkout ends up with a `.local` in it.
 pub(crate) fn discover(
     name: &str,
     endpoint: &Endpoint,
-    state_dir: &Path,
+    state_dir: Option<&Path>,
 ) -> (Vec<RuntimeModel>, Vec<String>) {
     let mut warnings = Vec::new();
-    let cache = state_dir.join("endpoints").join(format!("{name}.json"));
+    let cache = state_dir.map(|dir| (dir, dir.join("endpoints").join(format!("{name}.json"))));
     let listing = match fetch_listing(&endpoint.base_url, endpoint.api_key.as_deref()) {
         Ok(listing) => {
-            if let Err(error) = std::fs::create_dir_all(cache.parent().unwrap_or(state_dir))
-                .and_then(|()| std::fs::write(&cache, &listing))
-            {
-                warnings.push(format!("endpoints.{name}: listing not cached: {error}"));
+            match &cache {
+                Some((state_dir, cache)) => {
+                    if let Err(error) = std::fs::create_dir_all(cache.parent().unwrap_or(state_dir))
+                        .and_then(|()| std::fs::write(cache, &listing))
+                    {
+                        warnings.push(format!("endpoints.{name}: listing not cached: {error}"));
+                    }
+                }
+                None => warnings.push(format!(
+                    "endpoints.{name}: listing not cached — HOME is not set, so there is no \
+                     state directory to keep it in"
+                )),
             }
             listing
         }
-        Err(error) => match std::fs::read_to_string(&cache) {
-            Ok(cached) => {
+        Err(error) => match cache
+            .as_ref()
+            .map(|(_, cache)| std::fs::read_to_string(cache))
+        {
+            Some(Ok(cached)) => {
                 warnings.push(format!(
                     "endpoints.{name}: {error:#}; using the models it listed last time"
                 ));
                 cached
             }
-            Err(_) => {
+            _ => {
                 warnings.push(format!(
                     "endpoints.{name}: {error:#}; no models known from it yet"
                 ));
@@ -310,13 +327,48 @@ mod tests {
             base_url: "http://127.0.0.1:9/api/v1".into(),
             ..endpoint()
         };
-        let (rows, warnings) = discover("lemon", &dead, dir.path());
+        let (rows, warnings) = discover("lemon", &dead, Some(dir.path()));
         assert!(rows.is_empty());
         assert!(warnings[0].contains("no models known"), "{warnings:?}");
         std::fs::create_dir_all(dir.path().join("endpoints")).unwrap();
         std::fs::write(dir.path().join("endpoints/lemon.json"), LEMONADE).unwrap();
-        let (rows, warnings) = discover("lemon", &dead, dir.path());
+        let (rows, warnings) = discover("lemon", &dead, Some(dir.path()));
         assert_eq!(rows.len(), 3);
         assert!(warnings[0].contains("listed last time"), "{warnings:?}");
+    }
+
+    /// With no state directory worth the name — `HOME` unset and
+    /// nothing given instead — the listing is still used and nothing
+    /// is written. The alternative is caching into whatever directory
+    /// the process happens to be standing in.
+    #[test]
+    fn a_guessed_state_directory_is_never_written_to() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.read(&mut [0u8; 2048]);
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{LEMONADE}",
+                    LEMONADE.len()
+                )
+                .as_bytes(),
+            );
+        });
+        let live = Endpoint {
+            base_url: format!("http://127.0.0.1:{port}/api/v1"),
+            ..endpoint()
+        };
+
+        let (rows, warnings) = discover("lemon", &live, None);
+
+        // The models are there — only the remembering is refused.
+        assert_eq!(rows.len(), 3);
+        assert!(
+            warnings.iter().any(|note| note.contains("not cached")),
+            "the refusal is silent: {warnings:?}"
+        );
     }
 }

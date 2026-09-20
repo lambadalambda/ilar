@@ -1046,7 +1046,7 @@ fn base_urls_are_canonical_and_refused_by_field() {
         &dir.join("ilar.toml"),
         "[providers.zai]\napi_key = \"k\"\nbase_url = \"https://zai.test/api/v1/\"\n\n\
          [models.local]\nbase_url = \"http://127.0.0.1:8080/v1/\"\ncontext = 8192\n\n\
-         [endpoints.lemon]\nbase_url = \"http://127.0.0.1:13305/api/v1/\"\n",
+         [endpoints.lemon]\nbase_url = \"http://127.0.0.1:9/api/v1/\"\n",
     );
     let config = Loader::no_env().config_dir(dir.clone()).resolve().unwrap();
     assert_eq!(
@@ -1056,7 +1056,7 @@ fn base_urls_are_canonical_and_refused_by_field() {
     assert_eq!(config.models["local"].base_url, "http://127.0.0.1:8080/v1");
     assert_eq!(
         config.endpoints["lemon"].base_url,
-        "http://127.0.0.1:13305/api/v1"
+        "http://127.0.0.1:9/api/v1"
     );
 
     for (body, field, why) in [
@@ -1484,6 +1484,50 @@ fn model_listing_server(body: &'static str) -> String {
         let _ = stream.write_all(response.as_bytes());
     });
     format!("http://127.0.0.1:{port}/api/v1")
+}
+
+/// With `HOME` unset and no state directory given, the default is the
+/// working directory — and this suite resolves configs that way 54
+/// times. A test that named a live local endpoint cached its listing
+/// into `crates/ilar/.local/state/ilar/`, in the checkout, where it sat
+/// untracked until someone noticed. The models still resolve; only the
+/// remembering is refused, and the warning says so.
+#[test]
+fn a_guessed_state_directory_does_not_collect_a_cache() {
+    let base = model_listing_server(
+        r#"{"object":"list","data":[
+            {"id":"Qwen3.8-27B-GGUF","labels":["chat"],"downloaded":true,"context_length":8192}
+        ]}"#,
+    );
+    let (_g, dir) = tempdir();
+    // A name of its own: the assertion is about a path under the
+    // working directory, which every other test in this file shares.
+    write(
+        &dir.join("ilar.toml"),
+        &format!("[endpoints.homelesscache]\nbase_url = \"{base}\"\n"),
+    );
+
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+
+    assert!(
+        config
+            .available_models()
+            .iter()
+            .any(|model| model.full_id() == "homelesscache/Qwen3.8-27B-GGUF"),
+        "the listing was not used at all"
+    );
+    assert!(
+        config
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("not cached")),
+        "{:?}",
+        config.warnings
+    );
+    assert!(
+        !std::path::Path::new(".local/state/ilar/endpoints/homelesscache.json").exists(),
+        "a test wrote into the checkout"
+    );
 }
 
 /// An endpoint's models are discovered from its listing, addressed as

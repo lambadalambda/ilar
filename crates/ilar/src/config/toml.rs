@@ -730,13 +730,13 @@ impl Loader {
         let Dirs {
             config: user_dir,
             state: state_dir,
-            ..
+            homeless,
         } = self.resolve_dirs();
         let project_dir = match self.project_dir.clone() {
             Some(project_dir) => project_dir,
             None => std::env::current_dir().context("resolving current project directory")?,
         };
-        Config::load(user_dir, project_dir, state_dir, &self)
+        Config::load(user_dir, project_dir, state_dir, homeless, &self)
     }
 }
 
@@ -775,10 +775,14 @@ impl Dirs {
 }
 
 impl Config {
+    /// `guessed_state` is true when the state directory came from the
+    /// `HOME`-less fallback: it is the working directory, and nothing
+    /// is cached into it. See [`Dirs::require_home`].
     fn load(
         user_dir: PathBuf,
         project_dir: PathBuf,
         state_dir: PathBuf,
+        guessed_state: bool,
         env: &Loader,
     ) -> anyhow::Result<Self> {
         // User file first, then project files layered on top. Theme stays user-scoped
@@ -847,9 +851,9 @@ impl Config {
         let endpoints = merged.endpoints.take().unwrap_or_default();
         let mut endpoint_names = endpoints.keys().cloned().collect::<Vec<_>>();
         endpoint_names.sort();
+        let cache_dir = (!guessed_state).then_some(state_dir.as_path());
         for name in &endpoint_names {
-            let (discovered, notes) =
-                super::endpoints::discover(name, &endpoints[name], &state_dir);
+            let (discovered, notes) = super::endpoints::discover(name, &endpoints[name], cache_dir);
             warnings.extend(notes);
             custom_models.extend(crate::model::register_runtime(&discovered));
         }
