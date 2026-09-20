@@ -439,3 +439,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The docs say what the code does](issues/the-docs-say-what-the-code-does.md) — five doc corrections and one false refusal; the code was right five times out of six
 - [x] [Independent tool calls go together](issues/independent-tool-calls-go-together.md) — the sentence landed in 7c91c80; measured per model, the two build models that batched least moved 1.07→1.22 and 1.04→1.29
 - [x] [exec names its session](issues/exec-names-its-session.md) — the session leads on stderr or as the first JSON event, tool rows carry their argument, and a turn that stopped short says why
+- [x] [A test run caches into the checkout](issues/a-test-run-caches-into-the-checkout.md) — a guessed state directory is never written to, and a fixture stopped naming Lemonade's live port

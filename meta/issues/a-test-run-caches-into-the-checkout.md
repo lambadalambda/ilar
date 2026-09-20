@@ -41,3 +41,23 @@ Two things combine:
 - Noticed 2026-09-20 while restoring tenco's checkout after a gate run.
 - Deliberately not solved by adding `.local` to `.gitignore`: that
   hides the next occurrence rather than stopping it.
+
+## Outcome (2026-09-20)
+
+Both halves. `endpoints::discover` takes `Option<&Path>`, `None`
+meaning the state directory was guessed: the listing is used, nothing
+is written, and a warning says why rather than the refusal being
+silent. `Config::load` passes `Dirs::homeless` through to decide it.
+The fixture that named Lemonade's port now names the dead one.
+
+Pinned by `a_guessed_state_directory_does_not_collect_a_cache`, which
+asserts on the path under the working directory, and by
+`a_guessed_state_directory_is_never_written_to` on the function.
+Verified by restoring the old behaviour on tenco and watching both the
+test fail and the file reappear; the gate then ran green there and left
+a clean tree, which it had not been doing.
+
+Left alone: the 54 call sites still resolve state to the working
+directory. Nothing writes there now, and rewriting them all is churn —
+but a future writer under the state directory would revive this, so the
+real guard is that `resolve()` still does not call `require_home`.

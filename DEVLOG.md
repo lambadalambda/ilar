@@ -58,6 +58,33 @@ that moved most are the two that had been issuing one call per request
 97% of the time, which is who the sentence was written for. Worth
 remembering that the aggregate would have closed this as a failure.
 
+## 2026-09-20 — The test suite was writing into the repo
+
+Restoring tenco's checkout after a gate run turned up an untracked
+`crates/ilar/.local/state/ilar/endpoints/lemon.json`. Two things had to
+line up, and both are worth knowing.
+
+`resolve_dirs` falls back to `./.local/state/ilar` when `HOME` is
+unset. It flags that as `homeless`, and `require_home` exists to refuse
+it — but `resolve()` never calls it, so the guard only protects
+frontends that remember to ask. Fifty-four of the fifty-six loader call
+sites in the config suite resolve without a state directory, so every
+one of them had been pointing state at the crate root all along.
+
+The second half is worse and explains why only tenco showed it. A test
+about URL canonicalisation had written `http://127.0.0.1:13305` into
+its fixture — Lemonade's port. On the Mac nothing answers, so discovery
+failed and there was nothing to cache. On tenco the test was making a
+real request to the user's own model server and caching its reply into
+the checkout. A fixture that reads as a placeholder was an address.
+
+`discover` takes `Option<&Path>` now: no state directory means the
+listing is used and not remembered, with a warning rather than silence.
+The fixture points at the dead port its sibling test already uses. I
+checked the test by putting the old behaviour back on tenco and
+watching the file reappear. Not added to `.gitignore` on purpose —
+ignoring it would only hide the next one.
+
 ## 2026-09-19 — The docs, and a multiplication
 
 Two more out of the sweeps, both about telling the truth.
