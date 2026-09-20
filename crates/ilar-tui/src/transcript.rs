@@ -1582,8 +1582,16 @@ fn entry_rows(
             } else {
                 0
             };
+            let called: Vec<String> = calls
+                .iter()
+                .filter_map(|call| match call {
+                    Line_::Tool { name, kind, .. } => Some(display_name(name, kind)),
+                    _ => None,
+                })
+                .collect();
             let mut header = tool_group_line(
                 calls.len(),
+                &called,
                 running,
                 failed,
                 *expanded,
@@ -1644,21 +1652,26 @@ fn entry_rows(
 
 fn tool_group_line(
     calls: usize,
+    names: &[String],
     running: usize,
     failed: usize,
     expanded: bool,
     width: u16,
 ) -> Line<'static> {
     let disclosure = if expanded { "▾" } else { "▸" };
+    // What was called, not just how many: `3 calls ✓` collapsed the one
+    // thing a reader wants from a folded group. Behind the state, so a
+    // narrow row loses the names rather than losing what happened.
+    let named = tool_names_summary(names);
     let (status, icon, color) = if running > 0 {
         (
-            format!("{running} running · {}", call_count(calls)),
+            format!("{running} running · {}{named}", call_count(calls)),
             "◐",
             TOOL_ACTIVE,
         )
     } else if failed > 0 {
         (
-            format!("{} · {failed} failed", call_count(calls)),
+            format!("{} · {failed} failed{named}", call_count(calls)),
             "×",
             ERROR,
         )
@@ -1666,7 +1679,7 @@ fn tool_group_line(
         // A tool group that worked is scaffolding, not news: there is one
         // under every thought. Green on all of them is green that cannot
         // also mean "this one succeeded".
-        (call_count(calls), "✓", MUTED)
+        (format!("{}{named}", call_count(calls)), "✓", MUTED)
     };
     let text = truncate_display(
         &format!("tools {disclosure} {status} {icon}"),
@@ -1678,6 +1691,34 @@ fn tool_group_line(
 
 fn call_count(calls: usize) -> String {
     format!("{calls} {}", if calls == 1 { "call" } else { "calls" })
+}
+
+/// The distinct tools a group called, in the order they were called,
+/// with a count where one repeats: ` · read ×3, grep, bash`. Empty
+/// when there is nothing to name, so the caller can append it blind.
+fn tool_names_summary(names: &[String]) -> String {
+    let mut distinct: Vec<(&str, usize)> = Vec::new();
+    for name in names {
+        match distinct.iter_mut().find(|(seen, _)| *seen == name) {
+            Some((_, count)) => *count += 1,
+            None => distinct.push((name, 1)),
+        }
+    }
+    if distinct.is_empty() {
+        return String::new();
+    }
+    let listed = distinct
+        .into_iter()
+        .map(|(name, count)| {
+            if count == 1 {
+                name.to_string()
+            } else {
+                format!("{name} ×{count}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(" · {listed}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2605,7 +2646,14 @@ fn tool_line_with_disclosure(
         .map(|label| UnicodeWidthStr::width(label) + 2)
         .unwrap_or(0);
     let available_name = width.saturating_sub(fixed).saturating_sub(progress_reserve);
-    let name_limit = available_name.clamp(1, 20);
+    // A tool name is a word; an agent's carries its model override —
+    // `explore@glm-4.7` — and a flat cap of 20 cut exactly the part
+    // that says this one is not running on the default.
+    let name_cap = match kind {
+        ToolKind::Tool => 20,
+        ToolKind::Agent { .. } => 32,
+    };
+    let name_limit = available_name.clamp(1, name_cap);
     let name = truncate_display(&name, name_limit, Truncation::Right);
     // Padded exactly to the widest sibling in the row's own group —
     // that is what alignment costs, and no more. A standalone row has
@@ -2623,8 +2671,26 @@ fn tool_line_with_disclosure(
     } else {
         theme::SECONDARY
     };
+    // What the call is about first, its state behind — and the state
+    // keeps its room rather than giving way. The two used to be one
+    // string cut from the right, so on a narrow row whichever came
+    // second vanished whole: `executing · 3s · cargo t…` said the
+    // state twice, once in the spinner, and never named the command.
+    let room = width.saturating_sub(used).saturating_sub(1);
     let details = match (arguments.is_empty(), progress.is_empty()) {
-        (false, false) => format!("{progress} · {arguments}"),
+        (false, false) => {
+            let reserved = UnicodeWidthStr::width(progress.as_str()) + 3;
+            match room.checked_sub(reserved).filter(|room| *room >= 4) {
+                Some(for_arguments) => format!(
+                    "{} · {progress}",
+                    truncate_display(&arguments, for_arguments, Truncation::Right)
+                ),
+                // Not enough for both: the state, which is short and
+                // whole. A row this narrow cannot say anything useful
+                // about the command either way.
+                None => progress,
+            }
+        }
         (false, true) => arguments,
         (true, false) => progress,
         (true, true) => String::new(),
@@ -2638,11 +2704,7 @@ fn tool_line_with_disclosure(
         (true, false) => format!("{details} · full"),
         (false, _) => details,
     };
-    let details = truncate_display(
-        &details,
-        width.saturating_sub(used).saturating_sub(1),
-        Truncation::Right,
-    );
+    let details = truncate_display(&details, room, Truncation::Right);
     let mut spans = vec![
         Span::styled(label, Style::default().fg(label_color)),
         Span::styled(
@@ -2729,6 +2791,58 @@ fn notification_lines(
 mod tests {
     /// A wrapped row keeps its gutter: continuation rows sit under the
     /// label, not at column 0, and none of them overflows.
+    /// A row is cut from the right, so whichever of the command and
+    /// the state came second used to vanish whole. The command leads
+    /// and the state keeps its room; only when neither fits does the
+    /// state win, being short and the only thing a row that narrow can
+    /// carry.
+    #[test]
+    fn a_running_row_names_its_command_and_keeps_its_state() {
+        let now = std::time::Instant::now();
+        let row = |width: u16| {
+            rendered_text(&tool_line(
+                "bash",
+                &ToolKind::Tool,
+                "git status --short && find . -maxdepth 3 -type f | sort",
+                ToolState::Running,
+                width,
+                std::time::Duration::ZERO,
+                ToolProgress::Queued,
+                now,
+            ))
+        };
+
+        // Wide: both, command first.
+        let wide = row(100);
+        assert!(wide.contains("git status"), "{wide}");
+        assert!(wide.ends_with("queued"), "{wide}");
+        // Narrow: the state, whole rather than cut to `queue…`.
+        let narrow = row(30);
+        assert!(narrow.contains("queued"), "{narrow}");
+    }
+
+    /// An agent's name carries its model override, and a flat cap of
+    /// twenty cut exactly the part that says this one is not on the
+    /// default.
+    #[test]
+    fn an_agent_name_keeps_the_model_it_was_pinned_to() {
+        let now = std::time::Instant::now();
+        let pinned = rendered_text(&tool_line(
+            "task",
+            &ToolKind::Agent {
+                name: "repository-reviewer".into(),
+                model: Some("zai/glm-5.3".into()),
+            },
+            "inspect every lifecycle path",
+            ToolState::Running,
+            120,
+            std::time::Duration::ZERO,
+            ToolProgress::None,
+            now,
+        ));
+        assert!(pinned.contains("repository-reviewer@glm-5.3"), "{pinned}");
+    }
+
     /// Three tool states, two triangles: the third one said `▼` where
     /// the second says `▾`, which nobody could tell apart at a glance.
     /// The state is a word now, at the end of the details where
@@ -3441,10 +3555,13 @@ mod tests {
             false,
         );
         let rendered: Vec<String> = rows.iter().map(|row| rendered_text(&row.line)).collect();
-        let bash = rendered.iter().find(|row| row.contains("bash")).unwrap();
+        let bash = rendered
+            .iter()
+            .find(|row| row.contains("bash") && !row.starts_with("tools"))
+            .unwrap();
         let fetch = rendered
             .iter()
-            .find(|row| row.contains("webfetch"))
+            .find(|row| row.contains("webfetch") && !row.starts_with("tools"))
             .unwrap();
 
         // Both check marks land in the same column: bash is padded by
@@ -3488,9 +3605,11 @@ mod tests {
             rendered.iter().any(|row| row.contains("1 failed")),
             "{rendered:?}"
         );
+        // Skipping the group header, which now names every call it
+        // holds — the row is what has to survive the fold.
         let failed = rendered
             .iter()
-            .find(|row| row.contains("read"))
+            .find(|row| row.contains("read") && !row.starts_with("tools"))
             .unwrap_or_else(|| panic!("the failed call must stay visible: {rendered:?}"));
         assert!(failed.contains("missing.rs"), "{failed}");
         assert!(failed.contains("no such file"), "{failed}");
@@ -3683,7 +3802,12 @@ mod tests {
 
         // A group of calls that all worked is scaffolding; one that failed
         // is not.
-        let succeeded = tool_group_line(3, 0, 0, false, 80);
+        let called = ["read".to_string(), "read".to_string(), "grep".to_string()];
+        let succeeded = tool_group_line(3, &called, 0, 0, false, 80);
+        // The names, not just the count: a folded group used to say
+        // "3 calls ✓" and nothing about what it called.
+        let text = rendered_text(&succeeded);
+        assert!(text.contains("read ×2, grep"), "{text}");
         assert!(
             succeeded
                 .spans
@@ -3691,7 +3815,7 @@ mod tests {
                 .all(|span| span.style.fg == Some(MUTED)),
             "{succeeded:?}"
         );
-        let failed = tool_group_line(3, 0, 1, false, 80);
+        let failed = tool_group_line(3, &called, 0, 1, false, 80);
         assert!(
             failed.spans.iter().any(|span| span.style.fg == Some(ERROR)),
             "{failed:?}"

@@ -7432,8 +7432,14 @@ mod tests {
             .map(rendered_text)
             .collect::<Vec<_>>();
 
-        assert!(rendered.iter().any(|line| line.contains("read")));
-        assert!(!rendered.iter().any(|line| line.contains("grep")));
+        // Again: the group headers name their calls, so look at the
+        // rows rather than at every line.
+        let rows: Vec<&String> = rendered
+            .iter()
+            .filter(|line| !line.contains("tools ▸") && !line.contains("tools ▾"))
+            .collect();
+        assert!(rows.iter().any(|line| line.contains("read")), "{rows:?}");
+        assert!(!rows.iter().any(|line| line.contains("grep")), "{rows:?}");
         assert_eq!(
             rendered
                 .iter()
@@ -7468,8 +7474,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(rendered[0].contains("1 running · 2 calls"), "{rendered:?}");
-        assert!(rendered.iter().any(|line| line.contains("grep")));
-        assert!(!rendered.iter().any(|line| line.contains("read")));
+        // The header names both, folded or not — that is what it is
+        // for. What the fold hides is the finished call's own row.
+        assert!(rendered[0].contains("read, grep"), "{rendered:?}");
+        let rows = &rendered[1..];
+        assert!(rows.iter().any(|line| line.contains("grep")), "{rows:?}");
+        assert!(!rows.iter().any(|line| line.contains("read")), "{rows:?}");
     }
 
     #[test]
