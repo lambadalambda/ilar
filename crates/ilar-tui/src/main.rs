@@ -545,6 +545,13 @@ fn apply_command_overrides(
             description: format!("/{name}"),
             prompt: expanded,
             agent: overrides.agent.unwrap_or_else(|| "build".into()),
+            // The model is deliberately left unset when the command
+            // names none. The task tool then falls back to the
+            // parent's effective model — which costs a full load of
+            // the parent's log — and filling it here from
+            // `app.current_model` would be wrong, not just eager:
+            // `input.model` outranks an agent definition's own model,
+            // and at this point nothing has read the definitions.
             model: overrides.model,
             variant: overrides.variant,
         });
