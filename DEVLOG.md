@@ -1,5 +1,56 @@
 # DEVLOG
 
+## 2026-09-20 — The flaky test was right
+
+`adoption_requeues_outbox_completions_as_follow_up_turns` had been
+failing about one run in eight for three weeks, recorded with numbers
+and a shrug: not attributable, no plausible mechanism, parked. I had
+read it as a timing race in the test.
+
+It was a real bug, and the test was the only thing reporting it.
+
+The first move was to make the failure say something. The patience loop
+panicked with "the transcript never arrived", which names nothing, so
+it now prints what it last saw. The very first failure gave the shape
+away: `meta → user_message(hello again) → assistant_message(resumed)`.
+The first turn ran and answered. The recovered completion never became
+a second turn at all. And `follow_up` prints a line on every path where
+it gives up, and printed none — so it was never reached, and the
+adoption scan had come back empty.
+
+One `eprintln` on the skipped-entry arm of `outbox::pending` settled
+it, identically on every failing run:
+
+    session path changed during canonical replay
+
+`pending` reads each parent's log to work out what is undelivered. The
+store refuses a window it watched change mid-read rather than hand back
+half of one — correct, and exactly what a turn appending to that same
+log causes. `pending` treated the refusal as "skip it, a later scan
+gets it". That comment was written for a surface that opens a session
+and scans once. `ilar serve` adopts at the moment a message starts a
+turn *on that very session*: the scan and the write are concurrent by
+construction, and there is no later scan, because the engine adopts
+once.
+
+So a finished child's result was lost for the life of the process,
+silently, whenever the race landed. Not a test artifact. The kind of
+thing the outbox exists to prevent.
+
+The read is retried — five attempts, 20 ms apart, only for errors that
+are not "this session is gone". Before: 4/25 and 3/25 failing runs of
+the workspace invocation on tenco. After: 0 in 100 consecutive.
+
+Two lessons worth keeping. A test that fails by exhausting a poll loop
+tells you nothing; the same test made to describe what it saw pointed
+at the cause in one run. And "leave it for the next open" is a claim
+about the caller, not about the function — it needed checking against
+every caller, and one of them never opens anything again.
+
+The sibling flake really was a test problem: the listing and the
+children come off one cache but not necessarily one refresh, so the
+test waited for the roots and assumed the children. It waits for both.
+
 ## 2026-09-20 — The task nobody could watch
 
 A subtask started from the TUI — `/command`, the picker — ran with no

@@ -88,3 +88,48 @@ workspace invocation starves it. Not understood. `scripts/check.sh`
 now runs the TUI's all-features suite crate-scoped, which is the same
 coverage without the interaction; the 30 s → 60 s patience change is
 kept but was not the fix.
+
+## Found and fixed (2026-09-20)
+
+It was not a test problem. It was a real one, and the test was the only
+thing reporting it.
+
+The patience loop was made to say what it last saw instead of only that
+it gave up, and the first failure named the shape at once: the first
+turn had run and answered, and the recovered completion had simply
+never become a second turn. No drop message from `follow_up` — its slot
+wait is patient and its lease wait says so when it gives up — which
+left only one candidate: the adoption scan came back empty.
+
+A line on the skipped-entry arm of `outbox::pending` confirmed it, the
+same text every failing run:
+
+    outbox: skipping <id>: its log could not be read
+    (session <id>: session path changed during canonical replay)
+
+`pending` reads each parent's log to decide what is undelivered. The
+store refuses a window it saw change mid-read rather than hand back
+half of one. `pending` took that refusal as "skip it, a later scan will
+get it" — true for a surface that opens a session and scans once, and
+false for `ilar serve`, whose adoption fires *at the moment a message
+starts a turn on that very session*. The scan and the write are
+concurrent by construction. There is no later scan: the engine adopts
+once per session, at start.
+
+So a recovered task result was lost for the life of the process,
+whenever the race landed. The test was not flaky about nothing; it was
+flaky about a real completion going missing.
+
+The read is retried now — five attempts, 20 ms apart, and only for
+errors that are not "this session is gone". The unreadable case still
+skips, and now says so.
+
+**Measured.** Before: 4/25 and 3/25 failures under `cargo test
+--workspace --all-features --bin ilar` on tenco. After: **0 failures in
+100 consecutive runs** of the same invocation.
+
+The second flake — `the_listing_carries_a_row_per_root_session` coming
+back with no children — was a test problem. The roots and the children
+come off the same cache but not necessarily from the same refresh, so
+waiting for the roots said nothing about the children. It waits for the
+children now, and says how many it last saw if it gives up.
