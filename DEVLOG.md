@@ -58,6 +58,52 @@ that moved most are the two that had been issuing one call per request
 97% of the time, which is who the sentence was written for. Worth
 remembering that the aggregate would have closed this as a failure.
 
+## 2026-09-20 — Clearing the uncontroversial backlog
+
+Three batches of small fixes, each gated and the last independently
+reviewed. Two of them are worth writing down, because both were fixes
+that did not fix anything and only measurement showed it.
+
+**An empty session kept its pointer anyway.** A `delete` refused
+because another process holds the writer lease read as "keep this
+session", so the directory was left pointing at a log with nothing in
+it. I made `end_session` withhold `remember_last` for a session it had
+judged empty, which is what the issue asked for and achieves nothing:
+`create` points the directory at every new root session, so the empty
+log already owned the pointer before we got there. It has to be taken
+back by hand. The log itself stays, which is right — a held lease means
+another process is live in that session, and once it says something the
+scan can find it again as a real one.
+
+**A service released its output on the one path nobody uses.** Exited
+services held their whole 256 KiB capture for the life of the process.
+I trimmed to the tail on exit, and the review found that `stop` — the
+action the tool's own description tells the model to use — sets
+`exited` itself and skips the trim. Worse, since the trim's guard was
+the transition, no later refresh could run it either. And a service
+that daemonizes leaves the shell dead in milliseconds, so the trim ran
+on an empty buffer and the grandchild then refilled it for hours. One
+setter for both endings, and the trim runs on every status read.
+
+**Six help entries were being clipped, including the one I added.**
+The overlay is 72 columns whatever the terminal is, which leaves 43 for
+the action text. My test rendered at 80 and asserted on text the reader
+never sees. Ctrl-Q's summary also said "mail", a word that names
+nothing in the interface, and dropped "retry", which is still a row I
+had simply not checked for.
+
+The pattern in all three: I verified the change against the thing I had
+just written rather than against the thing the user meets.
+
+Two items I struck rather than fixed. The ASCII/Unicode fold mismatch
+in the search prefilter is already handled for the half that matters —
+a non-ASCII query is refused the fast path outright — and closing the
+rest means Unicode-folding every chunk of every file, which is the
+whole cost the prefilter exists to avoid. And `outbox::retire` taking a
+blocking lock on the render loop stays: moving it off means a tombstone
+that may not land before the process exits, trading a certain rare
+duplicate for a rare freeze, which is not my call to make silently.
+
 ## 2026-09-20 — Two from yesterday's review
 
 **A redacted projection that only redacted half the time.** Four
