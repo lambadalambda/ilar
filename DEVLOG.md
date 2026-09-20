@@ -58,6 +58,53 @@ that moved most are the two that had been issuing one call per request
 97% of the time, which is who the sentence was written for. Worth
 remembering that the aggregate would have closed this as a failure.
 
+## 2026-09-20 — The backlog, second half
+
+More of the same sweep. Four issues closed outright and two partly;
+the parts worth writing down are the ones where the obvious fix was
+not the fix.
+
+**Two surfaces disagreed about what clickable looks like, and my first
+answer made a third one worse.** The sidebar had three copies of click
+plumbing — a field, a hover block, a click method and a per-frame
+reset each — which collapsed into one hit map cleanly. The hover
+followed: an agent is two lines and one target, and only the line under
+the pointer used to light up. Then I widened the transcript's
+structural predicate so the sidebar's markers would stay bare, and the
+review caught what that did: a tool row's `▶` is its own span and is
+the very thing a click acts on, so hovering one now had a hole punched
+through the middle of its underline — and only above 72 columns, where
+the row is rendered as separate spans. The sidebar has its own
+predicate now.
+
+The same review caught a subtler one. I grouped the hover by the
+action's value, and actions repeat: a background job has no session to
+focus, so its target is the root's. Hovering a job lit up `● main` and
+every other job with it. A clickable is a set of lines now, stated by
+the panel rather than inferred from equality.
+
+**The loop already knew what every tool call was about.** Three
+consumers kept the unbounded raw input, parsed it again and
+re-summarised it — a two-megabyte `write` body cloned per call to
+produce a hundred characters. `ToolArguments` carries the finished
+summary, published from the same event that produces the raw input.
+Two of the three now follow it. The third is the replay path, which
+reads the session log; the log stores the input and not the summary,
+so there is no event there to follow, and the issue now says so rather
+than carrying an item nobody could do.
+
+**A footer that could not fit.** Renaming `BackTab` to the key's real
+name, Shift-Tab, made the question modal's footer three cells too wide
+for the modal it is drawn in — caught by a test written the day before
+that measures one against the other. Without it the footer would have
+quietly lost `Esc cancel` at every terminal width.
+
+Two items left open with the reason rather than done badly. Labelling
+a parent's message inside a subagent timeline needs a new `Line_`
+variant across 31 match sites; `done` flipping to `×` needs a fourth
+`ToolState` across 85, for a one-frame icon change on a row that
+already explains itself in words.
+
 ## 2026-09-20 — Clearing the uncontroversial backlog
 
 Three batches of small fixes, each gated and the last independently
