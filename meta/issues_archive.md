@@ -443,3 +443,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The footer names keys the terminal cannot send](issues/the-footer-names-keys-the-terminal-cannot-send.md) — one function decides the newline keys; a modified Enter upgrades the flag the kitty query denied
 - [x] [A tool summary redacts only its generic path](issues/a-tool-summary-redacts-only-its-generic-path.md) — every arm's free text goes through the one redaction policy, not just the fallthrough
 - [x] [exec names a session it then deletes](issues/exec-names-a-session-it-then-deletes.md) — the id is published on the turn's first event, which the user-message append precedes
+- [x] [Help catches up with the surfaces](issues/help-catches-up-with-the-surfaces.md) — the sidebar, the focus view, the watchdog and the pending manager's keys; six entries were being clipped at the overlay's real 43-column budget

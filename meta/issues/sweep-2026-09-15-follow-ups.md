@@ -20,6 +20,45 @@ it is, and the message taken back out. The delete decision is
 each doing their own — and matching a reply's text to decide whether to
 delete it was the fragile part of the old shape.
 
+Done 2026-09-20, in three batches:
+
+*Gateway.* `/abort` a second before shutdown got the restart wording —
+the reply read the gateway's own shutdown flag at delivery time, so
+the person who asked for the turn to stop was told to send it again;
+the seat records that the abort came from the chat. `/abort` could not
+cancel a `/compact`, the one piece of work most worth stopping:
+compaction registers a `turn_cancel` now. A turn killed by
+`abort_all()` at shutdown left its "working…" bubble in the chat,
+still there at the next start; `StatusBoard::clear_all` sweeps them.
+The message tool awaited `clear_status` inside the tool call, so a
+wedged rpc hung the turn — bounded at five seconds and logged.
+`RuntimePlan::notices` went nowhere here and now reach the log.
+
+*Tools.* `write` read a failed stat as a new file, so a creation was
+reported over whatever it then replaced. `grep_one_file` kept one clip
+cause, so a file that hit the byte cap on its way to the match cap
+reported only the second. `format_duration` floored to seconds, so a
+configured 400 ms timeout said `0s`.
+
+*TUI and session.* A `delete` refused because another process holds
+the writer lease read as "keep this session", and the directory was
+left pointed at an empty log. Withholding the pointer turned out not to
+be enough on its own — `create` writes it for every new root session —
+so it is taken back by hand.
+
+*Structure.* The subagent-mark rule for grant prompts lived in both
+frontends, with the boolean the other way round; it is
+`ilar::secrets::asker_label` now.
+
+Two struck rather than done. `file_may_contain` folding ASCII while
+`recall::search` folds Unicode is already handled for the half that
+matters: `greppable` refuses a non-ASCII needle outright, so a
+non-ASCII query pays the full parse. What is left is a file containing
+U+212A KELVIN SIGN searched for `k`, which the function's own doc
+argues is the right trade — closing it means Unicode-folding every
+chunk of every file, which is the cost the prefilter exists to avoid.
+`App::secrets_locked` as a startup snapshot was fixed in `2e24d7d`.
+
 Gateway:
 - `/abort` a second before shutdown gets the restart wording
   (`aborted_reply` reads the cancel flag at delivery time).
