@@ -262,6 +262,23 @@ failed. The `question` tool is not attached, since nobody is there to
 answer; a model that asks is told so immediately. Background tasks and
 services do not outlive the process.
 
+Every run names its session before the turn starts — `session <id>` on
+stderr, or `{"type":"session","id":"…"}` under `--json`, ahead of the
+notices below and of every other event, so `--json | head -1` finds it
+— and a script can hand it to the next run's `--session`, or to
+`ilar --view <id>`, even if the run is killed halfway. A tool row on
+stderr carries what the call was about (`· read src/main.rs`), clipped
+to a line and with secrets redacted where the summary can tell. A turn
+that stops short of an answer says so under the answer and names the
+command that carries on:
+
+```
+stopped: the step cap was reached before an answer — ilar exec --session a1b2c3 carries on from here
+```
+
+That line is text mode only: under `--json` the outcome already rides
+`turn_done`. A turn that failed outright prints `error: …` instead.
+
 Settings this launch could not honour — a project file's user-scoped table,
 a reasoning variant the model does not have, an `--agent` on a resumed
 session that nothing will record — are printed before the turn: on stderr,

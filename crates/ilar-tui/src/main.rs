@@ -1204,10 +1204,11 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
 
     let mut out = std::io::stdout();
     let mut err = std::io::stderr();
-    // Said before the turn, and said at all: a project `ilar.toml` with
-    // a `[providers]` table was ignored here in complete silence, which
-    // reads as the setting not existing.
-    exec::emit_notices(&notices, format, &mut out, &mut err)?;
+    // The notices go with the turn: said before it, and said at all — a
+    // project `ilar.toml` with a `[providers]` table was ignored here in
+    // complete silence, which reads as the setting not existing. They
+    // print inside `exec_turn` so that one place decides the order of
+    // everything that reaches the two streams.
     let outcome = exec::exec_turn(
         runtime.resolver.as_ref(),
         &runtime.registry,
@@ -1218,6 +1219,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
         runtime.loop_config.clone(),
         runtime.tool_ctx.clone(),
         format,
+        &notices,
         cancel,
         &mut out,
         &mut err,
