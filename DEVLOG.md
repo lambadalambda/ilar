@@ -58,6 +58,50 @@ that moved most are the two that had been issuing one call per request
 97% of the time, which is who the sentence was written for. Worth
 remembering that the aggregate would have closed this as a failure.
 
+## 2026-09-20 — The backlog, third pass
+
+The focus view, the live/restored fold, the pickers, the replay
+sweep's publish bound, and another handful from the 09-15 sweep.
+
+**A result that said two different things depending on when you
+looked.** The loop published a tool's output cut at 16 KiB while a
+reopened session read the whole thing back from the log and kept
+256 KiB. So a long `grep` was truncated while you watched it and
+complete when you came back. The publish bound is the keep cap now,
+named once. `MAX_DETAIL_CHARS` keeps its real job, which is a tool's
+*arguments* — where 16 KiB is enough for a whole `edit` to render as a
+diff, and far more than a row can show.
+
+The test that pinned the old divergence was written deliberately, with
+a comment explaining why the two differed. It now pins the agreement.
+That is worth noticing: a test can be a correct description of a
+defect.
+
+**Two things in the focus view had to move, not just appear.** The
+title says where in the timeline the view is, which the row count
+settles and the cache produces — and the cache was updated *after* the
+frame was drawn, so the first frame said nothing and every frame after
+said where the view had been. And the activity row needed a line of
+the viewport rather than a line past its end, where it was clipped and
+the view still said nothing.
+
+**The restore path had the settler written out a second time**, and
+the copy had drifted twice: it took the newest row with a matching id
+whatever its state, where the live path refuses one that has already
+finished, and it never cleared the progress. That drift is what minted
+the focus view's settle bug in the first place. One constructor and
+one settler now.
+
+**The pickers had every fact they needed and asked for none of them.**
+A model row named the id and the window; the price, the vision flag
+and the reasoning levels were all already in `ilar::model`. Adding
+them was rendering, not plumbing.
+
+**And a footer that could not fit.** Renaming `BackTab` to Shift-Tab
+made the question modal's footer three cells too wide for the modal it
+is drawn in — caught by a test written the day before that measures
+one against the other.
+
 ## 2026-09-20 — The backlog, second half
 
 More of the same sweep. Four issues closed outright and two partly;
