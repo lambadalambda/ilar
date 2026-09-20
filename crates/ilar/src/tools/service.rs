@@ -15,10 +15,11 @@ use super::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, Workspac
 
 /// Combined stdout+stderr retained per service.
 const MAX_SERVICE_OUTPUT: usize = 256 * 1024;
-/// What an exited service's capture is cut down to. Enough to hold the
-/// stack trace or the port-in-use line that ended it, small enough that
-/// a session full of dead services is not carrying megabytes of them.
-const RETAINED_AFTER_EXIT: usize = 8 * 1024;
+/// What an exited service's capture is cut down to. Enough that the
+/// `logs` action can still answer its own documented maximum — 500
+/// lines — for the service that just died, and small enough that a
+/// session full of dead ones is not carrying a quarter megabyte each.
+const RETAINED_AFTER_EXIT: usize = 64 * 1024;
 const DEFAULT_LOG_LINES: usize = 50;
 const MAX_LOG_LINES: usize = 500;
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
@@ -50,8 +51,16 @@ impl ServiceEntry {
             && let Some(child) = self.child.as_mut()
             && let Ok(Some(status)) = child.try_wait()
         {
-            self.exited = Some(exit_label(status));
-            self.child = None;
+            let label = exit_label(status);
+            self.mark_exited(label);
+        }
+        // Again on every status read, not once: the drain tasks hold
+        // the same buffer and keep appending after the child is
+        // reaped. A service that daemonizes — `node server.js &` —
+        // leaves the shell dead in milliseconds and the server filling
+        // the buffer for hours, so trimming only at the transition
+        // would have trimmed an empty buffer and never looked again.
+        if self.exited.is_some() {
             self.trim_output();
         }
         // The group is kept past the shell's death on purpose — a
@@ -66,6 +75,18 @@ impl ServiceEntry {
         {
             self.group = None;
         }
+    }
+
+    /// The one place a service becomes "exited", whichever way it
+    /// ended: reaped by `refresh`, or stopped by name. The `stop`
+    /// action used to set the field itself and skip the trim — and
+    /// since the trim's guard was the transition, no later refresh
+    /// could run it either, so the documented way to end a service was
+    /// the one way its output was never released.
+    fn mark_exited(&mut self, label: String) {
+        self.exited = Some(label);
+        self.child = None;
+        self.trim_output();
     }
 
     /// Cut an exited service's capture down to its tail.
@@ -85,7 +106,6 @@ impl ServiceEntry {
             return;
         }
         output.retained = crate::text::tail_bytes(&output.retained, RETAINED_AFTER_EXIT).to_vec();
-        output.retained.shrink_to_fit();
     }
 
     fn running(&self) -> bool {
@@ -454,7 +474,7 @@ impl Tool for ServiceTool {
                         None => "already gone".into(),
                     };
                     if let Some(entry) = manager.services.lock().unwrap().get_mut(&name) {
-                        entry.exited = Some(label.clone());
+                        entry.mark_exited(label.clone());
                         entry.group = None;
                     }
                     ToolOutput::text(format!("stopped service {name:?} ({label})"))
@@ -470,6 +490,57 @@ impl Tool for ServiceTool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// An exited service used to hold its whole 256 KiB capture for
+    /// the life of the process. Asserted on the buffer rather than
+    /// through `logs`, which is the only way to see it: the tail is
+    /// preserved by design, so every observable the tool offers reads
+    /// the same before and after the trim.
+    #[test]
+    fn an_exited_service_releases_all_but_the_tail() {
+        let output = Arc::new(Mutex::new(Captured::default()));
+        let fill = |bytes: usize| {
+            let mut captured = output.lock().unwrap();
+            captured.retained = vec![b'x'; bytes];
+            captured.total += bytes;
+        };
+        fill(MAX_SERVICE_OUTPUT);
+        let mut entry = ServiceEntry {
+            command: "serve".into(),
+            child: None,
+            group: None,
+            output: output.clone(),
+            granted: Vec::new(),
+            started: std::time::Instant::now(),
+            exited: None,
+        };
+
+        // `stop` ends a service by name; it used to set the field
+        // itself and skip the trim, which is the path the tool tells
+        // the model to use.
+        entry.mark_exited("exit 1".into());
+        assert_eq!(output.lock().unwrap().retained.len(), RETAINED_AFTER_EXIT);
+        // `total` is untouched, so `logs` still says the rest is gone.
+        assert_eq!(output.lock().unwrap().total, MAX_SERVICE_OUTPUT);
+
+        // The drain tasks hold the same buffer and keep appending after
+        // the child is reaped — a service that daemonizes leaves the
+        // shell dead in milliseconds and the server writing for hours.
+        // Trimming only at the transition trimmed an empty buffer and
+        // never looked again.
+        fill(MAX_SERVICE_OUTPUT);
+        entry.refresh();
+        assert_eq!(
+            output.lock().unwrap().retained.len(),
+            RETAINED_AFTER_EXIT,
+            "the capture grew back and was never trimmed again"
+        );
+
+        // A capture already under the cap is left exactly alone.
+        output.lock().unwrap().retained = b"short".to_vec();
+        entry.refresh();
+        assert_eq!(output.lock().unwrap().retained, b"short");
+    }
 
     fn alive(pid: i32) -> bool {
         // SAFETY: signal 0 only probes; it never delivers anything.

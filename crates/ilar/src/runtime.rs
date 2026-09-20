@@ -438,7 +438,13 @@ pub fn end_session(config: &Config, store: &SessionStore, session_id: &str) {
     // "keep it": the directory was then pointed at a session with
     // nothing in it, and the next `--continue` opened that.
     if store.is_unspoken_root(session_id, &outbox) {
-        store.remove_if_empty(session_id, &outbox);
+        // Withholding the pointer is not enough: `create` points the
+        // directory at every new root session, so an empty log already
+        // owns it by the time we get here. When the removal is refused
+        // the pointer has to be taken back by hand.
+        if !store.remove_if_empty(session_id, &outbox) {
+            store.forget_pointer(session_id);
+        }
         return;
     }
     store.remember_last(session_id);
@@ -1234,8 +1240,39 @@ mod tests {
         end_session(&config, &store, &spoken);
         assert_eq!(
             store.last_in(&canonical).map(|session| session.id),
-            Some(spoken)
+            Some(spoken.clone())
         );
+
+        // A third launch, also wordless, whose log cannot be removed:
+        // another process holds its writer lease. `delete` declines,
+        // and reading that refusal as "keep it" pointed the directory
+        // at a session with nothing in it — which is what the next
+        // `--continue` would then open. `create` writes that pointer,
+        // so withholding `remember_last` does not undo it.
+        let locked = new_id();
+        let held = store.create(meta(&locked)).unwrap();
+        assert_eq!(
+            store.last_in(&canonical).map(|session| session.id),
+            Some(locked.clone()),
+            "a new session owns the pointer from birth"
+        );
+
+        end_session(&config, &store, &locked);
+
+        assert!(
+            store.session_path(&locked).unwrap().exists(),
+            "the lease-holder's log was removed out from under it"
+        );
+        assert!(
+            store.last_in(&canonical).is_none(),
+            "the directory is pointed at an empty session this run judged disposable"
+        );
+        // The log itself stays on purpose. A held lease means another
+        // process is live in that session; once it says something the
+        // directory scan can find it again, and by then it is a real
+        // session rather than an empty one.
+        drop(held);
+        let _ = spoken;
     }
 
     /// A name the program does not know, answered with the names it

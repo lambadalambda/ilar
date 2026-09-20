@@ -855,8 +855,11 @@ static HELP_SECTIONS: &[HelpSection] = &[
                 "dismiss overlay · deny a grant · abort turn · clear input (a multi-line draft stashes)"
             ),
             binding!("Ctrl-D", "quit (blank input, nothing open)"),
-            binding!("Ctrl-Q", "pending manager: queue, goal, tasks, held, mail"),
-            binding!("d in that manager", "delete the highlighted item (twice)"),
+            binding!("Ctrl-Q", "queue, goal, tasks, services, held, retry"),
+            binding!(
+                "d in that manager",
+                "drop the highlighted row; goal/jobs twice"
+            ),
             binding!("Ctrl-R", "resume a failed or aborted turn from its state"),
             binding!("Ctrl-V", "attach a clipboard image (vision models)"),
             binding!("Ctrl-S", "stash the draft · pops it back when blank"),
@@ -897,30 +900,24 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("F3", "switch theme"),
             binding!("Ctrl-X, M / T", "leader: models / themes"),
             binding!("↑↓ · Enter · Esc", "navigate · choose · dismiss"),
-            binding!("Ctrl-N / Ctrl-P", "down / up, in every list"),
+            binding!("Ctrl-N / Ctrl-P", "down / up, in every picker"),
         ],
     },
     HelpSection {
         title: "The sidebar",
         bindings: &[
-            binding!("click an agent row", "its transcript over the screen"),
-            binding!("click +N more", "show the agents the panel is hiding"),
-            binding!("click N exited", "show the services that have stopped"),
-            binding!(
-                "a delivering row",
-                "a finished task on its way to another session"
-            ),
-            binding!("✉ … delivered to …", "it arrived; nothing is owed"),
-            binding!("", "a result nobody could take says held, and why"),
+            binding!("click +N more", "show the agents the panel hides"),
+            binding!("click N exited", "show the services that stopped"),
+            binding!("a delivering row", "a result on its way to another session"),
+            binding!("✉ … delivered to …", "it arrived (transcript)"),
+            binding!("held · …", "nobody could take it; the notice says why"),
         ],
     },
     HelpSection {
         title: "A focused agent",
         bindings: &[
-            binding!(
-                "click an agents-panel row",
-                "its transcript over the screen"
-            ),
+            binding!("click an agent's row", "its transcript over the screen"),
+            binding!("", "the ● root row or a ⚙ job closes the view"),
             binding!("↑↓ / PgUp / PgDn / wheel", "scroll the view"),
             binding!("Home / End", "top / tail — the root needs Ctrl-Home/End"),
             binding!(
@@ -935,12 +932,8 @@ static HELP_SECTIONS: &[HelpSection] = &[
     HelpSection {
         title: "While a turn runs",
         bindings: &[
-            binding!("", "type to steer it; the text reaches the model mid-turn"),
-            binding!(
-                "",
-                "a provider gone quiet warns at 5m and is aborted at 10m"
-            ),
-            binding!("Ctrl-R", "resume an aborted turn from where it stopped"),
+            binding!("type", "steer it; the text reaches the model"),
+            binding!("", "a root turn gone quiet: 5m warns, 10m cuts"),
         ],
     },
     HelpSection {
@@ -1123,8 +1116,17 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
     body.finish(frame, inner)
 }
 
+/// The overlay's outer width, in columns — not a percentage. Two of
+/// them are the border, so [`HELP_INNER_WIDTH`] is what a line has.
+const HELP_WIDTH: u16 = 72;
+/// What `help_lines` is actually given. Tests that render wider assert
+/// on text the reader never sees: the action column is fixed, and an
+/// entry past it is truncated at every terminal size.
+#[cfg(test)]
+const HELP_INNER_WIDTH: usize = HELP_WIDTH as usize - 2;
+
 pub(crate) fn render_help(frame: &mut Frame, scroll: usize, keys: crate::input::TerminalKeys) {
-    let area = centered_rect(frame.area(), 72, 24);
+    let area = centered_rect(frame.area(), HELP_WIDTH, 24);
     let Some(inner) = modal_frame(
         frame,
         area,
@@ -3808,8 +3810,12 @@ mod tests {
     /// manager, nothing about the watchdog that aborts a quiet turn.
     #[test]
     fn help_covers_the_surfaces_that_came_after_it() {
+        // The width the overlay actually renders at: `render_help`
+        // takes `centered_rect(.., 72, ..)` in columns, not a
+        // percentage, and two of those are the border. A test at 80
+        // asserts on text the reader never sees.
         let text = help_lines(
-            80,
+            HELP_INNER_WIDTH,
             crate::input::TerminalKeys {
                 enhanced: true,
                 modified_enter: true,
@@ -3822,27 +3828,29 @@ mod tests {
 
         for expected in [
             // Clickable sidebar rows: `sidebar.rs` builds a hit for each.
-            "click +N more",
-            "click N exited",
+            "show the agents the panel hides",
+            "show the services that stopped",
             // What a person actually asked about: the roster row and
             // the transcript receipt that follows it.
-            "delivering",
+            "a result on its way to another session",
             "delivered to",
-            // Lists take Ctrl-N/Ctrl-P through `nav_delta`.
-            "Ctrl-N / Ctrl-P",
-            // The pending manager's own key, and what Ctrl-Q holds.
+            // `nav_delta` takes these in every picker — and only in
+            // the pickers: the grant and question modals refuse them.
+            "down / up, in every picker",
+            // The pending manager's own key, and the rows it holds.
             "d in that manager",
+            "queue, goal, tasks, services, held, retry",
             // The wheel reaches a focus view: `App::scroll_wheel`
             // hands it to `focus` before the transcript.
             "wheel",
             // The watchdog: ROOT_STALL_WARN_AFTER / _ABORT_AFTER.
-            "warns at 5m",
+            "a root turn gone quiet: 5m warns, 10m cuts",
         ] {
-            assert!(text.contains(expected), "help never mentions {expected}");
+            assert!(
+                text.contains(expected),
+                "the overlay never says {expected:?} — clipped at {HELP_INNER_WIDTH}?\n{text}"
+            );
         }
-        // Ctrl-Q's summary used to end at "retry" and omit the thing a
-        // person opens it for after a subagent finishes.
-        assert!(text.contains("held, mail"), "{text}");
     }
 
     #[test]

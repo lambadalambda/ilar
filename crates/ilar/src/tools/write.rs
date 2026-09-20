@@ -91,11 +91,7 @@ impl Tool for WriteTool {
                 // for any reason but absence is its own answer: reading
                 // it as "new file" reported a creation over whatever
                 // the write then destroyed.
-                let previous = match std::fs::metadata(&path) {
-                    Ok(meta) => Previous::Was(meta.len()),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Previous::Nothing,
-                    Err(_) => Previous::Unreadable,
-                };
+                let previous = previous_from(std::fs::metadata(&path));
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -138,10 +134,21 @@ impl Tool for WriteTool {
 /// What was at the path before the write. Three answers, not two: a
 /// stat can fail without the file being absent, and collapsing that
 /// into "new file" reported a creation over a replacement.
+#[derive(Debug)]
 enum Previous {
     Was(u64),
     Nothing,
     Unreadable,
+}
+
+/// Read a stat's outcome as one of the three. Absence is the only
+/// failure that means the file was not there.
+fn previous_from(meta: std::io::Result<std::fs::Metadata>) -> Previous {
+    match meta {
+        Ok(meta) => Previous::Was(meta.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Previous::Nothing,
+        Err(_) => Previous::Unreadable,
+    }
 }
 
 #[cfg(test)]
@@ -172,37 +179,30 @@ mod tests {
 
     /// A stat can fail without the file being absent. Reading that as
     /// "new file" claimed a creation over whatever the write then
-    /// replaced; the third answer says the question went unanswered.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_stat_that_failed_is_not_a_new_file() {
-        use std::os::unix::fs::PermissionsExt as _;
+    /// replaced.
+    ///
+    /// A unit, because the scenario is not reachable end to end: every
+    /// stat failure that is not `NotFound` — EACCES, ENOTDIR, ELOOP —
+    /// also fails the open that follows, so the tool errors out before
+    /// it can report anything. What is left is EINTR and ESTALE, which
+    /// a test cannot arrange. The arm is defensive; its job is to not
+    /// claim a creation it cannot vouch for.
+    #[test]
+    fn a_stat_that_failed_is_not_a_new_file() {
+        use std::io::{Error, ErrorKind};
 
-        let dir = tempfile::tempdir().unwrap();
-        let locked = dir.path().join("locked");
-        std::fs::create_dir(&locked).unwrap();
-        std::fs::write(locked.join("a.txt"), b"already here\n").unwrap();
-        // No execute bit: the file cannot be stat'd through it, and it
-        // cannot be written either — but the stat is what this is about,
-        // and its failure must not read as absence.
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
-
-        let out = WriteTool
-            .run(
-                serde_json::json!({"path": "locked/a.txt", "content": "new\n"}),
-                ToolContext::root(dir.path().to_path_buf()),
-            )
-            .await;
-
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
-        // Either it refused outright or it wrote and said it could not
-        // tell — what it must never say is the bare "wrote", which
-        // claims the file was not there.
-        if !out.is_error {
+        assert!(matches!(
+            previous_from(Err(Error::from(ErrorKind::NotFound))),
+            Previous::Nothing
+        ));
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::Interrupted,
+            ErrorKind::NotADirectory,
+        ] {
             assert!(
-                out.content.contains("could not be read"),
-                "a failed stat was reported as a new file: {}",
-                out.content
+                matches!(previous_from(Err(Error::from(kind))), Previous::Unreadable),
+                "{kind:?} was read as a new file"
             );
         }
     }

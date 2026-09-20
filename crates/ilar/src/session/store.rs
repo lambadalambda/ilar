@@ -681,6 +681,16 @@ impl SessionStore {
     /// session that was deleted must not stay pointed at. One write for
     /// the lot, so a sweep of a hundred does not rewrite the file a
     /// hundred times.
+    /// Stop pointing any directory at this session, without touching
+    /// the session itself. What a caller needs when a log it judged
+    /// empty could not be removed — another process holds the writer
+    /// lease — and must still not be what the next `--continue` opens.
+    /// `create` points the directory at every new root session, so
+    /// withholding `remember_last` is not enough on its own.
+    pub fn forget_pointer(&self, id: &str) {
+        self.forget(&[id]);
+    }
+
     fn forget(&self, ids: &[&str]) {
         if ids.is_empty() {
             return;
