@@ -365,6 +365,16 @@ pub async fn compact_session(
     if session.transcript().is_empty() {
         return Ok(ManualCompactionOutcome::NothingToCompact);
     }
+    // The summary ends in an append, and an append between a tool call
+    // and its result is refused. Ask before summarizing rather than
+    // after: the refusal is safe either way, but the request is not
+    // free. In practice this is a parked question, the one call a
+    // restore leaves open on purpose.
+    if session.has_unanswered_calls() {
+        anyhow::bail!(
+            "this session is waiting on a question — answer or abort it before compacting"
+        );
+    }
     let model = session.effective_model();
     let provider = resolver.resolve_provider(&model)?;
     let summary = compact_if_needed_locked(

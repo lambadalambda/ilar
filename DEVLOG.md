@@ -2,6 +2,15 @@
 
 ## 2026-09-20 — Three things a review found, fixed
 
+*Later the same day.* The append guard earned its keep twice over.
+Compaction and titling both made their provider call before the append
+that would be refused, so a session parked on a question paid for a
+summarization or a titling request and then failed on the write. Both
+ask the log first now. And a serve test turned out to have been
+building an unloadable log all along — three assistant messages each
+carrying an unanswered tool call — which it got away with only by
+never reloading it. The guard caught it on the gate.
+
 The salvage review turned up three defects outside the change it was
 reviewing. All three are now closed.
 

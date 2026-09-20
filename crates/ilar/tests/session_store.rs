@@ -3147,3 +3147,44 @@ fn an_event_written_between_a_call_and_its_result_is_refused() {
         .expect("the writer's own repair still works");
     assert_eq!(repaired.events().len(), 4);
 }
+
+/// Titling ends in an append, which is refused between a tool call and
+/// its result — a parked question is exactly that. It used to ask the
+/// model first and fail on the write; it asks the log first now, and
+/// stays silent like every other "nothing to name" here.
+#[tokio::test]
+async fn titling_a_parked_session_spends_no_request() {
+    use ilar::provider::{MockProvider, ProviderEvent, StopReason};
+
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "the auth test fails every third run".into(),
+            images: Vec::new(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(assistant_with_calls(&new_id(), &["waiting"]))
+        .unwrap();
+    drop(session);
+
+    let provider = MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("\"Flaky auth test\"".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]]);
+    assert_eq!(
+        ilar::topic::title_session(&provider, &store, &meta.session_id, Some("system"))
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(provider.requests().is_empty(), "nothing was asked");
+    assert_eq!(store.load(&meta.session_id).unwrap().topic(), None);
+}

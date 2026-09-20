@@ -99,7 +99,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [UX sweep 2026-09-03](issues/ux-sweep-2026-09-03.md) — index
 - [ ] [Wrapped rows keep their gutter](issues/wrapped-rows-keep-their-gutter.md)
 - [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
-- [ ] [A parked question pays before it fails](issues/a-parked-question-pays-before-it-fails.md)
 
 ## Milestone 21 — The assistant
 

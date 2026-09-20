@@ -118,6 +118,12 @@ pub async fn title_session(
     if reader.topic().is_some() {
         return Ok(None);
     }
+    // The title ends in an append, which is refused between a tool
+    // call and its result. Silent, like every other "nothing to name"
+    // here — but before the request rather than after it.
+    if reader.has_unanswered_calls() {
+        return Ok(None);
+    }
     let transcript = reader.transcript();
     if !transcript.iter().any(|message| message.role == Role::User) {
         return Ok(None);

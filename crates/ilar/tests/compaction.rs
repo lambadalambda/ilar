@@ -1524,3 +1524,53 @@ async fn running_services_ride_into_the_handover() {
         "{instruction}"
     );
 }
+
+/// A session parked on a question has an unanswered tool call, and
+/// `Session::append` refuses an ordinary event in that state — the log
+/// would not load again. Compaction's append came after the
+/// summarization, so the session paid for a whole request to learn it.
+/// It asks first now.
+#[tokio::test]
+async fn compaction_of_a_parked_session_spends_no_request() {
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+    session
+        .append(SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![ilar::session::ContentBlock::ToolCall {
+                id: "q-1".into(),
+                name: "question".into(),
+                input: serde_json::json!({"questions": [{
+                    "id": "which",
+                    "prompt": "which branch?",
+                    "required": true,
+                    "type": "free_text"
+                }]}),
+                item_id: None,
+            }],
+            usage: Usage::default(),
+            stop_reason: "tool_use".into(),
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let provider = MockProvider::new(vec![text_turn("handover: everything that matters")]);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let error = compact_session(&provider, &store, &session_id, None, &[], &[], &cancel)
+        .await
+        .expect_err("a parked session cannot take the summary");
+
+    assert!(
+        format!("{error:#}").contains("question"),
+        "the refusal names the reason: {error:#}"
+    );
+    assert!(
+        provider.requests().is_empty(),
+        "nothing was asked of the model"
+    );
+    // The log is untouched and still loads.
+    assert!(store.load(&session_id).is_ok());
+}

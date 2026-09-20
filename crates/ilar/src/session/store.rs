@@ -1766,6 +1766,14 @@ fn invalid_replay<T>(id: &str, message: impl std::fmt::Display) -> std::io::Resu
 }
 
 impl Session {
+    /// Whether the log ends between a tool call and its results, the
+    /// one state [`Self::append`] refuses an ordinary event in. Worth
+    /// asking before doing expensive work that ends in an append: the
+    /// refusal is safe but the work is wasted.
+    pub fn has_unanswered_calls(&self) -> bool {
+        has_unanswered_calls(&self.events)
+    }
+
     /// The sole valid unanswered structured question, if this writable
     /// session was restored in a suspended state.
     pub fn pending_question(&self) -> Option<PendingQuestion> {
@@ -2224,6 +2232,14 @@ impl SessionReader {
 
     pub fn transcript(&self) -> Vec<ChatMessage> {
         transcript_of(&self.events)
+    }
+
+    /// Whether the log ends between a tool call and its results. A
+    /// reader cannot append, but its caller may be about to: see
+    /// [`Session::has_unanswered_calls`]. Unlike a writer's, this may
+    /// be several calls — a reader repairs nothing.
+    pub fn has_unanswered_calls(&self) -> bool {
+        has_unanswered_calls(&self.events)
     }
 
     pub fn todo_list(&self) -> Option<&crate::todo::TodoList> {
