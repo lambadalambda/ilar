@@ -1256,6 +1256,13 @@ impl App {
             }
         }
 
+        // Scraped every frame on purpose, though only a selection
+        // consumes it. The invalidation check compares this frame's
+        // cells against the previous frame's, and a selection is made
+        // *between* frames — so gating the scrape on "a selection
+        // exists" leaves the first such frame with nothing to compare
+        // against, and output that changed in that window would be
+        // copied from the new cells at the old coordinates.
         let transcript_cells = transcript_cells(frame.buffer_mut(), transcript_text_area);
         if self.transcript_selection.is_some_and(|selection| {
             self.transcript_text_area != transcript_text_area
@@ -1263,8 +1270,8 @@ impl App {
         }) {
             self.clear_transcript_selection();
         }
-        self.transcript_text_area = transcript_text_area;
         self.transcript_cells = transcript_cells;
+        self.transcript_text_area = transcript_text_area;
         if let Some(selection) = self.transcript_selection {
             highlight_transcript_selection(
                 frame.buffer_mut(),

@@ -691,10 +691,7 @@ pub(crate) fn input_accepts_keys(_busy: bool, has_modal: bool) -> bool {
 /// `App::slash_inventory` — which is where the built-ins are merged in.
 /// Empty once the name is finished (whitespace) or the input is not a
 /// slash command.
-pub(crate) fn slash_candidates(
-    input: &str,
-    inventory: &[(String, String)],
-) -> Vec<(String, String)> {
+pub(crate) fn slash_candidates(input: &str, inventory: &[(&str, &str)]) -> Vec<(String, String)> {
     let Some(token) = input.strip_prefix('/') else {
         return Vec::new();
     };
@@ -703,9 +700,9 @@ pub(crate) fn slash_candidates(
     }
     let mut scored: Vec<(i64, (String, String))> = inventory
         .iter()
-        .cloned()
         .filter_map(|(name, description)| {
-            crate::text::fuzzy_score(token, &name).map(|score| (score, (name, description)))
+            crate::text::fuzzy_score(token, name)
+                .map(|score| (score, ((*name).to_string(), (*description).to_string())))
         })
         .collect();
     scored.sort_by(|(score_a, (name_a, _)), (score_b, (name_b, _))| {
@@ -783,10 +780,7 @@ mod tests {
     /// `App::slash_inventory`'s business, and this must not add to it.
     #[test]
     fn slash_completion_ranks_the_inventory_it_is_given_and_nothing_else() {
-        let inventory = [
-            ("compact".to_string(), "external duplicate".to_string()),
-            ("comparison".to_string(), "another".to_string()),
-        ];
+        let inventory = [("compact", "external duplicate"), ("comparison", "another")];
         let candidates = slash_candidates("/comp", &inventory);
         assert_eq!(
             candidates

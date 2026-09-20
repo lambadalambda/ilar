@@ -39,3 +39,45 @@ design; tick items off here rather than splitting.
   `app.current_model` in the request.
 
 Size: S each. Source: sweep 2026-08-31, responsiveness & memory.
+
+## Progress (2026-09-20)
+
+Done:
+
+- **Exited services keep a tail, not everything.** 64 KiB, enough that
+  `logs` can still answer its own documented maximum for the service
+  that just died. Both ways a service ends, because `stop` — the one
+  the tool tells the model to use — set `exited` itself and skipped
+  the trim, and the trim's guard was that transition, so no later
+  refresh could run it either.
+- **`status_line` read `$HOME` every frame.** Once now; it does not
+  change under a running process.
+- **The clipboard image no longer decodes on the render task.** The
+  read needs the clipboard handle and stays; the downscale and the PNG
+  encode — the hundreds of milliseconds — go to a worker, and the
+  image joins the draft when it lands.
+- **The slash-completion inventory stopped cloning.** It was rebuilt
+  per frame while a `/` draft was visible, and two `String` clones per
+  entry were nearly all of that; it borrows now. *Not* cached: the two
+  fields it reads are public, a test can replace one with a list of
+  the same length, and no cheap key can tell that apart.
+
+Struck, with the reason:
+
+- **`transcript_cells` scraping every frame.** The obvious gate — "only
+  with a selection" — is wrong, and the tests say so. The invalidation
+  check compares this frame's cells against the previous frame's, and
+  a selection is made *between* frames; gating leaves the first such
+  frame with nothing to compare against, so output that changed in
+  that window would be copied from the new cells at the old
+  coordinates. Fixing it properly means changing how a selection is
+  invalidated, not where the scrape happens. The reasoning is now a
+  comment at the scrape.
+- **`outbox::retire` taking a blocking lock on the render task.**
+  Moving it off means a tombstone that may not land before the process
+  exits, trading a certain rare duplicate delivery for a rare freeze.
+
+Still open: `held_notifications` unbounded and the drag-resize debounce
+(both want a number), the five O(entries) scans per frame (which
+belong with [[live-rows-rerender-every-frame]]), and the `/command`
+subtask's full parent-log load.

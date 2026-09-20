@@ -1107,17 +1107,17 @@ async fn leave_session(
     }
 }
 
-fn close_skill_matches(inventory: &[(String, String)], name: &str) -> Vec<String> {
+fn close_skill_matches(inventory: &[(&str, &str)], name: &str) -> Vec<String> {
     let lowered = name.to_lowercase();
     let mut matches: Vec<String> = inventory
         .iter()
         .filter(|(candidate, _)| candidate.to_lowercase().contains(&lowered))
-        .map(|(candidate, _)| candidate.clone())
+        .map(|(candidate, _)| (*candidate).to_string())
         .collect();
     if matches.is_empty() {
         matches = inventory
             .iter()
-            .map(|(candidate, _)| candidate.clone())
+            .map(|(candidate, _)| (*candidate).to_string())
             .collect();
         // Nothing looked like it, so this is a bare listing — and the
         // inventory leads with the built-ins, which would fill the
@@ -1959,6 +1959,16 @@ struct RoutedDelivery {
 /// the same path the model's `task_message` takes: a running agent is
 /// steered, a finished one resumed with the message as its prompt. The
 /// root keeps drawing; the ending lands as a transcript line.
+/// An image on its way from the clipboard to the draft.
+///
+/// The downscale and the PNG encode are hundreds of milliseconds on a
+/// Retina screenshot, and they used to run on the render task, so
+/// Ctrl-V froze the terminal for as long as they took. Only the
+/// clipboard read stays there, because it needs the handle.
+struct PendingImage {
+    handle: tokio::task::JoinHandle<Result<ilar::session::ImageContent>>,
+}
+
 struct FocusMessage {
     handle: tokio::task::JoinHandle<ilar::subagent::TaskMessage>,
     target: String,
@@ -3415,6 +3425,7 @@ async fn run_app(
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
     let mut focus_messages: Vec<FocusMessage> = Vec::new();
+    let mut pending_images: Vec<PendingImage> = Vec::new();
     let mut session_labels = std::collections::HashMap::new();
     let mut cancel: Option<CancellationToken> = None;
     // Live only while a root turn runs, so a message typed during that
@@ -4061,6 +4072,29 @@ async fn run_app(
         }
 
         // A focus message's ending: a running agent took it (or queued
+        // An image finished encoding: it joins the draft it was meant
+        // for. A draft sent meanwhile takes it on the next one, which
+        // is what attaching before a send has always done.
+        let mut index = 0;
+        while index < pending_images.len() {
+            if !pending_images[index].handle.is_finished() {
+                index += 1;
+                continue;
+            }
+            match pending_images.remove(index).handle.await {
+                Ok(Ok(image)) => {
+                    app.attach_image(image);
+                }
+                Ok(Err(error)) => {
+                    app.set_notice(format!("clipboard: {error:#}"), NoticeLevel::Error);
+                }
+                Err(error) => app.set_notice(
+                    format!("the image never finished encoding: {error}"),
+                    NoticeLevel::Error,
+                ),
+            }
+        }
+
         // it), a finished one answered, or the send failed. Said in the
         // root's transcript, where the send was recorded.
         let mut index = 0;
@@ -5273,9 +5307,16 @@ async fn run_app(
                     }
                     // Ctrl-V attaches a clipboard *image*; text arrives
                     // as an ordinary terminal paste event regardless.
-                    (KeyCode::Char('v'), true) => match app.read_clipboard_image() {
+                    (KeyCode::Char('v'), true) => match app.take_clipboard_image() {
+                        // Read here, because it needs the clipboard
+                        // handle; encoded on a worker, because that is
+                        // the slow half and this is the render task.
                         Ok(Some(image)) => {
-                            app.attach_image(image);
+                            pending_images.push(PendingImage {
+                                handle: tokio::task::spawn_blocking(move || {
+                                    App::clipboard_image_png(image)
+                                }),
+                            });
                         }
                         Ok(None) => app.set_notice(
                             "no image on the clipboard (text pastes normally)",
@@ -6352,10 +6393,7 @@ mod tests {
             "argless invocations skip the arguments clause"
         );
 
-        let skills = vec![
-            ("deploy".to_string(), "d".to_string()),
-            ("release-notes".to_string(), "r".to_string()),
-        ];
+        let skills = vec![("deploy", "d"), ("release-notes", "r")];
         assert_eq!(close_skill_matches(&skills, "rel"), vec!["release-notes"]);
         assert_eq!(
             close_skill_matches(&skills, "zzz"),

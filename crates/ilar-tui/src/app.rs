@@ -970,25 +970,34 @@ impl App {
     /// all read this, so they cannot disagree about what exists — and a
     /// name a built-in already owns is dropped, because `prepare_prompt`
     /// claims it before any command or skill is consulted.
-    pub(crate) fn slash_inventory(&self) -> Vec<(String, String)> {
+    /// What `/` completes on: the builtins, this session's commands,
+    /// and its skills, minus anything a builtin already claims.
+    ///
+    /// Borrowed rather than cloned. The render rebuilt this on every
+    /// frame a `/` draft was visible, and cloning two Strings per
+    /// entry to throw them away a moment later was nearly all of what
+    /// that cost. Caching the result instead would be wrong: the two
+    /// fields it reads are public and a test can replace one with a
+    /// list the same length, which no cheap key can tell apart.
+    pub(crate) fn slash_inventory(&self) -> Vec<(&str, &str)> {
         let builtin = |name: &str| {
             crate::BUILTIN_SLASH_COMMANDS
                 .iter()
                 .any(|(builtin, _)| name == *builtin)
         };
-        let mut entries: Vec<(String, String)> = crate::BUILTIN_SLASH_COMMANDS
+        let mut entries: Vec<(&str, &str)> = crate::BUILTIN_SLASH_COMMANDS
             .iter()
-            .map(|(name, description)| ((*name).into(), (*description).into()))
+            .map(|(name, description)| (*name, *description))
             .collect();
         entries.extend(
             self.commands
                 .iter()
-                .map(|command| (command.name.clone(), command.description.clone()))
+                .map(|command| (command.name.as_str(), command.description.as_str()))
                 .chain(
                     self.skills
                         .iter()
                         .filter(|(skill, _)| !self.commands.iter().any(|c| &c.name == skill))
-                        .cloned(),
+                        .map(|(name, description)| (name.as_str(), description.as_str())),
                 )
                 .filter(|(name, _)| !builtin(name)),
         );
@@ -2582,20 +2591,33 @@ impl App {
     }
 
     /// The clipboard's image, PNG-encoded; `Ok(None)` when it holds none.
-    pub(crate) fn read_clipboard_image(&mut self) -> Result<Option<ilar::session::ImageContent>> {
+    /// The clipboard's image as the terminal handed it over: raw
+    /// pixels, undecoded. Reading needs the clipboard handle, so it
+    /// happens here; turning it into a PNG does not, and that is the
+    /// half that took hundreds of milliseconds on a Retina screenshot
+    /// while the render loop waited.
+    pub(crate) fn take_clipboard_image(&mut self) -> Result<Option<arboard::ImageData<'static>>> {
         if self.clipboard.is_none() {
             self.clipboard = Some(arboard::Clipboard::new().context("opening clipboard")?);
         }
-        let image = match self
+        match self
             .clipboard
             .as_mut()
             .expect("clipboard initialized")
             .get_image()
         {
-            Ok(image) => image,
-            Err(arboard::Error::ContentNotAvailable) => return Ok(None),
-            Err(error) => return Err(error).context("reading clipboard image"),
-        };
+            Ok(image) => Ok(Some(image.to_owned_img())),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(error) => Err(anyhow::anyhow!(error).context("reading the clipboard")),
+        }
+    }
+
+    /// Raw clipboard pixels as a PNG the model can be handed. Pure and
+    /// slow — a downscale and an encode — so it runs off the render
+    /// task; the caller reads the clipboard and hands the bytes here.
+    pub(crate) fn clipboard_image_png(
+        image: arboard::ImageData<'static>,
+    ) -> Result<ilar::session::ImageContent> {
         // arboard has already decoded whatever was on the clipboard —
         // that allocation is the library's and happens before ilar sees
         // a pixel. What ilar can refuse is making two more of its own,
@@ -2619,7 +2641,7 @@ impl App {
         };
         let png = ilar::image::encode_png(width as u32, height as u32, &pixels)
             .context("encoding clipboard image")?;
-        Ok(Some(ilar::session::ImageContent::png(&png)))
+        Ok(ilar::session::ImageContent::png(&png))
     }
 
     /// Copy, by whichever route can reach the person's own clipboard.
@@ -3124,7 +3146,12 @@ pub(crate) fn activate_palette_command(
             app.follow_tail = true;
         }
         PaletteCommand::Skills => {
-            app.skill_picker = Some(SkillPicker::new(app.slash_inventory()));
+            app.skill_picker = Some(SkillPicker::new(
+                app.slash_inventory()
+                    .into_iter()
+                    .map(|(name, description)| (name.to_string(), description.to_string()))
+                    .collect(),
+            ));
         }
         PaletteCommand::Compact => {
             app.compact_requested = true;
@@ -10000,7 +10027,7 @@ mod tests {
         assert_eq!(
             inventory
                 .iter()
-                .filter(|(name, _)| name == "review")
+                .filter(|(name, _)| *name == "review")
                 .count(),
             1,
             "the shadowed skill must not also be listed: {inventory:?}"
@@ -10008,11 +10035,11 @@ mod tests {
         assert_eq!(
             inventory
                 .iter()
-                .find(|(name, _)| name == "review")
-                .map(|(_, description)| description.as_str()),
+                .find(|(name, _)| *name == "review")
+                .map(|(_, description)| *description),
             Some("Command review")
         );
-        assert!(inventory.iter().any(|(name, _)| name == "other"));
+        assert!(inventory.iter().any(|(name, _)| *name == "other"));
         // The built-ins lead the list, ahead of anything user-supplied.
         assert_eq!(inventory[0].0, "goal");
     }
