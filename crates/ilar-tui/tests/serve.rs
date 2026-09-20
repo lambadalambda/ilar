@@ -243,6 +243,22 @@ fn calling(id: &str, name: &str, input: Value) -> SessionEvent {
     }
 }
 
+/// The result that answers a `calling`. A log may not carry an
+/// ordinary event between a call and its result, so a fixture with
+/// several calls answers each one.
+fn answering(call_id: &str) -> SessionEvent {
+    SessionEvent::ToolResult {
+        id: new_id(),
+        tool_use_id: call_id.into(),
+        content: "ok".into(),
+        is_error: false,
+        images: Vec::new(),
+        child_session_id: None,
+        state: None,
+        ts: chrono::Utc::now(),
+    }
+}
+
 /// Backdate a live scratch, so a test can watch a turn go quiet without
 /// waiting a minute for it.
 fn age(path: &std::path::Path, age: Duration) {
@@ -907,6 +923,7 @@ async fn an_edit_and_a_write_carry_a_diff_the_page_can_colour() {
             serde_json::json!({"path": "f.rs", "old_string": "a\nb\nc", "new_string": "a\nB\nc"}),
         ))
         .unwrap();
+    session.append(answering("edit-1")).unwrap();
     session
         .append(calling(
             "write-1",
@@ -914,6 +931,7 @@ async fn an_edit_and_a_write_carry_a_diff_the_page_can_colour() {
             serde_json::json!({"path": "new.rs", "content": "one\ntwo"}),
         ))
         .unwrap();
+    session.append(answering("write-1")).unwrap();
     session
         .append(calling(
             "read-1",
@@ -921,8 +939,10 @@ async fn an_edit_and_a_write_carry_a_diff_the_page_can_colour() {
             serde_json::json!({"path": "f.rs"}),
         ))
         .unwrap();
+    session.append(answering("read-1")).unwrap();
 
     let page = server.json(&format!("/api/sessions/{id}")).await;
+    // Each call is answered, so the calls sit at 1, 3 and 5.
     let diff = &page["events"][1]["content"][0]["diff"];
     assert_eq!(
         *diff,
@@ -934,7 +954,7 @@ async fn an_edit_and_a_write_carry_a_diff_the_page_can_colour() {
         ])
     );
     assert_eq!(
-        page["events"][2]["content"][0]["diff"],
+        page["events"][3]["content"][0]["diff"],
         serde_json::json!([
             {"kind": "add", "text": "one"},
             {"kind": "add", "text": "two"},
@@ -942,7 +962,7 @@ async fn an_edit_and_a_write_carry_a_diff_the_page_can_colour() {
         "a write is its file, as pure additions"
     );
     assert_eq!(
-        page["events"][3]["content"][0]["diff"],
+        page["events"][5]["content"][0]["diff"],
         Value::Null,
         "every other tool has no diff, and the key is still there"
     );
