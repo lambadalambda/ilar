@@ -381,6 +381,23 @@ fn last_topic_in_tail(path: &std::path::Path) -> Option<String> {
         )
 }
 
+/// Whether a session's recorded launch directory is `cwd`, which the
+/// callers have already canonicalised.
+///
+/// As recorded first, then canonically. A session records whatever the
+/// shell handed it, and sessions from before that was resolved on the
+/// way in hold the unresolved form — `/tmp/x` where the canonical path
+/// is `/private/tmp/x`, which every macOS temporary directory is. Such
+/// a session was "here" in neither the picker nor `--continue`, and the
+/// cheap comparison answers first so the syscall is only paid by the
+/// candidates that would otherwise have been missed.
+fn launched_in(recorded: Option<&Path>, cwd: &Path) -> bool {
+    let Some(recorded) = recorded else {
+        return false;
+    };
+    recorded == cwd || std::fs::canonicalize(recorded).is_ok_and(|resolved| resolved == cwd)
+}
+
 impl SessionStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -637,13 +654,19 @@ impl SessionStore {
     }
 
     /// Point a directory at a session: the answer `--continue` and the
-    /// picker read before they list anything. `cwd` must be the
-    /// directory the session itself recorded — nothing else is
-    /// comparable with what a reader will canonicalize.
+    /// picker read before they list anything.
+    ///
+    /// Keyed by the resolved directory, because every reader resolves
+    /// the one it is asking about. A session records whatever the
+    /// shell handed it, so a pointer written under the unresolved form
+    /// — `/tmp/x` against the reader's `/private/tmp/x` — was a
+    /// pointer no read could find, and `--continue` fell back to the
+    /// scan every time.
     fn point_directory_at(&self, cwd: &Path, id: &str) {
         let Ok(parsed) = SessionId::parse(id) else {
             return;
         };
+        let cwd = &std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         let Ok(modified) = std::fs::symlink_metadata(self.session_path_for(&parsed))
             .and_then(|metadata| metadata.modified())
         else {
@@ -718,7 +741,7 @@ impl SessionStore {
         let cwd = std::fs::canonicalize(cwd).ok()?;
         let pointer = last_by_dir::load(&self.root).get(&cwd).cloned()?;
         let head = self.head(&pointer.session_id).ok()?;
-        if head.meta.parent_id.is_some() || head.meta.cwd.as_deref() != Some(cwd.as_path()) {
+        if head.meta.parent_id.is_some() || !launched_in(head.meta.cwd.as_deref(), &cwd) {
             return None;
         }
         // The file the pointer was written for only ever grows. One
@@ -745,7 +768,7 @@ impl SessionStore {
         let cwd = std::fs::canonicalize(cwd).ok()?;
         self.list()
             .into_iter()
-            .find(|session| session.cwd.as_deref() == Some(cwd.as_path()))
+            .find(|session| launched_in(session.cwd.as_deref(), &cwd))
     }
 
     /// Every session named as somebody's parent by a file in the root,
@@ -2568,6 +2591,53 @@ mod tests {
         let elsewhere = tempfile::tempdir().unwrap();
         let elsewhere = std::fs::canonicalize(elsewhere.path()).unwrap();
         assert!(store.last_in(&elsewhere).is_none());
+    }
+
+    /// A session records whatever launch directory the shell handed
+    /// it. Both sides of the comparison are resolved now, so a log
+    /// written before that was done on the way in — `/tmp/x` where the
+    /// canonical path is `/private/tmp/x` — is still this directory's.
+    #[test]
+    fn a_session_that_recorded_an_unresolved_directory_is_still_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let here = tempfile::tempdir().unwrap();
+        let unresolved = here.path().to_path_buf();
+        let canonical = std::fs::canonicalize(&unresolved).unwrap();
+        // The whole point: the two differ on any platform whose
+        // temporary directory is reached through a symlink.
+        if unresolved == canonical {
+            return;
+        }
+
+        let id = new_id();
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: id.clone(),
+                    parent_id: None,
+                    agent: "build".into(),
+                    model: "test/model".into(),
+                    workspace: None,
+                    cwd: Some(unresolved.clone()),
+                })
+                .unwrap(),
+        );
+
+        assert_eq!(
+            store.latest_in(&canonical).map(|session| session.id),
+            Some(id.clone()),
+            "a session launched here was not found from the resolved path"
+        );
+        // And the pointer read agrees, so the fast path and the scan do
+        // not disagree about which sessions are this directory's.
+        assert_eq!(
+            store.last_in(&canonical).map(|session| session.id),
+            Some(id)
+        );
+        // A different directory is still a different directory.
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert!(store.latest_in(elsewhere.path()).is_none());
     }
 
     /// A session created by a launch and never typed into goes when its
