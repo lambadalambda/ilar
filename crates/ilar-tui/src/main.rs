@@ -275,7 +275,18 @@ struct Args {
     /// no writer lease taken — the way to look at a gateway chat.
     /// Nothing about the session is decided here, so the flags that
     /// would decide one are refused rather than ignored
-    #[arg(long, conflicts_with_all = ["session", "continue_last", "model", "agent", "print_prompt"])]
+    #[arg(long, conflicts_with_all = [
+        "session",
+        "continue_last",
+        "model",
+        "agent",
+        "print_prompt",
+        // The project-instruction flags decide a prompt, and `--view`
+        // assembles none. They were silently ignored, which reads as
+        // the flag not existing rather than as a rule about this one.
+        "project_instructions",
+        "no_project_instructions",
+    ])]
     view: Option<String>,
 
     /// Resume the most recently modified session
@@ -1635,7 +1646,7 @@ async fn main() -> Result<()> {
         );
         if restore_handle.is_some() {
             app.busy = true;
-            app.status = "restoring session".into();
+            app.status = crate::app::RESTORING_STATUS.into();
             app.set_activity(Activity::Thinking);
         }
         if app.question_modal.is_some() {
@@ -2336,7 +2347,7 @@ impl schedule::Runtime for LoopRuntime<'_> {
     fn start_compaction(&mut self, app: &mut App) {
         debug_assert!(self.turn_handle.is_none());
         app.busy = true;
-        app.status = "compacting session".into();
+        app.status = crate::app::COMPACTING_STATUS.into();
         app.clear_transient_notice();
         app.set_activity(Activity::Thinking);
 

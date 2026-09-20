@@ -69,6 +69,17 @@ argues is the right trade — closing it means Unicode-folding every
 chunk of every file, which is the cost the prefilter exists to avoid.
 `App::secrets_locked` as a startup snapshot was fixed in `2e24d7d`.
 
+Also done 2026-09-20: `quit_warning` offered to end "the running
+turn" for a compaction and a restore alike, because `busy` cannot tell
+them apart — the two statuses are named constants now and the warning
+reads them (and counts in words rather than in `agent(s)`). `--view`
+refuses the project-instruction flags rather than ignoring them, which
+read as the flags not existing. The ⚙ row printed `job`, the internal
+agent name for a cron turn, in the slot where every other row names
+its agent — saying nothing twice, and now nothing at all. And
+docs/interface.md no longer opens with "Press F1 any time", which a
+grant prompt and a question both outrank.
+
 Gateway:
 - `/abort` a second before shutdown gets the restart wording
   (`aborted_reply` reads the cancel flag at delivery time).

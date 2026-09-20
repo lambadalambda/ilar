@@ -246,11 +246,27 @@ pub(crate) fn agent_panel(
         row_hits.push((vec![first_line, lines.len()], target));
         lines.push(Line::styled(
             truncate_display(
-                &format!(
-                    "  {indent}{}{background}{owner}{state} · {}",
-                    safe_text(&agent.agent),
-                    format_elapsed(agent.elapsed)
-                ),
+                &{
+                    // `job` is the internal agent name for a cron or
+                    // heartbeat turn, and the ⚙ already says which
+                    // kind of row this is; printing it in the slot
+                    // where every other row names its agent said
+                    // nothing twice. With nothing else to say either,
+                    // the separator goes with it rather than leading
+                    // the line.
+                    let named = if job {
+                        String::new()
+                    } else {
+                        safe_text(&agent.agent)
+                    };
+                    let about = format!("{named}{background}{owner}{state}");
+                    let elapsed = format_elapsed(agent.elapsed);
+                    if about.trim().is_empty() {
+                        format!("  {indent}{elapsed}")
+                    } else {
+                        format!("  {indent}{about} · {elapsed}")
+                    }
+                },
                 width,
                 Truncation::Right,
             ),
@@ -991,7 +1007,10 @@ mod tests {
         let panel = agent_panel(&agents, false, 40, 12);
         let text = panel.lines.iter().map(rendered_text).collect::<Vec<_>>();
         assert!(text[1].starts_with("⚙ bash: blender"), "{text:?}");
-        assert_eq!(text[2], "  job · 30s");
+        // Not "job": that is the internal agent name for a cron or
+        // heartbeat turn, and the ⚙ above already says so. With
+        // nothing else to say, the separator goes too.
+        assert_eq!(text[2], "  30s");
         assert!(
             panel
                 .row_hits

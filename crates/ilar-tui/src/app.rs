@@ -494,6 +494,12 @@ pub(crate) fn waiting_texts(messages: &[ilar::agent::Steer]) -> Vec<&str> {
         .collect()
 }
 
+/// The status line while a session's log is being replayed, and while
+/// its conversation is being compacted. Named because `busy` cannot
+/// tell these from a turn and the quit warning has to.
+pub(crate) const RESTORING_STATUS: &str = "restoring session";
+pub(crate) const COMPACTING_STATUS: &str = "compacting session";
+
 pub(crate) struct App {
     /// Private on purpose: every mutation has to be paired with a
     /// `touch_transcript` so the render cache learns which rows moved,
@@ -2731,6 +2737,20 @@ impl App {
     /// survive in the outbox. Warn once, naming every cost at once so
     /// the second press is the answer to everything said; the repeat
     /// quits. `None` means quit now.
+    /// What the busy state is busy with, in the user's words.
+    ///
+    /// `busy` covers a turn, a compaction and a restore alike, and the
+    /// quit warning offered to end "the running turn" for all three —
+    /// so quitting during a restore said it was cancelling work that
+    /// had not started.
+    fn busy_work(&self) -> &'static str {
+        match self.status.as_str() {
+            COMPACTING_STATUS => "the compaction",
+            RESTORING_STATUS => "the restore",
+            _ => "the running turn",
+        }
+    }
+
     pub(crate) fn quit_warning(&mut self, cost: QuitCost) -> Option<String> {
         // Short phrases, and the key first: the notice line is one row
         // and reads from the left, so what the second press does has to
@@ -2738,16 +2758,16 @@ impl App {
         // stake would otherwise cause.
         let mut ends = Vec::new();
         if self.busy {
-            ends.push("the running turn".to_string());
+            ends.push(self.busy_work().to_string());
         }
         if cost.background > 0 {
-            ends.push(format!("{} background agent(s)", cost.background));
+            ends.push(ilar::text::plural(cost.background, "background agent"));
         }
         if let Some((_, round)) = &self.goal {
             ends.push(format!("the goal (round {round}/{MAX_GOAL_ROUNDS})"));
         }
         if !self.input_stash.is_empty() {
-            ends.push(format!("{} stashed prompt(s)", self.input_stash.len()));
+            ends.push(ilar::text::plural(self.input_stash.len(), "stashed prompt"));
         }
         // Words the user typed that nothing has read yet: queued, or
         // steered into the turn that is about to be cancelled. The
@@ -2755,10 +2775,13 @@ impl App {
         // where the wording says they come back.
         let (mine, mail) = self.waiting_messages();
         if mine > 0 {
-            ends.push(format!("{mine} unsent message(s)"));
+            ends.push(ilar::text::plural(mine, "unsent message"));
         }
         if cost.focus_messages > 0 {
-            ends.push(format!("{} message(s) to an agent", cost.focus_messages));
+            ends.push(format!(
+                "{} to an agent",
+                ilar::text::plural(cost.focus_messages, "message")
+            ));
         }
         let mut parts = Vec::new();
         if !ends.is_empty() {
@@ -2768,7 +2791,8 @@ impl App {
         let undelivered = cost.undelivered + mail;
         if undelivered > 0 {
             parts.push(format!(
-                "{undelivered} task result(s) arrive at the next open"
+                "{} arrive at the next open",
+                ilar::text::plural(undelivered, "task result")
             ));
         }
         if parts.is_empty() {
@@ -3621,7 +3645,7 @@ mod tests {
         let warning = app
             .quit_warning(results(2))
             .expect("undelivered results warn");
-        assert!(warning.contains("2 task result(s)"), "{warning}");
+        assert!(warning.contains("2 task results"), "{warning}");
         assert!(warning.contains("next open"), "{warning}");
         assert_eq!(
             app.quit_warning(results(2)),
@@ -3669,13 +3693,13 @@ mod tests {
             "the key must survive a one-row truncation: {warning}"
         );
         assert!(warning.contains("the running turn"), "{warning}");
-        assert!(warning.contains("2 background agent(s)"), "{warning}");
+        assert!(warning.contains("2 background agents"), "{warning}");
         assert!(warning.contains("the goal (round 3/"), "{warning}");
         // The queued task result is counted as a result, not as a lost
         // message: it comes back through the outbox.
-        assert!(warning.contains("2 unsent message(s)"), "{warning}");
-        assert!(warning.contains("1 message(s) to an agent"), "{warning}");
-        assert!(warning.contains("2 task result(s)"), "{warning}");
+        assert!(warning.contains("2 unsent messages"), "{warning}");
+        assert!(warning.contains("1 message to an agent"), "{warning}");
+        assert!(warning.contains("2 task results"), "{warning}");
         // Short enough to read: the notice line keeps 240 characters
         // and one row.
         assert!(warning.len() < 240, "{} chars: {warning}", warning.len());
@@ -5196,6 +5220,29 @@ mod tests {
             !short.contains("thinking"),
             "a finished agent was reported as working: {short}"
         );
+    }
+
+    /// `busy` covers a turn, a compaction and a restore alike, and the
+    /// warning offered to end "the running turn" for all three — so
+    /// quitting during a restore said it was cancelling work that had
+    /// not started.
+    #[test]
+    fn the_quit_warning_names_the_work_it_would_actually_end() {
+        let warning = |status: &str| {
+            let mut app = App::new();
+            app.busy = true;
+            app.status = status.into();
+            app.quit_warning(QuitCost::default())
+                .expect("busy work warns")
+        };
+
+        assert!(warning("thinking").contains("the running turn"));
+        let restoring = warning(RESTORING_STATUS);
+        assert!(restoring.contains("the restore"), "{restoring}");
+        assert!(!restoring.contains("turn"), "{restoring}");
+        let compacting = warning(COMPACTING_STATUS);
+        assert!(compacting.contains("the compaction"), "{compacting}");
+        assert!(!compacting.contains("turn"), "{compacting}");
     }
 
     /// An agent is two lines and one click target, so hovering either

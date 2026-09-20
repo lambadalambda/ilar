@@ -1,7 +1,9 @@
 # The interface
 
-Press **F1** any time for the full keybinding reference. This page
-covers the parts that deserve more than a one-line hint.
+Press **F1** for the full keybinding reference — any time except
+under a grant prompt or a question, which outrank it and take the key
+themselves. This page covers the parts that deserve more than a
+one-line hint.
 
 ## Keys your terminal has to be able to send
 
