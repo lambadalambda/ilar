@@ -51,6 +51,22 @@ const NOTIFICATION_LOCK_ATTEMPTS: usize = 120;
 /// result live, and taking it there beats queueing a second resume
 /// behind the first — the two ✉ rows for one session.
 const NOTIFICATION_CLAIM_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a routed delivery waits for the workspace before handing
+/// the session back.
+///
+/// The session claim is held for the whole wait, so a mutable task
+/// that keeps the lease pins every delivery to that session behind it,
+/// not just this one. A requeue costs a round trip through the outbox;
+/// an uncapped wait costs the session.
+///
+/// Generous for the same reason [`NOTIFICATION_CLAIM_ROUNDS`] is: in
+/// the TUI a requeue is a held result, a warning notice and a prompt
+/// for a keystroke, which an ordinary child turn must never provoke —
+/// and a mutable task holding the lease across a build is exactly
+/// that. This is not a fairness knob (the scheduler's queue is FIFO
+/// and a requeue goes to the back of it); it is the ceiling that keeps
+/// one stuck task from owning the session for the rest of the run.
+const ROUTE_LEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// How many of those rounds before the result goes back to the user.
 /// Generous on purpose: handing it back pauses delivery and asks for
 /// a keystroke, which an ordinary child turn must never provoke. What
@@ -2115,6 +2131,12 @@ task's scope yourself; continue only clearly disjoint work."
         let lease = tokio::select! {
             lease = workspace.acquire_lease(workspace_access) => lease,
             () = cancel.cancelled() => return Ok(RouteOutcome::Requeue(notification)),
+            // Capped, because the claim above is held for the whole
+            // wait: a mutable task holding the lease would otherwise
+            // pin every delivery to this session, not just this one.
+            () = tokio::time::sleep(ROUTE_LEASE_WAIT) => {
+                return Ok(RouteOutcome::Requeue(notification));
+            }
         };
         // The lease may have been waited on for a while: re-derive the
         // workspace and make sure it is still the one that was resolved
