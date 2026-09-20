@@ -113,6 +113,52 @@ async fn exited_services_report_status_and_manager_drop_kills() {
     assert!(!pid_alive(pid), "manager drop must kill the service");
 }
 
+/// An exited service used to hold its whole 256 KiB capture for the
+/// life of the process. The tail is kept — the reason it stopped is at
+/// the bottom — and `log` still says the rest was dropped.
+#[tokio::test]
+async fn an_exited_service_keeps_only_the_tail_of_its_output() {
+    let manager = ServiceManager::new();
+    let tool = ServiceTool::new(manager.clone());
+
+    // ~400 KiB of numbered lines, then a distinctive last word.
+    let started = run(
+        &tool,
+        serde_json::json!({
+            "action": "start",
+            "name": "noisy",
+            "command": "for i in $(seq 1 20000); do echo \"line $i padding padding padding\"; done; echo THE-LAST-WORD; exit 1",
+        }),
+    )
+    .await;
+    assert!(!started.is_error, "{}", started.content);
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+    let status = run(
+        &tool,
+        serde_json::json!({"action": "status", "name": "noisy"}),
+    )
+    .await;
+    assert!(status.content.contains("stopped"), "{}", status.content);
+
+    let log = run(
+        &tool,
+        serde_json::json!({"action": "logs", "name": "noisy", "lines": 500}),
+    )
+    .await;
+    // What was kept is the end, which is where anything went wrong.
+    assert!(log.content.contains("THE-LAST-WORD"), "{}", log.content);
+    // What was dropped is said, not silently missing.
+    assert!(
+        log.content.contains("earlier output dropped"),
+        "{}",
+        log.content
+    );
+    // And the head really is gone: the first lines cannot fit in the
+    // tail that is kept.
+    assert!(!log.content.contains("line 1 padding"), "{}", log.content);
+}
+
 #[tokio::test]
 async fn service_input_validation() {
     let manager = ServiceManager::new();

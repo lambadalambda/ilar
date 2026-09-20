@@ -431,9 +431,17 @@ const EMPTY_SESSION_RETENTION: std::time::Duration = std::time::Duration::from_s
 /// directory's answer to `--continue`. Best-effort — an exit is no
 /// place to raise a housekeeping error.
 pub fn end_session(config: &Config, store: &SessionStore, session_id: &str) {
-    if !store.remove_if_empty(session_id, &outbox_dir(config)) {
-        store.remember_last(session_id);
+    let outbox = outbox_dir(config);
+    // Judged empty is enough to withhold the pointer, whether or not
+    // the removal went through. `delete` declines while another process
+    // holds the writer lease, and the old shape read that refusal as
+    // "keep it": the directory was then pointed at a session with
+    // nothing in it, and the next `--continue` opened that.
+    if store.is_unspoken_root(session_id, &outbox) {
+        store.remove_if_empty(session_id, &outbox);
+        return;
     }
+    store.remember_last(session_id);
 }
 
 pub fn session_store(config: &Config) -> SessionStore {

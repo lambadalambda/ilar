@@ -15,6 +15,10 @@ use super::{Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, Workspac
 
 /// Combined stdout+stderr retained per service.
 const MAX_SERVICE_OUTPUT: usize = 256 * 1024;
+/// What an exited service's capture is cut down to. Enough to hold the
+/// stack trace or the port-in-use line that ended it, small enough that
+/// a session full of dead services is not carrying megabytes of them.
+const RETAINED_AFTER_EXIT: usize = 8 * 1024;
 const DEFAULT_LOG_LINES: usize = 50;
 const MAX_LOG_LINES: usize = 500;
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
@@ -48,6 +52,7 @@ impl ServiceEntry {
         {
             self.exited = Some(exit_label(status));
             self.child = None;
+            self.trim_output();
         }
         // The group is kept past the shell's death on purpose — a
         // daemonized grandchild lives in it, and this id is the only
@@ -61,6 +66,26 @@ impl ServiceEntry {
         {
             self.group = None;
         }
+    }
+
+    /// Cut an exited service's capture down to its tail.
+    ///
+    /// A service that is gone holds its whole `MAX_SERVICE_OUTPUT` for
+    /// the life of the process, and nothing ever released it: a session
+    /// that started and stopped a dozen of them carried a few megabytes
+    /// of dead servers' startup banners to the end. The tail is what
+    /// anyone reads anyway — the reason it exited is at the bottom, not
+    /// the top — and `total` keeps counting the whole thing, so `log`
+    /// still says "earlier output dropped".
+    fn trim_output(&mut self) {
+        let Ok(mut output) = self.output.lock() else {
+            return;
+        };
+        if output.retained.len() <= RETAINED_AFTER_EXIT {
+            return;
+        }
+        output.retained = crate::text::tail_bytes(&output.retained, RETAINED_AFTER_EXIT).to_vec();
+        output.retained.shrink_to_fit();
     }
 
     fn running(&self) -> bool {

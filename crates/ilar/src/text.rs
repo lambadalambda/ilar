@@ -32,9 +32,22 @@ pub fn format_bytes(bytes: u64) -> String {
 /// Durations the way every row and every tool message writes them:
 /// `20s`, `2m 0s`. A refusal that says `120000ms` makes the reader do
 /// arithmetic the UI never asks of them.
+///
+/// Under a second it keeps one decimal. Flooring turned a configured
+/// 400 ms timeout into the sentence "timed out after 0s", which reads
+/// as a bug in the program rather than as a setting the reader chose.
 pub fn format_duration(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
-    if seconds < 60 {
+    if duration.is_zero() {
+        // A row that has only just started really has taken no time,
+        // and `0.0s` there would be noise.
+        "0s".to_string()
+    } else if duration < std::time::Duration::from_secs(1) {
+        // Rounded up, and never below a tenth: a duration that is not
+        // nothing must not print as nothing.
+        let tenths = (duration.as_millis() as f64 / 100.0).ceil().max(1.0) / 10.0;
+        format!("{tenths}s")
+    } else if seconds < 60 {
         format!("{seconds}s")
     } else {
         format!("{}m {}s", seconds / 60, seconds % 60)
@@ -267,5 +280,29 @@ mod tests {
         assert_eq!(tail_str("aé", 1), "");
         assert_eq!(tail_str("abc", 10), "abc");
         assert_eq!(tail_str("", 10), "");
+    }
+
+    /// A sub-second duration used to floor to `0s`, so a tool that
+    /// timed out after a configured 400 ms said it had waited no time
+    /// at all — which reads as a bug rather than as the setting.
+    #[test]
+    fn a_duration_under_a_second_is_not_no_time_at_all() {
+        use std::time::Duration;
+
+        assert_eq!(format_duration(Duration::from_millis(400)), "0.4s");
+        assert_eq!(format_duration(Duration::from_millis(50)), "0.1s");
+        // Not nothing, however small: a timeout that fired took time.
+        assert_eq!(format_duration(Duration::from_nanos(1)), "0.1s");
+        // Zero is the one duration that really is none — a row that has
+        // only just started has taken no time, and `0.0s` there is
+        // noise rather than precision.
+        assert_eq!(format_duration(Duration::ZERO), "0s");
+
+        // The seconds and minutes forms are untouched.
+        assert_eq!(format_duration(Duration::from_secs(1)), "1s");
+        assert_eq!(format_duration(Duration::from_millis(1500)), "1s");
+        assert_eq!(format_duration(Duration::from_secs(20)), "20s");
+        assert_eq!(format_duration(Duration::from_secs(120)), "2m 0s");
+        assert_eq!(format_duration(Duration::from_secs(61)), "1m 1s");
     }
 }
