@@ -493,6 +493,20 @@ fn moved(moved: bool) -> PromptAction {
 /// `extended-keys off`, so this is the common case, not the exotic one.
 /// Naming a key the terminal cannot report reads as ilar losing
 /// keystrokes. Ctrl-J is the literal line feed and always arrives.
+/// Whether this key event proves the terminal can tell a modified
+/// Enter from a plain one.
+///
+/// The startup query is not the last word. tmux answers nothing to the
+/// kitty protocol query even under `extended-keys always`, where it
+/// does send `CSI 13;2u` for Shift-Enter — so the handshake says no
+/// while the terminal says yes with every keystroke. A modified Enter
+/// that arrives carrying its modifier could not have been a bare CR,
+/// and that is exactly the capability Shift-Enter and Ctrl-M need.
+pub(crate) fn disambiguates_enter(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::Enter
+        && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
 pub(crate) fn newline_keys(keyboard_enhanced: bool) -> &'static str {
     if keyboard_enhanced {
         "Shift-Enter/Ctrl-J"
@@ -1029,6 +1043,34 @@ mod tests {
             PromptAction::Edited
         );
         assert_eq!(input.text(), "\n");
+    }
+
+    /// tmux under `extended-keys always` sends `CSI 13;2u` for
+    /// Shift-Enter and answers nothing to the protocol query, so the
+    /// handshake says the terminal cannot disambiguate while it
+    /// demonstrably can. The keystroke settles it.
+    #[test]
+    fn a_modified_enter_proves_what_the_handshake_denied() {
+        for modifier in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+        ] {
+            assert!(
+                disambiguates_enter(KeyCode::Enter, modifier),
+                "{modifier:?}"
+            );
+        }
+        // A bare Enter is what an unenhanced terminal sends for every
+        // one of those chords, so it proves nothing either way.
+        assert!(!disambiguates_enter(KeyCode::Enter, KeyModifiers::NONE));
+        // Other keys carry modifiers on any terminal; only Enter is
+        // the one that collapses to a byte without the protocol.
+        assert!(!disambiguates_enter(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL
+        ));
+        assert!(!disambiguates_enter(KeyCode::Tab, KeyModifiers::SHIFT));
     }
 
     /// The edges of a multiline draft are not dead keys: `move_vertical`

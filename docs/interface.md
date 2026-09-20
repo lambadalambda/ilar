@@ -25,8 +25,13 @@ set -s extended-keys-format csi-u
 ```
 
 `always` rather than `on`: `on` forwards extended keys only once the
-application has asked for them, and the asking is itself a query that
-may not survive a nested tmux or a slow link.
+application has asked for them, and tmux never answers the question
+that does the asking. Under `always` it sends `CSI 13;2u` for
+Shift-Enter regardless, which is what makes the key work — but the
+startup query still comes back empty, so ilar starts by offering
+Ctrl-J alone. The first Shift-Enter you press settles it: a modified
+Enter could not have arrived as a bare carriage return, so ilar takes
+that as proof and offers both from then on.
 
 ## Starting
 

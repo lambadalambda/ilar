@@ -4064,6 +4064,13 @@ async fn run_app(
                     ..
                 },
             ) => {
+                // Proof beats the handshake. tmux with `extended-keys
+                // always` sends CSI u for a modified Enter but answers
+                // no to the protocol query, so the startup check says
+                // the terminal cannot disambiguate while it plainly
+                // can. A modified Enter arriving *is* the capability
+                // both Shift-Enter and Ctrl-M need, so take it.
+                app.keyboard_enhanced |= crate::input::disambiguates_enter(code, modifiers);
                 let control = modifiers.contains(KeyModifiers::CONTROL);
                 let alt = modifiers.contains(KeyModifiers::ALT);
                 // Ctrl-C is an interrupt, not the exit: it is rewritten
