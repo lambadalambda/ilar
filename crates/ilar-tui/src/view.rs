@@ -39,6 +39,14 @@ use crate::{Activity, ERROR, MAX_GOAL_ROUNDS, MUTED, theme};
 const ASSISTANT: Color = theme::ASSISTANT;
 const TOOL_ACTIVE: Color = theme::RUNNING;
 const CONTENT_HORIZONTAL_PADDING: u16 = 2;
+
+/// `$HOME`, read once. It does not change under a running process, and
+/// the status line asked the environment for it on every frame.
+fn home_dir() -> Option<&'static std::path::Path> {
+    static HOME: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+        .as_deref()
+}
 /// Show "no data Ns" in the status line once the stream has been silent
 /// this long during thinking/responding.
 const STREAM_STALL_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
@@ -419,8 +427,7 @@ impl App {
             width.saturating_sub(state_width + separators + 8),
             Truncation::Right,
         );
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let cwd = show_cwd.then(|| abbreviated_path(&self.cwd, home.as_deref()));
+        let cwd = show_cwd.then(|| abbreviated_path(&self.cwd, home_dir()));
         let usage_width = UnicodeWidthStr::width(usage.as_str());
         let available = width
             .saturating_sub(state_width)

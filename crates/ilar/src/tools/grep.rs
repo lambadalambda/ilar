@@ -234,10 +234,16 @@ impl Tool for GrepTool {
 /// Why one file's scan stopped early. A bare "(truncated)" covered
 /// three different caps and named none of them, so nobody could tell a
 /// pattern that needs narrowing from a file too big to read.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Clip {
-    PerFileMatches,
-    FileBytes,
+///
+/// Both at once, rather than one: a large file with many matches hits
+/// the byte cap on its way to the match cap, and a single cause per
+/// file meant whichever came second erased the first.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+struct Clips {
+    /// The per-file match cap stopped the scan.
+    matches: bool,
+    /// The per-file byte cap cut the file short.
+    bytes: bool,
 }
 
 /// Scan one file. Pure apart from reading it: returns the hits and
@@ -247,14 +253,14 @@ fn grep_one_file(
     relative: &str,
     search: &Search,
     cancelled: &std::sync::atomic::AtomicBool,
-) -> (Vec<Hit>, Option<Clip>) {
+) -> (Vec<Hit>, Clips) {
     let Ok(file) = std::fs::File::open(path) else {
-        return (Vec::new(), None);
+        return (Vec::new(), Clips::default());
     };
     let mut reader = std::io::BufReader::new(file).take(MAX_FILE_BYTES + 1);
     let mut hits = Vec::new();
     let mut matches = 0_usize;
-    let mut truncated = None;
+    let mut truncated = Clips::default();
     let mut line = Vec::new();
     let mut line_number = 0_usize;
     let mut file_bytes = 0_u64;
@@ -282,7 +288,7 @@ fn grep_one_file(
         let file_limit_reached = file_bytes > MAX_FILE_BYTES;
         if file_limit_reached {
             let remaining = MAX_FILE_BYTES.saturating_sub(previous_file_bytes) as usize;
-            truncated = Some(Clip::FileBytes);
+            truncated.bytes = true;
             if remaining == 0 {
                 break;
             }
@@ -307,7 +313,7 @@ fn grep_one_file(
             after = search.context;
             matches += 1;
             if matches >= MAX_MATCHES_PER_FILE {
-                truncated = Some(Clip::PerFileMatches);
+                truncated.matches = true;
                 break;
             }
         } else if after > 0 {
@@ -419,10 +425,15 @@ fn grep_files(
                 return ignore::WalkState::Continue;
             }
             let (found, file_clipped) = grep_one_file(entry.path(), &relative, search, cancelled);
-            match file_clipped {
-                Some(Clip::PerFileMatches) => clipped_matches.store(true, Ordering::Release),
-                Some(Clip::FileBytes) => clipped_bytes.store(true, Ordering::Release),
-                None => {}
+            // Both, when both happened: a large file with many matches
+            // hits the byte cap on its way to the match cap, and
+            // reporting one cause per file hid the other from the
+            // summary the model reads.
+            if file_clipped.matches {
+                clipped_matches.store(true, Ordering::Release);
+            }
+            if file_clipped.bytes {
+                clipped_bytes.store(true, Ordering::Release);
             }
             if !found.is_empty() {
                 let found_matches = found.iter().filter(|hit| hit.is_match).count();
@@ -614,6 +625,48 @@ mod tests {
         let both = cap_notice(true, false, true).unwrap();
         assert!(both.contains("matches per file and"), "{both}");
         assert!(both.contains("narrow the pattern"), "{both}");
+    }
+
+    /// One file can hit both caps — a huge file with many matches
+    /// reaches the byte cap on its way to the match cap — and a single
+    /// cause per file let whichever came second erase the first, so the
+    /// closing notice named one fix when two applied.
+    #[test]
+    fn one_file_can_report_both_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.txt");
+        // The two caps are checked in the same pass over the same line:
+        // the byte cap first, the match cap second. Sized so the line
+        // that crosses 2 MiB is also the 50th match, which is the one
+        // arrangement that trips both — and the one the old single
+        // cause silently collapsed.
+        let width = MAX_FILE_BYTES as usize / MAX_MATCHES_PER_FILE + 100;
+        let line = format!("needle {}\n", "x".repeat(width - "needle \n".len()));
+        assert_eq!(line.len(), width);
+        std::fs::write(&path, line.repeat(MAX_MATCHES_PER_FILE + 5)).unwrap();
+
+        let search = Search {
+            regex: regex::Regex::new("needle").unwrap(),
+            context: 0,
+            files: None,
+        };
+        let (hits, clips) = grep_one_file(
+            &path,
+            "huge.txt",
+            &search,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+
+        assert_eq!(hits.iter().filter(|hit| hit.is_match).count(), 50);
+        assert!(clips.matches, "the match cap went unreported");
+        assert!(
+            clips.bytes,
+            "the byte cap was erased by the match cap: {clips:?}"
+        );
+        // And the notice the model reads names both fixes.
+        let notice = cap_notice(clips.matches, clips.bytes, false).unwrap();
+        assert!(notice.contains("matches per file"), "{notice}");
+        assert!(notice.contains("2.0 MiB"), "{notice}");
     }
 
     #[tokio::test]
