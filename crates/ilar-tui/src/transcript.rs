@@ -1898,8 +1898,8 @@ pub(crate) fn squash_finished_child(lines: &mut Vec<Line_>) {
     let (live, folded): (Vec<Line_>, Vec<Line_>) = middle.into_iter().partition(tool_is_active);
     if !folded.is_empty() {
         lines.push(Line_::System(format!(
-            "… {} line(s) folded — the focus view has the full timeline",
-            folded.len()
+            "… {} folded — the focus view has the full timeline",
+            ilar::text::plural(folded.len(), "line")
         )));
     }
     lines.extend(live);
@@ -2245,7 +2245,9 @@ pub(crate) fn transcript_entry_lines(
             complete,
             expanded,
         } => {
-            let state = if *complete { "Thought" } else { "Thinking" };
+            // Lowercase, like every other row label: `you`, `task`,
+            // `tool`. This one shouted for no reason anyone could name.
+            let state = if *complete { "thought" } else { "thinking" };
             // Reasoning summaries lead with their headline (bold/heading);
             // raw streamed thinking is most useful tail-first — show the
             // line currently being written. Completed thoughts show their
@@ -2539,11 +2541,11 @@ fn tool_line_with_disclosure(
         ToolState::Succeeded => ("✓", theme::SUCCESS),
         ToolState::Failed => ("×", ERROR),
     };
-    let disclosure = match (expanded, full) {
-        (false, _) => "▶",
-        (true, false) => "▾",
-        (true, true) => "▼",
-    };
+    // The same pair every other disclosure uses. There used to be a
+    // third triangle for "expanded, and showing the whole result",
+    // indistinguishable at a glance from the second; the state is a
+    // word now, further down the row where truncation takes it first.
+    let disclosure = if expanded { "▾" } else { "▸" };
     let fixed = UnicodeWidthStr::width(format!("{label}{disclosure}  ").as_str())
         + UnicodeWidthStr::width(state_icon);
     if width <= fixed {
@@ -2627,6 +2629,15 @@ fn tool_line_with_disclosure(
         (true, false) => progress,
         (true, true) => String::new(),
     };
+    // The third disclosure state, in a word rather than in a third
+    // triangle nobody could tell from the second. It rides at the end
+    // of the details, where truncation takes it before it takes what
+    // the call was about.
+    let details = match (expanded && full, details.is_empty()) {
+        (true, true) => "full".to_string(),
+        (true, false) => format!("{details} · full"),
+        (false, _) => details,
+    };
     let details = truncate_display(
         &details,
         width.saturating_sub(used).saturating_sub(1),
@@ -2696,7 +2707,17 @@ fn notification_lines(
         output.push(Line::from(vec![
             Span::raw("     ".to_string()),
             Span::styled(
-                format!("… {} more line(s) — click to expand", body.len()),
+                {
+                    // "line(s)" made the reader do the grammar; and
+                    // Enter on a targeted row expands it too, which
+                    // "click to expand" said was the only way.
+                    let more = if body.len() == 1 {
+                        "1 more line".to_string()
+                    } else {
+                        format!("{} more lines", body.len())
+                    };
+                    format!("… {more} — click or Enter to expand")
+                },
                 Style::default().fg(MUTED),
             ),
         ]));
@@ -2708,6 +2729,42 @@ fn notification_lines(
 mod tests {
     /// A wrapped row keeps its gutter: continuation rows sit under the
     /// label, not at column 0, and none of them overflows.
+    /// Three tool states, two triangles: the third one said `▼` where
+    /// the second says `▾`, which nobody could tell apart at a glance.
+    /// The state is a word now, at the end of the details where
+    /// truncation takes it before it takes the call.
+    #[test]
+    fn the_third_disclosure_state_is_a_word_not_a_third_triangle() {
+        let now = std::time::Instant::now();
+        let row = |expanded, full| {
+            rendered_text(&tool_line_with_disclosure(
+                "read",
+                &ToolKind::Tool,
+                "src/main.rs",
+                ToolState::Succeeded,
+                100,
+                std::time::Duration::ZERO,
+                ToolProgress::None,
+                now,
+                expanded,
+                full,
+                0,
+            ))
+        };
+
+        assert!(row(false, false).contains('▸'), "{}", row(false, false));
+        assert!(row(true, false).contains('▾'), "{}", row(true, false));
+        // Expanded and showing the whole result: the same triangle as
+        // any other expanded row, and a word for what is different.
+        let whole = row(true, true);
+        assert!(whole.contains('▾'), "{whole}");
+        assert!(whole.contains("full"), "{whole}");
+        assert!(!whole.contains('▼'), "{whole}");
+        // And the word is not there when it would be a lie.
+        assert!(!row(true, false).contains("full"));
+        assert!(!row(false, true).contains("full"));
+    }
+
     #[test]
     fn wrapped_rows_keep_their_gutter() {
         let now = std::time::Instant::now();
@@ -2822,7 +2879,7 @@ mod tests {
         assert!(rows.len() > 1);
         assert!(
             rows.iter()
-                .any(|row| rendered_text(&row.line).contains("click to expand"))
+                .any(|row| rendered_text(&row.line).contains("click or Enter to expand"))
         );
         assert!(
             rows.iter()
@@ -2929,7 +2986,7 @@ mod tests {
         assert_eq!(lines.len(), SQUASHED_CHILD_HEAD + 1 + SQUASHED_CHILD_TAIL);
         assert!(matches!(&lines[0], Line_::System(text) if text == "line 0"));
         assert!(
-            matches!(&lines[SQUASHED_CHILD_HEAD], Line_::System(text) if text.contains("68 line(s) folded")),
+            matches!(&lines[SQUASHED_CHILD_HEAD], Line_::System(text) if text.contains("68 lines folded")),
             "the marker names what it replaced"
         );
         assert!(matches!(lines.last(), Some(Line_::System(text)) if text == "line 99"));

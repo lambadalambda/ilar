@@ -3464,7 +3464,7 @@ async fn run_app(
             decide::StallVerdict::Abort { silent_secs } => {
                 if let Some(cancel) = &cancel {
                     let message = format!(
-                        "stall watchdog: provider silent for {silent_secs}s — aborting the turn"
+                        "nothing from the provider for {silent_secs}s — the turn was stopped"
                     );
                     // The transcript keeps the why; the TurnDone the
                     // cancellation produces closes the rows and posts
@@ -3844,7 +3844,9 @@ async fn run_app(
                     // The entries stay on disk for the next open;
                     // saying so beats silence.
                     app.set_notice(
-                        format!("outbox adoption failed: {join_error}"),
+                        format!(
+                            "could not look for results waiting from an earlier run: {join_error}"
+                        ),
                         NoticeLevel::Warning,
                     );
                 }

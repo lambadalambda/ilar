@@ -2093,7 +2093,7 @@ impl App {
                         // the outbox redelivers at the next open.
                         match message.and_then(queued_result_headline) {
                             Some(_) if is_armed => format!(
-                                "task result {}: press d again to delete — the outbox redelivers it when this session next opens",
+                                "task result {}: press d again to drop it here — it comes back the next time this session opens",
                                 queue_index + 1
                             ),
                             Some(headline) => {
@@ -2159,7 +2159,7 @@ impl App {
                             .unwrap_or("a task result");
                         format!("held result {}: {headline} — Enter delivers", index + 1)
                     }
-                    PendingItem::Retry => "resume failed turn from current context".into(),
+                    PendingItem::Retry => "carry the failed turn on from where it stopped".into(),
                 }
             })
             .collect();
@@ -4096,7 +4096,7 @@ mod tests {
             !rendered.contains("Repository review"),
             "body must be collapsed: {rendered}"
         );
-        assert!(rendered.contains("more line(s)"), "{rendered}");
+        assert!(rendered.contains("1 more line"), "{rendered}");
         assert!(!rendered.contains("you  Task"), "{rendered}");
         // The job leads with its description; the id waits in the body.
         assert!(
@@ -4616,7 +4616,9 @@ mod tests {
         assert!(snapshot.armed);
         assert!(
             snapshot.rows[0].contains("press d again")
-                && snapshot.rows[0].contains("redelivers it when this session next opens"),
+                // What deleting costs, in the user's words: nothing is
+                // lost, only deferred.
+                && snapshot.rows[0].contains("comes back the next time this session opens"),
             "{}",
             snapshot.rows[0]
         );
@@ -7343,7 +7345,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(rendered.len(), 2);
-        assert!(rendered[0].contains("Thought: Inspecting layout"));
+        assert!(rendered[0].contains("thought: Inspecting layout"));
         assert!(rendered[1].starts_with("└─tools "), "{rendered:?}");
         assert!(rendered[1].contains("1 call"), "{rendered:?}");
         for width in 0..=2 {
@@ -7495,7 +7497,7 @@ mod tests {
             [
                 "you  Question",
                 "",
-                "· Thought: Answering",
+                "· thought: Answering",
                 "",
                 "ilar Response"
             ]
@@ -7735,7 +7737,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             live.iter()
-                .any(|line| line.contains("Thought: Tracing transcript"))
+                .any(|line| line.contains("thought: Tracing transcript"))
         );
         assert!(
             live.iter()
@@ -8451,7 +8453,7 @@ mod tests {
             .map(rendered_text)
             .find(|line| line.contains("build · secure"))
             .unwrap();
-        assert!(subagent.contains("task  ▶ build · secure"), "{subagent}");
+        assert!(subagent.contains("task  ▸ build · secure"), "{subagent}");
         assert!(subagent.contains("Review security paths"), "{subagent}");
         assert!(subagent.contains("running · 1m 12s"), "{subagent}");
         assert!(!subagent.contains("received"), "{subagent}");
@@ -8587,7 +8589,7 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line.contains("▸ Thinking: Now comparing the two branches.")),
+                .any(|line| line.contains("▸ thinking: Now comparing the two branches.")),
             "{rendered:?}"
         );
         assert!(
@@ -8617,7 +8619,7 @@ mod tests {
         let expanded = app.transcript_lines(100, std::time::Instant::now());
         let rendered: Vec<String> = expanded.iter().map(rendered_text).collect();
         assert!(
-            rendered.iter().any(|line| line.contains("▾ Thinking:")),
+            rendered.iter().any(|line| line.contains("▾ thinking:")),
             "{rendered:?}"
         );
         assert!(
@@ -8665,14 +8667,14 @@ mod tests {
         ));
         let live = app.transcript_lines(80, std::time::Instant::now());
         assert!(
-            rendered_text(live.last().unwrap()).contains("Thinking: Running tests"),
+            rendered_text(live.last().unwrap()).contains("thinking: Running tests"),
             "{live:?}"
         );
 
         app.push_loop_event(&LoopEvent::ReasoningSummaryCompleted);
         let complete = app.transcript_lines(80, std::time::Instant::now());
         assert!(
-            rendered_text(complete.last().unwrap()).contains("Thought: Running tests"),
+            rendered_text(complete.last().unwrap()).contains("thought: Running tests"),
             "{complete:?}"
         );
         assert!(!rendered_text(complete.last().unwrap()).contains("Checking the suite"));

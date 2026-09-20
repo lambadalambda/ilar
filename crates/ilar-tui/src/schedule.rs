@@ -356,7 +356,7 @@ fn hold_notice(target: &str, cancelled: bool) -> String {
     let reason = if cancelled {
         format!("the delivery of a task result for {target} was cancelled")
     } else {
-        format!("a task result for {target} cannot reach it while it is busy")
+        format!("a task result for {target} arrived while it was busy")
     };
     format!("{reason} — held; {HELD_RESULT_ACTION}")
 }

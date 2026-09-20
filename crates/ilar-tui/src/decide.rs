@@ -253,10 +253,10 @@ pub(crate) fn after_turn(
             intents.push(Intent::SystemLine(message));
         }
         GoalStep::CapReached => {
-            let message = format!(
-                "goal round cap ({max_rounds}) reached without {} — stopping",
-                crate::GOAL_SENTINEL
-            );
+            // Neither the cap's name nor the sentinel the model is
+            // asked to say: both are ours, and a person reading this
+            // wants to know it stopped and why.
+            let message = format!("stopped after {max_rounds} rounds without reaching the goal");
             intents.push(Intent::ClearGoal);
             intents.push(Intent::SystemLine(message.clone()));
             intents.push(Intent::Notice(message, NoticeLevel::Warning));
@@ -1131,7 +1131,16 @@ mod tests {
     fn a_cap_stops_the_goal_rather_than_running_another_round() {
         let intents = after_turn(&idle(), true, Some(("ship it", 25)), false, 25);
         assert_eq!(intents[0], Intent::ClearGoal);
-        assert!(matches!(&intents[1], Intent::SystemLine(text) if text.contains("cap (25)")));
+        // In the user's words: neither the cap's internal name nor the
+        // sentinel the model is asked to say.
+        assert!(matches!(&intents[1], Intent::SystemLine(text)
+            if text.contains("25 rounds") && text.contains("without reaching the goal")));
+        assert!(
+            !intents
+                .iter()
+                .any(|i| matches!(i, Intent::SystemLine(t) if t.contains(crate::GOAL_SENTINEL))),
+            "the sentinel leaked into what the user reads"
+        );
         assert!(!intents.iter().any(|i| matches!(i, Intent::StartTurn(_))));
     }
 

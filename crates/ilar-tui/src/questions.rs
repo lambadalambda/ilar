@@ -316,8 +316,10 @@ impl QuestionModal {
         }
         let question = &self.request.questions[self.current];
         let area = crate::modals::centered_rect(available, MODAL_WIDTH, available.height.min(24));
+        // Lowercase, like every other overlay's title: this one alone
+        // shouted.
         let title = format!(
-            " Question {}/{} ",
+            " question {}/{} ",
             self.current + 1,
             self.request.questions.len()
         );
@@ -328,7 +330,11 @@ impl QuestionModal {
             area,
             &title,
             theme::MARKUP,
-            &question_footer(question, newline_keys),
+            &question_footer(
+                question,
+                newline_keys,
+                self.current + 1 == self.request.questions.len(),
+            ),
         ) else {
             return;
         };
@@ -492,13 +498,20 @@ fn append_choices<'a>(
 /// loses `Esc cancel` — the one key that always has to be findable.
 /// The free-text form says `↑↓` alone for that reason, where the choice
 /// form has the room to say `↑↓ navigate`.
-fn question_footer(question: &Question, newline_keys: &str) -> String {
+fn question_footer(question: &Question, newline_keys: &str, last: bool) -> String {
+    // Enter sends on the last question, and "next" promised one that
+    // is not there. `BackTab` is the terminal's name for the key, not
+    // the keyboard's.
+    let enter = if last { "Enter send" } else { "Enter next" };
     match &question.kind {
         QuestionKind::FreeText => {
-            format!(" Enter next · {newline_keys} newline · ↑↓ · BackTab back · Esc cancel ")
+            // No ↑↓ here: the footer has 74 cells and this form spends
+            // 18 of them on the newline keys. Moving between questions
+            // with the arrows is an edge affordance and lives in F1.
+            format!(" {enter} · {newline_keys} newline · Shift-Tab back · Esc cancel ")
         }
         QuestionKind::SingleChoice { .. } | QuestionKind::MultipleChoice { .. } => {
-            " ↑↓ navigate · Space select · Enter next · BackTab back · Esc cancel ".to_string()
+            format!(" ↑↓ navigate · Space select · {enter} · Shift-Tab back · Esc cancel ")
         }
     }
 }
@@ -851,12 +864,14 @@ mod tests {
     #[test]
     fn renders_number_description_options_markers_and_footer() {
         let output = screen(&QuestionModal::new(request()), 80, 24);
-        assert!(output.contains("Question 1/3"));
+        assert!(output.contains("question 1/3"));
         assert!(output.contains("Pick a language"));
         assert!(output.contains("Your draft is kept"));
         assert!(output.contains("[ ] Rust"));
         assert!(output.contains("Fast and friendly"));
-        assert!(output.contains("Enter next"));
+        // Three questions, so the first one's Enter really does mean
+        // next; the last one's says send.
+        assert!(output.contains("Enter next"), "{output}");
     }
 
     /// The footer of a free-text question offers Shift-Enter only where
@@ -896,7 +911,7 @@ mod tests {
         // Measured, not eyeballed: two of the modal's cells are its
         // borders.
         for newline_keys in ["Shift-Enter/Ctrl-J", "Ctrl-J"] {
-            let footer = question_footer(question, newline_keys);
+            let footer = question_footer(question, newline_keys, true);
             let width = unicode_width::UnicodeWidthStr::width(footer.as_str());
             assert!(
                 width <= usize::from(MODAL_WIDTH) - 2,

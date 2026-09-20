@@ -565,7 +565,7 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         id: PaletteCommand::Session,
         section: "General",
         label: "Switch session",
-        shortcut: "",
+        shortcut: "/sessions",
         search_terms: "session resume continue switch history recent grep search find content",
     },
     PaletteCommandDefinition {
@@ -1200,7 +1200,7 @@ pub(crate) fn render_aside(frame: &mut Frame, aside: &AsideModal) {
         area,
         " btw ",
         theme::MARKUP,
-        " ↑↓ scroll · Esc close ",
+        " ↑↓ scroll · Enter / Esc / q close ",
     ) else {
         return;
     };
