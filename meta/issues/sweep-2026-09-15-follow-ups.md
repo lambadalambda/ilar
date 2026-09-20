@@ -100,6 +100,27 @@ send happened. Only reachable with a draft that arrived without
 typing — a popped stash or a carried prefill — because a typed
 character or a paste dismisses the offer on the spot.
 
+More, 2026-09-20. A routed delivery waited on `acquire_lease` with no
+cap while holding the session claim, so one mutable task that kept its
+lease stalled every delivery behind it; the wait is bounded and the
+notification requeued. The master-password prompt read the terminal
+without asking who owned it — a job backgrounded from a shell keeps
+`/dev/tty`, so the read raised SIGTTIN and the shell stopped the job
+with no prompt on screen; the foreground process group is checked
+first. The `secrets` tool was installed or not when the registry was
+built, so the first `ilar secret set` of a machine's life left the
+running session without the tool its own bash schema points at: tools
+answer `is_published` for themselves now, and this one reads the store
+file per turn. `Config::provider_for` is gone; its eight test call
+sites ask `provider_result` directly.
+
+Struck rather than done: the TUI grant line saying "(always)" when the
+store write failed. The modal writes that line from the answer, and
+the write happens in the broker on the far side of a one-way channel —
+telling the line about the downgrade means a reply path back for a
+case that is a disk failure. The note already reaches the person: it
+rides the tool result, which the transcript shows.
+
 Gateway:
 - `/abort` a second before shutdown gets the restart wording
   (`aborted_reply` reads the cancel flag at delivery time).

@@ -1,5 +1,49 @@
 # DEVLOG
 
+## 2026-09-20 — A tool that knows when it exists
+
+**The `secrets` tool was decided once and asked never again.** The
+registry checked whether the store file existed when it was built, and
+that answer stood for the life of the session. So the first `ilar
+secret set` a machine ever runs leaves the session that prompted it
+without the tool its *own bash schema* tells the model to use. The
+children escaped it by accident: their registry is built per spawn.
+
+Registering it unconditionally is the obvious fix and the wrong one,
+because a machine with no secrets should not pay for the description.
+What was missing is that a tool can answer for itself. `Tool` has an
+`is_published` now, default true, and `definitions()` filters on it.
+Almost every tool is there for the whole session and says so by saying
+nothing; this one reads the store file each time it is asked. The tool
+appears on the next turn and disappears if the store is deleted,
+neither waiting for a restart.
+
+**A backgrounded job was asked a question it could not answer.** The
+master-password prompt called `rpassword` straight out. A job
+backgrounded from a shell keeps `/dev/tty` open, so the terminal looks
+reachable — but reading it raises SIGTTIN and the shell stops the job.
+No prompt on screen, nothing to type into, and a process that looks
+hung. The terminal's foreground process group is the whole test, and
+the caller already knew what to do with a prompt that fails: say it
+once and run locked. No controlling terminal at all stays a different
+failure, because it is one — the read reports that for itself.
+
+**A routed delivery waited forever for a lease.** `route_notification`
+held the session claim while it waited on `acquire_lease` with no cap,
+so a single mutable task that kept its lease stalled every delivery
+queued behind it. Bounded at thirty seconds; the notification goes
+back on the queue rather than the claim being held out of the world.
+
+Also: `Config::provider_for` was a `.ok()` wrapper with no caller
+outside tests, kept for eight of them. The tests ask `provider_result`
+now, which is the function that says *why*.
+
+Struck: the TUI grant line that says "(always)" when the store write
+failed. The modal writes that line from the answer; the write happens
+in the broker across a one-way channel. Correcting the line means a
+reply path back for what is a disk failure, and the person is already
+told — the note rides the tool result.
+
 ## 2026-09-20 — Three small ones, and a measurement that lied
 
 **A misspelt `/unlock` is still a password in the chat.** `/unlok
