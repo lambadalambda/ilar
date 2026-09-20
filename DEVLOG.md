@@ -1,5 +1,26 @@
 # DEVLOG
 
+## 2026-09-20 — A screenful of past, folded
+
+Every restored session that had ever been compacted opened with the
+handover summary laid out in full, as muted rows, above everything
+else. The conversation started below the fold. The summary is there so
+the *model* remembers; the person was just looking at the thing it
+replaces.
+
+It is a folded note now, through the same rendering a task result and
+a job ending already use: a headline that says it happened, the
+handover one keystroke behind it, and the "click or Enter to expand"
+affordance the other collapsed rows carry. Both paths fold it — the
+restore and the live compaction — for the same reason.
+
+That is the last of the wrapped-rows list bar one. The remaining item
+is a tool row showing `done` for a frame before flipping to `×`, and
+closing it means a fourth `ToolState` across eighty-five match arms to
+change an icon for one frame, on a row whose words already say "no
+result recorded — the turn ended before the tool returned". Judgement,
+not defect.
+
 ## 2026-09-20 — Three things a review found, fixed
 
 *Later the same day.* The append guard earned its keep twice over.

@@ -52,7 +52,10 @@ fn collect_from_line(line: &Line_, out: &mut Vec<LinkEntry>) {
         | Line_::System(text) => {
             links_in(text, out);
         }
-        Line_::Task { text, .. } | Line_::Job { text, .. } | Line_::Thought { text, .. } => {
+        Line_::Task { text, .. }
+        | Line_::Job { text, .. }
+        | Line_::Note { text, .. }
+        | Line_::Thought { text, .. } => {
             links_in(text, out);
         }
         Line_::Tool {

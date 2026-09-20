@@ -1761,8 +1761,15 @@ impl App {
                 // rows a running turn still owns stay untouched.
                 let boundary = self.turn_boundary.min(self.lines.len());
                 crate::transcript::shed_payloads(&mut self.lines[..boundary]);
-                self.lines
-                    .push(Line_::System(format!("transcript compacted\n{summary}")));
+                // Folded, and folded the same way a restore folds it:
+                // the handover runs to a screenful and the person has
+                // just watched the conversation it replaces.
+                let id = self.allocate_thought_id();
+                self.lines.push(Line_::Note {
+                    id,
+                    text: format!("transcript compacted\n{summary}"),
+                    expanded: false,
+                });
                 Some(0)
             }
             LoopEvent::TurnDone { outcome } => {
@@ -6039,7 +6046,7 @@ mod tests {
         );
         assert!(matches!(
             app.lines.last(),
-            Some(Line_::System(text)) if text.contains("transcript compacted")
+            Some(Line_::Note { text, .. }) if text.contains("transcript compacted")
         ));
     }
 
@@ -6051,24 +6058,37 @@ mod tests {
             summary: "keep the parser decision and pending migration".into(),
         });
 
-        assert!(matches!(
-            app.lines.last(),
-            Some(Line_::System(text))
-                if text.contains("transcript compacted")
-                    && text.contains("keep the parser decision and pending migration")
-        ));
-        let rendered = app
-            .transcript_lines(80, std::time::Instant::now())
-            .into_iter()
-            .map(|line| {
-                line.spans
-                    .into_iter()
-                    .map(|span| span.content)
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(rendered.contains("keep the parser decision"), "{rendered}");
+        let Some(Line_::Note { id, text, .. }) = app.lines.last().cloned() else {
+            panic!("the handover is a folded note: {:?}", app.lines.last());
+        };
+        assert!(text.contains("transcript compacted"), "{text}");
+        assert!(
+            text.contains("keep the parser decision and pending migration"),
+            "{text}"
+        );
+
+        let rendered = |app: &App| {
+            app.transcript_lines(80, std::time::Instant::now())
+                .into_iter()
+                .map(|line| {
+                    line.spans
+                        .into_iter()
+                        .map(|span| span.content)
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Folded: the headline and the way in, not the handover. A
+        // summary runs to a screenful, and the person has just watched
+        // the conversation it replaces.
+        let folded = rendered(&app);
+        assert!(!folded.contains("keep the parser decision"), "{folded}");
+        assert!(folded.contains("click or Enter to expand"), "{folded}");
+
+        app.toggle_transcript_target(crate::transcript::TranscriptHitTarget::Thought(id));
+        let opened = rendered(&app);
+        assert!(opened.contains("keep the parser decision"), "{opened}");
     }
 
     #[test]

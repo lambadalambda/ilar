@@ -604,7 +604,8 @@ mod tests {
             Line_::System(text)
             | Line_::User(text)
             | Line_::Task { text, .. }
-            | Line_::Job { text, .. } => text.contains(needle),
+            | Line_::Job { text, .. }
+            | Line_::Note { text, .. } => text.contains(needle),
             _ => false,
         })
     }
@@ -878,7 +879,7 @@ mod tests {
         assert_eq!(app.goal, Some(("ship it".into(), 3)));
         assert!(app.queued_messages.is_empty());
         assert!(app.lines().iter().any(
-            |line| matches!(line, Line_::System(text) if text.contains("handover keeps the migration plan"))
+            |line| matches!(line, Line_::Note { text, .. } if text.contains("handover keeps the migration plan"))
         ));
     }
 

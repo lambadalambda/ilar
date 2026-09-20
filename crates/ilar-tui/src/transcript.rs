@@ -32,6 +32,15 @@ pub(crate) enum Line_ {
         text: String,
         expanded: bool,
     },
+    /// The handover a compaction left behind, folded. It opens every
+    /// restored session that has ever been compacted, and as a wall of
+    /// muted `—` rows it pushed the conversation off the screen before
+    /// the conversation started. One row, with the summary behind it.
+    Note {
+        id: String,
+        text: String,
+        expanded: bool,
+    },
     Assistant(String),
     Thought {
         /// Click-target id; empty for nested subagent previews, which are
@@ -802,7 +811,8 @@ pub(crate) fn toggle_tool_expansion(lines: &mut [Line_], id: &str) -> Option<usi
     None
 }
 
-/// Toggle an expandable note — a thought, a task or a job notification.
+/// Toggle an expandable note — a thought, a task or job notification,
+/// or a compaction's folded handover.
 /// Only top-level rows carry ids (nested previews are not expandable),
 /// so this does not recurse. Returns the index, for the same reason
 /// [`toggle_tool_expansion`] does.
@@ -819,6 +829,11 @@ pub(crate) fn toggle_note_expansion(lines: &mut [Line_], id: &str) -> Option<usi
             ..
         }
         | Line_::Job {
+            id: line_id,
+            expanded,
+            ..
+        }
+        | Line_::Note {
             id: line_id,
             expanded,
             ..
@@ -1595,6 +1610,9 @@ fn entry_rows(
                         id, text, expanded, ..
                     }
                     | Line_::Job {
+                        id, text, expanded, ..
+                    }
+                    | Line_::Note {
                         id, text, expanded, ..
                     } if !id.is_empty() && safe_lines(text).len() > 1 => {
                         (Some(TranscriptHitTarget::Thought(id.clone())), !*expanded)
@@ -2398,6 +2416,9 @@ pub(crate) fn transcript_entry_lines(
         Line_::Job { text, expanded, .. } => {
             notification_lines(text, *expanded, "job  ", theme::WAITING, width)
         }
+        Line_::Note { text, expanded, .. } => {
+            notification_lines(text, *expanded, "past ", theme::MUTED, width)
+        }
         // Production tool rendering goes through `tool_entry_rows`,
         // which owns disclosure, grouping and child timelines;
         // `transcript_entry_rows` routes every tool line there before
@@ -2510,7 +2531,10 @@ fn append_markdown(output: &mut String, lines: &[Line_]) {
                     output.push_str("```\n");
                 }
             }
-            Line_::Task { text, .. } | Line_::Job { text, .. } | Line_::System(text) => {
+            Line_::Task { text, .. }
+            | Line_::Job { text, .. }
+            | Line_::Note { text, .. }
+            | Line_::System(text) => {
                 let mut rows = text.lines();
                 output.push_str(&format!("\n*{}*\n", rows.next().unwrap_or("")));
                 // The body — a task's result, the compaction summary —

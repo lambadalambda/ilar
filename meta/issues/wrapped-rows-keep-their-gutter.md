@@ -104,3 +104,17 @@ flipping to `×` a frame later. The second still wants a fourth
 `ToolState` across 85 match arms, because keeping a `Complete` row as
 `Complete` would leave it counted as active and re-rendering for the
 rest of the session.
+
+## Progress (2026-09-20, later still)
+
+The compaction summary is a folded note. `Line_::Note` renders through
+the same `notification_lines` a task and a job row use: a `past `
+headline reading "transcript compacted", the handover behind one
+keystroke, and the "… N more lines — click or Enter to expand"
+affordance the other collapsed rows already carry. Both paths fold it,
+the restore and the live `LoopEvent::Compacted`, because both end with
+the person looking at a conversation the summary replaced.
+
+Left: `done` flipping to `×` a frame later, which still wants a fourth
+`ToolState` across 85 match arms for a one-frame icon change on a row
+whose words already say "no result recorded". Judgement, not defect.

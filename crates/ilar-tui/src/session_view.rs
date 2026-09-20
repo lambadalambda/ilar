@@ -489,8 +489,19 @@ fn restored_session_invocation_view(
             accrue_usage(&mut total_usage, &mut total_cost, model, usage);
         }
     }
+    // Folded. Every restored session that has ever been compacted
+    // opens with this, and as plain system rows the handover — which
+    // can run to a screenful — pushed the conversation out of sight
+    // before it began. The headline says it happened; the body is one
+    // keystroke away.
     let mut lines = summary
-        .map(|summary| vec![Line_::System(format!("transcript compacted\n{summary}"))])
+        .map(|summary| {
+            vec![Line_::Note {
+                id: restored_line_id(nested, "note", 0),
+                text: format!("transcript compacted\n{summary}"),
+                expanded: false,
+            }]
+        })
         .unwrap_or_default();
     // Each call's raw arguments, kept until its result arrives: the
     // result redaction needs to know which values the arguments hid.
@@ -1712,6 +1723,42 @@ mod tests {
         assert!(!rendered.contains("obsolete history"), "{rendered}");
         assert!(rendered.contains("decisions retained here"), "{rendered}");
         assert!(rendered.contains("current history"), "{rendered}");
+
+        // Folded, with a click target: the handover can run to a
+        // screenful, and unfolded it pushed the conversation off the
+        // top of every restored session that had ever been compacted.
+        let Some(Line_::Note { id, text, expanded }) = view.lines.first() else {
+            panic!("the summary leads, as a note: {:?}", view.lines.first());
+        };
+        assert!(!expanded, "collapsed until asked");
+        assert!(!id.is_empty(), "and clickable, since it has a body");
+        assert_eq!(
+            text.lines().next(),
+            Some("transcript compacted"),
+            "the headline says what happened; the summary is the body"
+        );
+
+        // The summary is off the screen while it is folded, and on it
+        // once it is not.
+        let now = std::time::Instant::now();
+        let rows = |lines: &[Line_]| {
+            crate::transcript::transcript_entry_lines(&lines[0], 80, now, now)
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let folded = rows(&view.lines);
+        assert!(!folded.contains("decisions retained here"), "{folded}");
+        assert!(folded.contains("click or Enter to expand"), "{folded}");
+        let mut opened = view.lines.clone();
+        crate::transcript::toggle_note_expansion(&mut opened, id);
+        assert!(rows(&opened).contains("decisions retained here"));
     }
 
     /// A child session compacts like any other, and `kept_from` indexes
@@ -2320,9 +2367,10 @@ mod tests {
     /// Click-target id of an expandable line, if it is one.
     fn expandable_id(line: &Line_) -> Option<&str> {
         match line {
-            Line_::Thought { id, .. } | Line_::Task { id, .. } | Line_::Job { id, .. } => {
-                Some(id.as_str())
-            }
+            Line_::Thought { id, .. }
+            | Line_::Task { id, .. }
+            | Line_::Job { id, .. }
+            | Line_::Note { id, .. } => Some(id.as_str()),
             _ => None,
         }
     }
