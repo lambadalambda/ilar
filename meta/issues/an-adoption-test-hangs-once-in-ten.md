@@ -133,3 +133,6 @@ back with no children — was a test problem. The roots and the children
 come off the same cache but not necessarily from the same refresh, so
 waiting for the roots said nothing about the children. It waits for the
 children now, and says how many it last saw if it gives up.
+
+Single-threaded, the criterion as written: 0 failures in 50 runs of the
+whole `serve::` set on tenco.
