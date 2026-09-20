@@ -1930,11 +1930,28 @@ fn next_notification(
 /// order. The backlog is the queue every surface reads — the notice
 /// row, the pending manager, the quit cost — so a completion sitting
 /// unread in the channel is a completion nobody can see.
+/// How many notifications the held queue carries before it stops
+/// taking more from the channel.
+///
+/// Nothing is dropped: the surplus stays where it was, and a full
+/// channel is a state the spawner already handles — an explicit
+/// `background: true` is refused with "capacity is full; retry after a
+/// notification is handled", and a defaulted one runs in the turn
+/// instead. Back-pressure into a path with a message beats a queue
+/// that grows for as long as a session stays paused.
+///
+/// Four times the channel's own capacity, which is the most one drain
+/// can add, and the same order as the activity retry queue beside it.
+const MAX_HELD_NOTIFICATIONS: usize = 256;
+
 fn drain_into_backlog(
     held: &mut std::collections::VecDeque<ilar::delivery::Parcel>,
     notifications: &mut tokio::sync::mpsc::Receiver<ilar::subagent::Notification>,
 ) {
-    while let Ok(queued) = notifications.try_recv() {
+    while held.len() < MAX_HELD_NOTIFICATIONS {
+        let Ok(queued) = notifications.try_recv() else {
+            return;
+        };
         held.push_back(ilar::delivery::Parcel::fresh(queued));
     }
 }
@@ -6963,6 +6980,52 @@ mod salvage_tests {
                 SessionEvent::UserMessage { text, .. } if text == "the build is green"
             )),
             "nothing was written"
+        );
+    }
+}
+
+#[cfg(test)]
+mod backlog_tests {
+    use super::{MAX_HELD_NOTIFICATIONS, drain_into_backlog};
+
+    /// The held queue used to take everything the channel had, every
+    /// time it was asked, so a session left paused grew it without
+    /// limit. It stops at the cap and leaves the rest in the channel,
+    /// where a full channel is a state the spawner already answers for.
+    #[tokio::test]
+    async fn the_held_queue_stops_taking_at_its_cap() {
+        let total = MAX_HELD_NOTIFICATIONS + 10;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(total);
+        for index in 0..total {
+            tx.send(ilar::subagent::Notification {
+                parent_session_id: "root".into(),
+                description: format!("task {index}"),
+                text: "done".into(),
+                is_error: false,
+            })
+            .await
+            .unwrap();
+        }
+        let mut held = std::collections::VecDeque::new();
+        drain_into_backlog(&mut held, &mut rx);
+        assert_eq!(held.len(), MAX_HELD_NOTIFICATIONS);
+
+        // And nothing was dropped: the surplus is still there for the
+        // next drain, in order.
+        drain_into_backlog(&mut held, &mut rx);
+        assert_eq!(
+            held.len(),
+            MAX_HELD_NOTIFICATIONS,
+            "a full queue takes nothing more"
+        );
+        held.clear();
+        drain_into_backlog(&mut held, &mut rx);
+        assert_eq!(held.len(), 10, "the surplus survived the refusal");
+        assert_eq!(
+            held.front()
+                .map(|parcel| parcel.notification().description.as_str()),
+            Some(format!("task {MAX_HELD_NOTIFICATIONS}").as_str()),
+            "and kept its order"
         );
     }
 }
