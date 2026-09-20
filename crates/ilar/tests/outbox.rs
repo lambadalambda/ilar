@@ -488,3 +488,57 @@ fn a_publish_during_compaction_is_not_erased() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The scan runs while a turn writes the very log it is replaying —
+/// which is not an edge case for `ilar serve`, whose adoption fires at
+/// the moment a message starts a turn on that session. The store
+/// refuses a window it saw change mid-read, and `pending` used to take
+/// that refusal as "skip this entry, a later scan will get it". There
+/// is no later scan: the engine adopts once. A finished child's result
+/// was lost for the life of the process, about four runs in
+/// twenty-five under load.
+#[test]
+fn a_scan_beside_a_writing_turn_still_finds_the_entry() {
+    let store = temp_store();
+    let dir = store.root().join("outbox");
+    let parent = create_session(&store, None);
+    outbox::record(&dir, &notification(&parent, "the child finished"));
+
+    // A writer hammering the log for the length of the scan. The store
+    // stamps the file on every append, so a concurrent replay sees it
+    // move — the whole race, made certain instead of rare.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let store = store.clone();
+        let parent = parent.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut session = store.acquire_writer(&parent).unwrap().load().unwrap();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                session
+                    .append(SessionEvent::UserMessage {
+                        id: new_id(),
+                        text: "still working".into(),
+                        images: Vec::new(),
+                        ts: chrono::Utc::now(),
+                    })
+                    .unwrap();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+    };
+
+    let mut missed = 0;
+    for _ in 0..20 {
+        if outbox::pending(&store, &dir, &parent).is_empty() {
+            missed += 1;
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
+
+    assert_eq!(
+        missed, 0,
+        "the entry must survive a scan that races the writer"
+    );
+}

@@ -137,6 +137,61 @@ fn retired_texts(dir: &Path, parent_session_id: &str) -> Vec<String> {
         .collect()
 }
 
+/// What one failed attempt to read a parent's log means for the entry
+/// named after it.
+enum Readable {
+    Yes,
+    /// The session will never be there: the file is noise for every
+    /// process, whichever tree it belonged to.
+    Gone,
+    /// It could not be read *this time*.
+    No(std::io::Error),
+}
+
+/// How many times a log that could not be read is tried again.
+///
+/// The failure this covers is a turn appending to the very log being
+/// replayed — "session path changed during canonical replay" — which
+/// the store raises rather than hand back a half-written window. It
+/// lasts one append.
+///
+/// A short retry matters more than it looks. The comment this replaced
+/// said to leave the entry "for the next open", which is true for a
+/// surface that opens a session and scans once. Serve's adoption scans
+/// once per *engine*, at the moment a message starts a turn on the very
+/// session the entry belongs to — so the scan and the write are
+/// concurrent by construction, and a skipped entry is a finished
+/// child's result lost for the life of the process. Measured at 4 runs
+/// in 25 under load before this.
+const READ_ATTEMPTS: usize = 5;
+const READ_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
+
+fn readable(store: &SessionStore, id: &str) -> Readable {
+    let mut last = None;
+    for attempt in 0..READ_ATTEMPTS {
+        match store.load(id) {
+            Ok(_) => return Readable::Yes,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    // NotFound: the session is gone. InvalidInput: the
+                    // stem could never name one.
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) =>
+            {
+                return Readable::Gone;
+            }
+            Err(error) => {
+                last = Some(error);
+                if attempt + 1 < READ_ATTEMPTS {
+                    std::thread::sleep(READ_RETRY);
+                }
+            }
+        }
+    }
+    Readable::No(last.expect("a loop that fell through failed at least once"))
+}
+
 /// Everything published but never delivered, for the session tree rooted
 /// at `root_session_id`: entries whose parent session still exists,
 /// whose ancestry (via `meta.parent_id`) reaches that root, and whose
@@ -180,25 +235,20 @@ pub fn pending(store: &SessionStore, dir: &Path, root_session_id: &str) -> Vec<N
             continue;
         };
         let parent_id = parent_id.to_string();
-        match store.load(&parent_id) {
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    // NotFound: the session is gone. InvalidInput: the
-                    // stem could never name one. Either way the file is
-                    // noise for every process, whichever tree it was.
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
-                ) =>
-            {
+        match readable(store, &parent_id) {
+            Readable::Yes => {}
+            Readable::Gone => {
                 let _ = std::fs::remove_file(&path);
                 let _ = std::fs::remove_file(retired_path(dir, &parent_id));
                 continue;
             }
-            // Any other failure is a bad moment, not a dead session:
-            // deleting here would turn a transient IO error into
-            // permanent loss. Leave the file for the next open.
-            Err(_) => continue,
+            Readable::No(error) => {
+                eprintln!(
+                    "outbox: skipping {parent_id}: its log could not be read ({error}); the entry \
+                     stays for a later scan"
+                );
+                continue;
+            }
         }
         if !reaches_root(store, &parent_id, root_session_id) {
             // Another process's tree: not ours to adopt or to compact.
