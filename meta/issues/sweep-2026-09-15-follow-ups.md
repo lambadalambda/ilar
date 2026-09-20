@@ -50,6 +50,16 @@ so it is taken back by hand.
 frontends, with the boolean the other way round; it is
 `ilar::secrets::asker_label` now.
 
+*More of the same, later the same day.* `store.latest_in` and
+`last_in` resolved the directory being asked about and compared it
+against whatever the shell had handed the session, so a log that
+recorded `/tmp/x` was in neither the picker nor `--continue` when the
+canonical path is `/private/tmp/x` — which every macOS temporary
+directory is. The pointer file had the same split, written under the
+unresolved path and read by the resolved one, so such a pointer was
+one no read could ever find. `TurnError::Closed` has its test: a turn
+queued behind the one `/new` cancelled never speaks.
+
 Two struck rather than done. `file_may_contain` folding ASCII while
 `recall::search` folds Unicode is already handled for the half that
 matters: `greppable` refuses a non-ASCII needle outright, so a
