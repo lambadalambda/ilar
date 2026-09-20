@@ -200,6 +200,19 @@ impl StatusBoard {
     pub fn is_up(&self, key: &str) -> bool {
         self.lines.lock().unwrap().contains_key(key)
     }
+
+    /// Take down every line there is, as the gateway goes down.
+    ///
+    /// A turn killed by `abort_all` never reaches the `end` that would
+    /// have cleared its own line, so its "working…" bubble was left in
+    /// the chat — still there on the next start, describing a turn that
+    /// died with the process. Every seat's line, whoever owns it.
+    pub async fn clear_all(&self) {
+        let keys: Vec<String> = self.lines.lock().unwrap().keys().cloned().collect();
+        for key in keys {
+            self.clear(&key).await;
+        }
+    }
 }
 
 /// Keep one posted line current: the newest line wins, and edits are

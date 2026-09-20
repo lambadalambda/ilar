@@ -1343,6 +1343,49 @@ fn an_abort_just_before_a_restart_is_still_the_persons_abort() {
     assert_eq!(aborted_reply(true, true), ABORTED_REPLY);
 }
 
+/// A turn killed by the shutdown never reaches the `end` that takes
+/// its own line down, so its "working…" bubble stayed in the chat —
+/// still there at the next start, describing a turn that died with the
+/// process. `clear_all` is the sweep the shutdown runs after the grace.
+///
+/// A unit, not a scenario: reproducing it end to end means waiting out
+/// the fifteen-second grace before `abort_all` fires.
+#[tokio::test]
+async fn a_shutdown_takes_down_every_status_line_left_standing() {
+    use ilar_gateway::channel::{Channel, Seen};
+    use ilar_gateway::status::StatusBoard;
+
+    let fake = FakeChannel::new("fake");
+    let channels: std::collections::HashMap<String, std::sync::Arc<dyn Channel>> = [(
+        "fake".to_string(),
+        fake.clone() as std::sync::Arc<dyn Channel>,
+    )]
+    .into_iter()
+    .collect();
+    let board = StatusBoard::new(channels, true, Duration::from_secs(0));
+
+    // Two seats mid-turn, each holding its own line.
+    let one = board.begin("fake:chat-1", "fake", "chat-1").await;
+    let two = board.begin("fake:chat-2", "fake", "chat-2").await;
+    assert!(one.is_some() && two.is_some());
+    assert!(board.is_up("fake:chat-1") && board.is_up("fake:chat-2"));
+
+    // Neither turn ever calls `end`: the shutdown killed them both.
+    board.clear_all().await;
+
+    assert!(!board.is_up("fake:chat-1"), "a line was left standing");
+    assert!(!board.is_up("fake:chat-2"), "a line was left standing");
+    assert_eq!(
+        fake.seen()
+            .iter()
+            .filter(|s| **s == Seen::StatusCleared)
+            .count(),
+        2,
+        "{:?}",
+        fake.seen()
+    );
+}
+
 #[tokio::test]
 async fn a_status_line_follows_the_turn_and_vanishes_before_the_reply() {
     use ilar_gateway::channel::Seen;

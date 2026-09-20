@@ -461,6 +461,13 @@ impl Gateway {
             log("stopping with turns still in flight");
             handlers.abort_all();
         }
+        // A turn killed above never reached the `end` that takes its
+        // own line down, so its "working…" bubble stayed in the chat —
+        // still there at the next start, describing a turn that died
+        // with the process. Done here rather than beside `announce_stop`
+        // so it also covers the turns that wound down cleanly but hit
+        // the grace.
+        let _ = tokio::time::timeout(ANNOUNCE_GRACE, self.status.clear_all()).await;
         self.driver.shutdown().await;
         // Nothing said during the grace is lost: the dispatcher drains
         // the queue, then ends.
