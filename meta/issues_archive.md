@@ -437,3 +437,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Words a model acts on](issues/words-a-model-acts-on.md) — all four: the cap says one thing, no Debug on the wire, a daemonized service is not "stopped", the id-less call names the omission
 - [x] [Parked steers survive the process](issues/parked-steers-survive-the-process.md) — parked and claimed messages are mirrored under <outbox>/steers until the run commits them
 - [x] [The docs say what the code does](issues/the-docs-say-what-the-code-does.md) — five doc corrections and one false refusal; the code was right five times out of six
+- [x] [Independent tool calls go together](issues/independent-tool-calls-go-together.md) — the sentence landed in 7c91c80; measured per model, the two build models that batched least moved 1.07→1.22 and 1.04→1.29
+- [x] [exec names its session](issues/exec-names-its-session.md) — the session leads on stderr or as the first JSON event, tool rows carry their argument, and a turn that stopped short says why

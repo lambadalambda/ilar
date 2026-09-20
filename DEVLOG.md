@@ -1,5 +1,63 @@
 # DEVLOG
 
+## 2026-09-20 — Three small ones, and a measurement that lied
+
+**A misspelt `/unlock` is still a password in the chat.** `/unlok
+hunter2` fell through to `Unknown`, so nothing ran, nothing was
+deleted, and the master password sat in the history. A command name
+within two edits of `unlock` or `password`, with an argument behind
+it, is now named as the typo it is and the message is taken back out.
+The asymmetry decides the threshold: a false match costs an unknown
+command's message, which did nothing anyway, and a miss costs a
+password for good.
+
+The shape underneath was worse than the gap. Three arms each called
+`delete_inbound` themselves, and one of them decided whether to by
+comparing the *reply text* against a public const — a refusal nobody
+could reword without silently turning the deletion off. It is
+`Command::carries_a_secret` and one call site now.
+
+The review caught the cost of that reach, which I had argued for and
+not followed through. Two edits from `unlock` also reaches `lock` and
+`block`, and the reply reused the advice written for a real password:
+*check that the password is gone on your other devices too*. Telling
+someone who typed `/block alice` to go audit their devices is alarming
+and false. The deletion is still right — the guess is about the word,
+not about the risk — so the advice is now its own: deleted *in case*
+there was a password in it.
+
+**`exec` says which session it made.** It never did, so `--session`
+on a later run had nothing to take from an earlier one. It leads now:
+`session <id>` on stderr, or the first event under `--json`, printed
+before the turn starts so a run killed halfway still told the script
+where its work went. Two more from the same issue: a turn that hit the
+step cap or was interrupted exited 2 or 130 in silence and now says so
+and names the command that carries on, and progress rows carry what
+the call was about — `· read src/main.rs` rather than `· read` twelve
+times over. The arguments and the row arrive on different events under
+one id, so they are kept in a map and taken out of it, not read.
+
+The review found the session line was not actually first: `run_exec`
+printed the notices before calling `exec_turn`, so one ignored
+`[providers]` table put a notice ahead of it and `--json | head -1`
+came back with the wrong object. The notices print inside `exec_turn`
+now. One place decides what reaches the two streams and in what order,
+which is the sort of thing that only stays true if somewhere owns it.
+
+**The measurement that lied.** The base prompt has asked for
+independent tool calls in one response since `7c91c80`; the issue
+stayed open on an acceptance criterion nobody had gone back to check.
+Across 3,571 session logs the `build` agent went 1.25 calls per request
+before to 1.26 after, which reads as the sentence doing nothing.
+
+It is Simpson's paradox. The model mix moved toward local Qwen builds
+in the same weeks, and they batch worst of all at 1.07. Hold the model
+fixed and every one with traffic on both sides improved: gpt-6-astra
+1.07 → 1.22, muse-spark 1.04 → 1.29, gpt-5.6-sol 1.31 → 1.38. The two
+that moved most are the two that had been issuing one call per request
+97% of the time, which is who the sentence was written for. Worth
+remembering that the aggregate would have closed this as a failure.
+
 ## 2026-09-19 — The docs, and a multiplication
 
 Two more out of the sweeps, both about telling the truth.

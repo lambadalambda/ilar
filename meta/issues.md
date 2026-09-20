@@ -39,7 +39,7 @@
 
 ## Milestone 10 — Everyday polish
 
-- [ ] [Independent tool calls go together](issues/independent-tool-calls-go-together.md)
+(all complete — see issues_archive.md)
 
 ## Milestone 11 — Beyond the terminal
 
@@ -57,6 +57,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
 - [ ] [The replay sweep](issues/the-replay-sweep.md)
+- [ ] [A tool summary redacts only its generic path](issues/a-tool-summary-redacts-only-its-generic-path.md)
 
 ## Milestone 14 — Agents are places
 
@@ -86,6 +87,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [The loop top joins the spine](issues/the-loop-top-joins-the-spine.md)
 - [ ] [The big files find their seams](issues/the-big-files-find-their-seams.md)
 - [ ] [Engines retire when idle](issues/engines-retire-when-idle.md)
+- [ ] [Three places resummarize a tool call](issues/three-places-resummarize-a-tool-call.md)
 - [ ] [Serve folds once and caches](issues/serve-folds-once-and-caches.md) — *parked with serve*
 
 ## Milestone 18 — Sweep: responsiveness & memory
@@ -104,8 +106,8 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [Wrapped rows keep their gutter](issues/wrapped-rows-keep-their-gutter.md)
 - [ ] [Plain words on every surface](issues/plain-words-on-every-surface.md)
 - [ ] [Pickers show the deciding field](issues/pickers-show-the-deciding-field.md)
-- [ ] [exec names its session](issues/exec-names-its-session.md)
 - [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
+- [ ] [exec names a session it then deletes](issues/exec-names-a-session-it-then-deletes.md)
 
 ## Milestone 21 — The assistant
 

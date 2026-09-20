@@ -11,10 +11,16 @@ session that could not resume, a room seat that could read the memory
 files its tools were denied, and the situation stamp frozen at session
 open.
 
+Done 2026-09-20: the password left in the chat. `/grant session <pw>`
+already deleted and advised by the time this was read; the typo did
+not. A command name within two edits of `unlock` or `password`, with an
+argument behind it, is now `Command::MistypedSecret`: named as the typo
+it is, and the message taken back out. The delete decision is
+`Command::carries_a_secret` and one call site, rather than three arms
+each doing their own — and matching a reply's text to decide whether to
+delete it was the fragile part of the old shape.
+
 Gateway:
-- `/grant session <password>` leaves the sudo password in the chat
-  with no deletion and no advice; `delete_inbound` is one call away.
-  A typo'd `/unlok hunter2` falls to Unknown and keeps it too.
 - `/abort` a second before shutdown gets the restart wording
   (`aborted_reply` reads the cancel flag at delivery time).
 - `/abort` cannot cancel a `/compact` (compaction registers no

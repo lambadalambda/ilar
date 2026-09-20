@@ -16,3 +16,28 @@ bare `· read` × N with no argument summary.
   argument in each tool progress row.
 
 Size: S. Source: UX sweep 2026-09-03 (overlays).
+
+## Outcome (2026-09-20)
+
+All four done, in `exec.rs`.
+
+- **The session leads.** `session_line` prints `session <id>` on stderr,
+  or `{"type":"session","id":"…"}` as the first stdout event under
+  `--json`. It is emitted before `run_turn`, so a run killed halfway
+  still told the script which session holds the work.
+- **A turn that stopped short says why.** `outcome_line` prints
+  `stopped: the step cap was reached before an answer — ilar exec
+  --session <id> carries on from here`, and the same for an interrupt.
+  Text mode only: under `--json` the outcome already rode `turn_done`.
+  `Completed` says it with the answer, and an `Err` already had its own
+  line in main.rs.
+- **Tool rows carry their argument.** `ToolArguments` keeps the raw
+  input from `ToolInputComplete` until the `ToolFinished` under the
+  same id, which is where the tool's name is, then summarises through
+  `summarize_tool_input` — bounded and redacted, since a progress row
+  can end up in a log. `· read src/main.rs`, `✗ read nope.rs: no such
+  file`. The entry is taken, not read, so a long turn does not carry
+  every call it ever made.
+
+`render_event` gained an `argument` parameter and stayed pure; the map
+lives in `exec_turn`. docs/sessions.md says all of it.
