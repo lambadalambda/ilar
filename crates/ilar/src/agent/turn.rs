@@ -651,7 +651,7 @@ async fn persist_partial_step(
                     id: (*id).clone(),
                     name: (*name).clone(),
                     is_error: true,
-                    result: crate::text::bounded_detail(&result),
+                    result: crate::text::bounded_result(&result),
                     child_session_id: None,
                 },
                 cancel,
@@ -2431,7 +2431,7 @@ async fn run_turn_inner(
                         id: id.clone(),
                         name: name.clone(),
                         is_error,
-                        result: crate::text::bounded_detail(&content),
+                        result: crate::text::bounded_result(&content),
                         child_session_id: None,
                     },
                     &cancel,
@@ -2556,7 +2556,7 @@ async fn run_turn_inner(
             // the appended event below keeps the raw content.
             let result = format!(
                 "{}{}",
-                crate::text::bounded_detail(&redact_tool_result(input, &content)),
+                crate::text::bounded_result(&redact_tool_result(input, &content)),
                 crate::image::markers(&images)
             );
             session.append(SessionEvent::ToolResult {

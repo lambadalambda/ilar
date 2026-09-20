@@ -986,6 +986,23 @@ mod tests {
         assert_eq!(state(Liveness::Running), ToolState::Running);
     }
 
+    /// Past 16 KiB the same call used to say two different things
+    /// depending on when you looked: the live row was cut at the
+    /// publish bound and a reopened session read the whole result back
+    /// from the log. The bound is the keep cap now, so both keep the
+    /// same text and cut at the same place.
+    #[test]
+    fn a_long_result_reads_the_same_live_and_reopened() {
+        // Well past the old 16 KiB publish bound, well under the keep
+        // cap: the window where the two used to disagree.
+        let raw = format!("head\n{}\ntail\n", "x".repeat(64 * 1024));
+        let (live, restored) = live_and_restored(&raw, &[]);
+        assert_eq!(live, restored);
+        assert!(live.len() > 16 * 1024, "the test never left the window");
+        assert!(live.contains("tail"), "the end was cut: {}", live.len());
+        assert!(!live.contains("output truncated"), "cut under the cap");
+    }
+
     /// A row a replay settles is the row the live path would have
     /// settled. Both used to write the rules out — the restore path's
     /// copy took the newest row with a matching id whatever its state,
@@ -2052,7 +2069,7 @@ mod tests {
         // What the agent loop publishes and stores is the same string.
         let published = format!(
             "{}{}",
-            ilar::text::bounded_detail(raw),
+            ilar::text::bounded_result(raw),
             ilar::image::markers(images)
         );
         let mut live = vec![crate::transcript::new_seeded_tool_row(

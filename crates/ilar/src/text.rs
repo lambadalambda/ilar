@@ -64,8 +64,16 @@ pub fn plural(count: usize, unit: &str) -> String {
     }
 }
 
-/// How much of a tool result any surface keeps.
+/// How much of a tool's *arguments* any surface keeps. Enough for a
+/// whole `edit` to render as a diff and far more than a row can show.
 pub const MAX_DETAIL_CHARS: usize = 16 * 1024;
+
+/// How much of a tool *result* the loop publishes, and how much a
+/// surface keeps of it. The two are the same number on purpose: the
+/// live row used to be cut at [`MAX_DETAIL_CHARS`] while a reopened
+/// session read the whole thing back from the log, so the same call
+/// said two different things depending on when you looked at it.
+pub const MAX_RESULT_CHARS: usize = 256 * 1024;
 
 /// Marker appended when [`bounded_detail`] cut something.
 pub const DETAIL_TRUNCATED: &str = "\n… output truncated";
@@ -75,9 +83,9 @@ pub const DETAIL_TRUNCATED: &str = "\n… output truncated";
 /// again: the live row bounds the text as it streams and then bounds
 /// what it was handed once more on the way to the screen, which must
 /// land on the same characters the restored row's single pass keeps.
-fn truncate_detail(mut detail: String) -> String {
-    if detail.chars().count() > MAX_DETAIL_CHARS {
-        let kept = MAX_DETAIL_CHARS.saturating_sub(DETAIL_TRUNCATED.chars().count());
+fn truncate_detail(mut detail: String, cap: usize) -> String {
+    if detail.chars().count() > cap {
+        let kept = cap.saturating_sub(DETAIL_TRUNCATED.chars().count());
         detail = detail.chars().take(kept).collect();
         detail.push_str(DETAIL_TRUNCATED);
     }
@@ -93,11 +101,22 @@ fn truncate_detail(mut detail: String) -> String {
 /// tabs for display does it after, so a tab-heavy result cuts at the
 /// same character however it reached the screen.
 pub fn bounded_detail(text: &str) -> String {
+    bounded_to(text, MAX_DETAIL_CHARS)
+}
+
+/// The same, at the result cap: what the loop publishes for a tool's
+/// output, and what a surface keeps of it.
+pub fn bounded_result(text: &str) -> String {
+    bounded_to(text, MAX_RESULT_CHARS)
+}
+
+fn bounded_to(text: &str, cap: usize) -> String {
     truncate_detail(
         text.chars()
             .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
-            .take(MAX_DETAIL_CHARS + 1)
+            .take(cap + 1)
             .collect::<String>(),
+        cap,
     )
 }
 

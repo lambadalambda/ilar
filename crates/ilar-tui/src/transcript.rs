@@ -1245,7 +1245,7 @@ pub(crate) fn set_tool_tail(lines: &mut [Line_], id: &str, tail: &str) -> Option
 /// behind the full toggle instead of being destroyed on arrival.
 /// Rendering stays bounded regardless: collapsed views cut source
 /// lines before wrapping, and the full view is an explicit toggle.
-pub(crate) const MAX_KEPT_RESULT_CHARS: usize = 256 * 1024;
+pub(crate) const MAX_KEPT_RESULT_CHARS: usize = ilar::text::MAX_RESULT_CHARS;
 
 /// [`crate::text::bounded_detail`], at the keep-cap instead of the
 /// 16 KiB display cut: the same control-character filter and the same
