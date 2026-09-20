@@ -58,6 +58,42 @@ that moved most are the two that had been issuing one call per request
 97% of the time, which is who the sentence was written for. Worth
 remembering that the aggregate would have closed this as a failure.
 
+## 2026-09-20 — Keys the terminal cannot send
+
+A report that newlines and mark-to-copy did not work on tenco. Neither
+was an ilar bug, and ilar was still at fault for both.
+
+**The newline.** Without the kitty keyboard protocol a terminal sends
+one byte for Enter and Shift-Enter, so the modifier never arrives and
+the chord sends the draft. tmux ships with `extended-keys off`, which
+makes that the common case rather than the exotic one — tenco's tmux
+had the default, the Mac's did not, and that is the whole of
+"sometimes". The footer, the question modal and the welcome line all
+named Shift-Enter unconditionally, so a key that could not arrive
+looked like ilar swallowing a keystroke. The help overlay already knew
+better: it has `portable_keys` for exactly this and uses it for F2. The
+newline binding now does too, and one function decides for all four
+surfaces.
+
+**Mark-to-copy.** ilar takes the mouse for as long as it runs, which is
+what its own selection needs and which takes the terminal's away.
+Shift-drag gives it back. That was written down nowhere.
+
+**The part I would have got wrong without measuring.** The fix as first
+written would have understated on the very box that prompted the
+report. Probing tenco after setting `extended-keys always`: the kitty
+query comes back empty, so the handshake says the terminal cannot
+disambiguate — but a real pane sends `ESC [ 1 3 ; 2 u` for Shift-Enter
+anyway, and crossterm's CSI u parser is a pure function of the buffer,
+so it yields Enter with a shift modifier whether or not we pushed any
+flags. The key works and the capability check denies it.
+
+So the keystroke gets the last word. A modified Enter reaching the
+dispatcher could not have been a bare carriage return, and that is
+precisely the property Shift-Enter and Ctrl-M both depend on. The first
+one pressed upgrades the flag and both come back. A handshake is
+evidence about a terminal; an arriving key is proof.
+
 ## 2026-09-20 — The test suite was writing into the repo
 
 Restoring tenco's checkout after a gate run turned up an untracked

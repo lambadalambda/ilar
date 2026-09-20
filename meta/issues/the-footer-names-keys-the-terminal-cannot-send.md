@@ -49,3 +49,36 @@ way to find that out.
   made it look like a bug in ilar.
 - Not in scope: a setting to turn mouse capture off. Shift-drag is the
   standard answer and costs nothing.
+
+## Outcome (2026-09-20)
+
+`input::newline_keys(keyboard_enhanced)` is the one place that decides;
+the prompt footer, the question modal and the help overlay all use it,
+and the welcome line — written before the terminal has been asked
+anything — names Ctrl-J alone. The help binding uses `portable_keys`,
+the mechanism that was already there for F2. Shift-drag is a help
+binding and a sentence in docs/interface.md, next to a note that a copy
+over SSH travels by OSC 52.
+
+### The part that only showed up under measurement
+
+The first commit would have understated on the very box that prompted
+the report. Probing tenco's tmux settled it:
+
+- the kitty protocol query (`CSI ? u`) returns **nothing**, even under
+  `extended-keys always`, so `supports_keyboard_enhancement()` is false
+  and no flags are pushed;
+- tmux nonetheless sends `ESC [ 1 3 ; 2 u` for Shift-Enter under
+  `always`, captured from a real pane;
+- crossterm's `parse_csi_u_encoded_key_code` is a pure function of the
+  buffer, so it yields Enter+SHIFT whether or not the flags were
+  pushed.
+
+So the key works and the handshake denies it. `disambiguates_enter`
+takes a modified Enter reaching the dispatcher as proof — it could not
+have been a bare CR — and upgrades the flag. That is the same
+capability Ctrl-M needs, so both bindings come back together.
+
+Left alone: tenco's `~/.tmux.conf` gained `extended-keys always` and
+`extended-keys-format csi-u`, which is where the original report came
+from. That is a machine setting, not a repository one.
