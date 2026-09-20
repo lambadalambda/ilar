@@ -2001,16 +2001,10 @@ const FOCUS_ERROR_CHARS: usize = 200;
 /// delivered one would have been. Answers whether it landed.
 ///
 /// Two ways it does not, and both are refusals rather than damage:
-///
-/// A running turn holds the writer. `acquire_writer` does not block on
-/// that, it says no.
-///
-/// The session is parked on a question. A log may not carry an
-/// ordinary event between a tool call and its result — the replay
-/// validator rejects the whole file for it — and a question is the one
-/// call `load` leaves unanswered on purpose, waiting for the person.
-/// Appending here would write a log that no later open could read,
-/// which is worse than losing the text, so it is not written.
+/// a running turn holds the writer, and `acquire_writer` says no
+/// rather than blocking; or the session is parked on a question, and
+/// `append` refuses an event between a tool call and its result — the
+/// state where writing would leave a log no later open could read.
 fn record_salvage_in(store: &SessionStore, session_id: &str, text: &str) -> bool {
     let Ok(mut session) = store
         .acquire_writer(session_id)
@@ -2018,9 +2012,6 @@ fn record_salvage_in(store: &SessionStore, session_id: &str, text: &str) -> bool
     else {
         return false;
     };
-    if session.pending_question().is_some() {
-        return false;
-    }
     session
         .append(ilar::session::SessionEvent::UserMessage {
             id: ilar::session::new_id(),

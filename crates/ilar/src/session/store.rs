@@ -1708,6 +1708,56 @@ fn pending_question(
     })
 }
 
+/// Whether the log's tail sits between a tool call and its results.
+///
+/// [`validate_replay`] rejects a whole file for an ordinary event
+/// written in that state, at every later open, reader and writer
+/// alike — so an append has to know before it writes. Re-validating
+/// the log per event is not affordable, and it is not necessary: the
+/// state is a property of the tail. Walk back over the results, past
+/// the kinds the validator lets through regardless, to the assistant
+/// message that made the calls. Anything else reached first was itself
+/// only legal with nothing outstanding, so nothing is.
+fn has_unanswered_calls(events: &[SessionEvent]) -> bool {
+    let mut answered: HashSet<&str> = HashSet::new();
+    for event in events.iter().rev() {
+        match event {
+            SessionEvent::ToolResult { tool_use_id, .. } => {
+                answered.insert(tool_use_id.as_str());
+            }
+            // The same list as the guard below, read from the same
+            // function on purpose: a kind added there but not here
+            // would end this walk early and under-report, which is
+            // the unloadable log the guard exists to prevent.
+            event if allowed_while_unanswered(event) => {}
+            SessionEvent::AssistantMessage { content, .. } => {
+                return content.iter().any(|block| match block {
+                    ContentBlock::ToolCall { id, .. } => !answered.contains(id.as_str()),
+                    _ => false,
+                });
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The events [`validate_replay`] lets past an outstanding call: a
+/// result answers one, and these two it skips outright.
+///
+/// Kind only. The validator has more to say about each of them — an
+/// orphan result and a second `Meta` are both rejected — but neither
+/// is reachable from here: only `create` writes a `Meta`, and only
+/// the turn loop writes results, for calls it just made.
+fn allowed_while_unanswered(event: &SessionEvent) -> bool {
+    matches!(
+        event,
+        SessionEvent::ToolResult { .. }
+            | SessionEvent::Meta { .. }
+            | SessionEvent::SubagentInvocation { .. }
+    )
+}
+
 fn invalid_replay<T>(id: &str, message: impl std::fmt::Display) -> std::io::Result<T> {
     Err(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -1808,6 +1858,20 @@ impl Session {
                 std::io::ErrorKind::InvalidData,
                 format!(
                     "session {} changed outside its active writer",
+                    self.session_id()
+                ),
+            ));
+        }
+        // Before the write, because after it there is no taking it
+        // back: a log with an ordinary event between a call and its
+        // result is one no later open can read. An `Err` the caller
+        // can act on beats a file nobody can.
+        if !allowed_while_unanswered(&event) && has_unanswered_calls(&self.events) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "session {}: cannot append while tool calls are unanswered — the log would \
+                     not load again",
                     self.session_id()
                 ),
             ));

@@ -2189,15 +2189,27 @@ fn checkpoint_between_call_and_result_is_rejected() {
     session
         .append(assistant_with_calls("assistant-1", &["call-1"]))
         .unwrap();
-    session
-        .append(SessionEvent::Checkpoint {
-            id: new_id(),
-            commit: "abc123".into(),
-            head: None,
-            ts: Utc::now(),
-        })
-        .unwrap();
+    let checkpoint = SessionEvent::Checkpoint {
+        id: new_id(),
+        commit: "abc123".into(),
+        head: None,
+        ts: Utc::now(),
+    };
+    // `append` refuses this outright — see
+    // `an_event_written_between_a_call_and_its_result_is_refused`.
+    // The reader's own rule still has to hold for a file written by
+    // something other than this writer, so the line goes in by hand.
+    assert!(session.append(checkpoint.clone()).is_err());
+    let path = store.session_path(&id).unwrap();
     drop(session);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(&serde_json::to_vec(&checkpoint).unwrap())
+        .unwrap();
+    file.write_all(b"\n").unwrap();
+    drop(file);
 
     assert_replay_invalid(&store, &id);
 }
@@ -3084,4 +3096,54 @@ fn a_read_nobody_wants_stops_instead_of_finishing() {
     // And an ordinary read is unaffected by either.
     assert!(store.load(&id).is_ok());
     assert_eq!(store.audit_events(&id).unwrap().len(), 601);
+}
+
+/// An ordinary event between a tool call and its result makes a log
+/// the replay validator rejects — not once, but at every later open,
+/// reader and writer alike. `append` used to take it and report
+/// success, so the session was bricked silently and the caller was
+/// told the opposite. It refuses now, and the log is left readable.
+#[test]
+fn an_event_written_between_a_call_and_its_result_is_refused() {
+    let (store, _dir) = temp_store();
+    let meta = sample_meta();
+    let mut session = store.create(meta.clone()).unwrap();
+    session
+        .append(assistant_with_calls(&new_id(), &["answered", "waiting"]))
+        .unwrap();
+    session
+        .append(SessionEvent::ToolResult {
+            id: new_id(),
+            tool_use_id: "answered".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: Vec::new(),
+            child_session_id: None,
+            state: None,
+            ts: Utc::now(),
+        })
+        .expect("a result is exactly what this state is waiting for");
+
+    let error = session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "a task result arrived".into(),
+            images: Vec::new(),
+            ts: Utc::now(),
+        })
+        .expect_err("a user message here would make the log unloadable");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("unanswered"), "{error}");
+    drop(session);
+
+    // Nothing was written: the log still loads, and the repair path
+    // still gets to answer the outstanding call.
+    let reader = store.load(&meta.session_id).unwrap();
+    assert_eq!(reader.events().len(), 3);
+    let repaired = store
+        .acquire_writer(&meta.session_id)
+        .unwrap()
+        .load()
+        .expect("the writer's own repair still works");
+    assert_eq!(repaired.events().len(), 4);
 }
