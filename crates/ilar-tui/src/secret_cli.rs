@@ -51,7 +51,54 @@ pub(crate) type AskPassword<'a> = &'a mut dyn FnMut(&str) -> Result<String>;
 
 /// The terminal's own hidden prompt.
 pub(crate) fn ask_on_terminal(prompt: &str) -> Result<String> {
+    if !terminal_is_answerable() {
+        anyhow::bail!(
+            "reading the master password: this job is in the background, where the terminal stops \
+             it rather than let it ask — run `fg` and start again"
+        );
+    }
     rpassword::prompt_password(prompt).context("reading the master password")
+}
+
+/// Whether a prompt on the controlling terminal can actually be
+/// answered. A job backgrounded from a shell keeps `/dev/tty` open, so
+/// the terminal looks reachable — but a background process group that
+/// touches it is stopped (`SIGTTOU` for the mode change the hidden
+/// prompt makes, `SIGTTIN` for the read behind it). No prompt on
+/// screen, nothing to type into, and a process that looks hung. Which
+/// process group owns the terminal is the whole test.
+///
+/// `foreground` is `tcgetpgrp` of the controlling terminal and `ours`
+/// is `getpgrp()`. A negative `foreground` means the terminal answered
+/// no owner, which is not this problem: the read then fails with a
+/// message instead of blocking, and the caller carries on locked.
+#[cfg(unix)]
+fn prompt_can_be_answered(foreground: i32, ours: i32) -> bool {
+    foreground < 0 || foreground == ours
+}
+
+#[cfg(unix)]
+fn terminal_is_answerable() -> bool {
+    use std::os::fd::AsRawFd;
+    // `/dev/tty`, not stdin: that is the file rpassword opens, and
+    // stdin answers a different question. `echo … | ilar secret set`
+    // redirects stdin and is not a backgrounded job; a backgrounded
+    // job may well have stdin on the terminal still.
+    let Ok(tty) = std::fs::File::open("/dev/tty") else {
+        // No controlling terminal at all — cron, systemd, a container.
+        // The read fails there with a message of its own.
+        return true;
+    };
+    // SAFETY: both calls only read process and terminal state, take no
+    // pointers, and `tty` outlives the call.
+    let foreground = unsafe { libc::tcgetpgrp(tty.as_raw_fd()) };
+    let ours = unsafe { libc::getpgrp() };
+    prompt_can_be_answered(foreground, ours)
+}
+
+#[cfg(not(unix))]
+fn terminal_is_answerable() -> bool {
+    true
 }
 
 /// What a driver about to take over the terminal asks: an empty answer
@@ -659,5 +706,19 @@ mod tests {
         // One try — `ilar secret …` — reports a wrong password as one.
         let mut once = |_: &str| Ok("nope".to_string());
         assert!(unlock_if_sealed(&store, CLI_PROMPT, 1, &mut once).is_err());
+    }
+
+    /// A backgrounded job must not be asked: touching the terminal
+    /// stops it, leaving a stopped job and no prompt.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_job_is_never_prompted() {
+        // Foreground: our own group owns the terminal.
+        assert!(super::prompt_can_be_answered(4321, 4321));
+        // Background: some other group owns it.
+        assert!(!super::prompt_can_be_answered(4321, 8765));
+        // The terminal named no owner. A different failure, and one
+        // the read reports for itself rather than hanging on.
+        assert!(super::prompt_can_be_answered(-1, 8765));
     }
 }

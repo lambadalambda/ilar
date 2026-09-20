@@ -45,3 +45,8 @@ base64 = "0.23"
 [dev-dependencies]
 tempfile = "3"
 reqwest = { workspace = true }
+
+# The master-password prompt asks the terminal who owns it before
+# reading, so a backgrounded job is not stopped rather than answered.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
