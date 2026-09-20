@@ -2516,9 +2516,18 @@ impl schedule::Runtime for LoopRuntime<'_> {
         ) {
             Ok(_) => {
                 app.current_model = model.clone();
+                // The same words the restore writes for the same event,
+                // and with the level the other two sites append: this
+                // one said "model reverted to X" and dropped the
+                // @variant, so a session read back said something the
+                // live row had not.
+                let selection = match variant.as_deref() {
+                    Some(variant) => format!("{model}@{variant}"),
+                    None => model.clone(),
+                };
                 app.current_variant = variant;
                 app.set_model_context_limit(display_context_limit(self.resolver.as_ref(), &model));
-                app.push_transcript_line(Line_::System(format!("model reverted to {model}")));
+                app.push_transcript_line(Line_::System(format!("switched to {selection}")));
             }
             Err(error) => app.set_notice(
                 format!("reverting the model to {model} failed: {error:#}"),

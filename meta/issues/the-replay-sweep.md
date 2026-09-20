@@ -130,3 +130,37 @@ discarded event sender, the live publish bound, "reverted
 to"/"switched to" wording, and the UI-spawned subtask's started
 line.
 
+
+## Progress update (2026-09-20)
+
+Two more, and one struck.
+
+**The 16 KiB live publish bound is gone.** A result was published cut
+at `MAX_DETAIL_CHARS` while a reopened session read the whole thing
+back from the log and kept 256 KiB, so the same call said two
+different things depending on when you looked. `ilar::text` names the
+result cap once as `MAX_RESULT_CHARS`, the publish sites use it, and
+the TUI's own constant points at it. `MAX_DETAIL_CHARS` keeps its real
+job — a tool's *arguments*, where 16 KiB is enough for a whole `edit`
+to render as a diff.
+
+The test that pinned the old divergence now pins the agreement; it is
+the same test, since it also covers tab expansion and the image
+markers riding past the cut.
+
+**"model reverted to X" is "switched to X".** The live line and the
+restored one described the same event in different words, and the live
+one also dropped the `@variant` that the other two sites append — so a
+session read back said something the live row had not.
+
+**The routed delivery's discarded event sender is struck.** The
+issue's own progress note answered it: visibility comes from the
+registry row rather than the stream, and the `call_id` half — the part
+that actually corrupted replay, by attributing the delivery's events
+to whichever invocation happened to be last — was fixed. Giving it a
+real publisher now would add a second source of truth for the same
+rows.
+
+Remaining: the web glyph map's per-tool progress labels and the
+UI-spawned subtask's missing started line, which needs a synthetic
+`call_id` rather than a new log variant.

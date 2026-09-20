@@ -986,23 +986,6 @@ mod tests {
         assert_eq!(state(Liveness::Running), ToolState::Running);
     }
 
-    /// Past 16 KiB the same call used to say two different things
-    /// depending on when you looked: the live row was cut at the
-    /// publish bound and a reopened session read the whole result back
-    /// from the log. The bound is the keep cap now, so both keep the
-    /// same text and cut at the same place.
-    #[test]
-    fn a_long_result_reads_the_same_live_and_reopened() {
-        // Well past the old 16 KiB publish bound, well under the keep
-        // cap: the window where the two used to disagree.
-        let raw = format!("head\n{}\ntail\n", "x".repeat(64 * 1024));
-        let (live, restored) = live_and_restored(&raw, &[]);
-        assert_eq!(live, restored);
-        assert!(live.len() > 16 * 1024, "the test never left the window");
-        assert!(live.contains("tail"), "the end was cut: {}", live.len());
-        assert!(!live.contains("output truncated"), "cut under the cap");
-    }
-
     /// A row a replay settles is the row the live path would have
     /// settled. Both used to write the rules out — the restore path's
     /// copy took the newest row with a matching id whatever its state,
@@ -2022,33 +2005,27 @@ mod tests {
         }));
     }
 
-    /// Over 16 KiB the publish site has already cut what the live row
-    /// gets, but restore reads the whole redacted result from the log
-    /// and must stop destroying it: the restored row keeps everything
-    /// (up to the 256 KiB keep-cap) behind the full toggle, agreeing
-    /// with the live row on every character live was allowed to keep —
-    /// both still cut the raw representation before expanding tabs.
+    /// Past 16 KiB the same call used to say two different things
+    /// depending on when you looked: the live row ended at the publish
+    /// bound and a reopened session read the whole result back from
+    /// the log. The bound is the keep cap now, so both keep everything
+    /// up to it — and both still cut the raw representation before
+    /// expanding tabs.
     #[test]
-    fn an_over_long_result_survives_restore_where_live_was_cut() {
+    fn an_over_long_result_reads_the_same_live_and_restored() {
         let raw = "\tname\tvalue\n".repeat(4_000);
+        // The window where the two used to disagree: past the old
+        // publish bound, under the keep cap.
         assert!(raw.chars().count() > ilar::text::MAX_DETAIL_CHARS);
+        assert!(raw.chars().count() < ilar::text::MAX_RESULT_CHARS);
         let (live, restored) = live_and_restored(&raw, &[]);
-        // The live row still ends at the publish-site cut…
-        assert!(live.ends_with("… output truncated"), "{live:?}");
+        assert_eq!(live, restored);
+        assert!(!live.contains("output truncated"), "cut under the cap");
+        assert_eq!(live.lines().count(), 4_000);
         assert!(!live.contains('\t'), "tabs are expanded for display");
-        // …while the restored row keeps the whole result…
-        assert!(!restored.contains("output truncated"), "{restored:?}");
-        assert_eq!(restored.lines().count(), 4_000);
-        assert!(!restored.contains('\t'), "tabs are expanded for display");
-        // …and the two agree on everything the live row kept.
-        let shared = live
-            .strip_suffix("… output truncated")
-            .unwrap()
-            .trim_end_matches('\n');
-        assert!(restored.starts_with(shared), "{live:?} vs {restored:?}");
 
-        // Images ride along on the same string; over the cut, both
-        // paths now keep their markers past the truncated text.
+        // Images ride along on the same string, past the text either
+        // path kept.
         let image = ilar::session::ImageContent::png(&[0u8; 128]);
         let markers = ilar::image::markers(std::slice::from_ref(&image));
         let (live, restored) = live_and_restored(&raw, std::slice::from_ref(&image));
