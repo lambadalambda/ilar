@@ -15,7 +15,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::text::{
-    Truncation, abbreviated_path, format_tokens_compact, fuzzy_score, text_field_view,
+    Truncation, abbreviated_path, format_cost, format_tokens_compact, fuzzy_score, text_field_view,
     truncate_display,
 };
 use crate::theme;
@@ -1287,6 +1287,7 @@ impl PendingManager {
 
 pub(crate) struct SkillPicker {
     pub(crate) skills: Vec<(String, String)>,
+    query: String,
     nav: ListNav,
 }
 
@@ -1294,8 +1295,22 @@ impl SkillPicker {
     pub(crate) fn new(skills: Vec<(String, String)>) -> Self {
         Self {
             skills,
+            query: String::new(),
             nav: ListNav::default(),
         }
+    }
+
+    /// The same filter the link picker uses, over the name and what
+    /// the skill says it does. `/` completion has always filtered;
+    /// this list did not, so a long inventory was a list to scroll.
+    pub(crate) fn filtered(&self) -> Vec<&(String, String)> {
+        fuzzy_filter(&self.query, self.skills.iter(), |(name, description)| {
+            format!("{name} {description}")
+        })
+    }
+
+    pub(crate) fn insert_query(&mut self, text: &str) {
+        self.paste_query(text);
     }
 
     /// Click-to-select: the index comes from the frame's hit map.
@@ -1312,8 +1327,6 @@ impl SkillPicker {
     }
 }
 
-/// The whole inventory is always listed, so there is no query: typed
-/// characters fall through to `stay`.
 impl Picker for SkillPicker {
     type Action = PickerAction;
 
@@ -1322,7 +1335,7 @@ impl Picker for SkillPicker {
     }
 
     fn row_count(&self) -> usize {
-        self.skills.len()
+        self.filtered().len()
     }
 
     fn stay(&self) -> Self::Action {
@@ -1334,10 +1347,14 @@ impl Picker for SkillPicker {
     }
 
     fn choose(&mut self) -> Self::Action {
-        self.skills
+        self.filtered()
             .get(self.nav.selected)
             .map(|(name, _)| PickerAction::Choose(name.clone()))
             .unwrap_or(PickerAction::Stay)
+    }
+
+    fn query(&mut self) -> Option<&mut String> {
+        Some(&mut self.query)
     }
 }
 
@@ -1348,22 +1365,20 @@ pub(crate) fn render_skill_picker(frame: &mut Frame, picker: &SkillPicker) -> Mo
         area,
         " skills ",
         theme::MARKUP,
-        " ↑↓ select · Enter insert · Esc close ",
+        " filter · ↑↓ select · Enter insert · Esc close ",
     ) else {
         return ModalHit::default();
     };
-    let selected = picker
-        .nav
-        .selected
-        .min(picker.skills.len().saturating_sub(1));
+    let skills = picker.filtered();
+    let selected = picker.nav.selected.min(skills.len().saturating_sub(1));
     let mut body = ModalRows::default();
     push_row_window(
         &mut body,
         inner.width as usize,
-        visible_rows(selected, picker.skills.len(), inner.height as usize),
+        visible_rows(selected, skills.len(), inner.height as usize),
         selected,
         |index, is_selected| {
-            let (name, description) = &picker.skills[index];
+            let (name, description) = skills[index];
             let marker = if is_selected { "> " } else { "  " };
             let style = if is_selected {
                 theme::selected()
@@ -2395,7 +2410,10 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
         let footer = row
             .map(|row| {
                 if row.match_count > 0 {
-                    format!(" event {} · {} ", row.event, row.age)
+                    // Which match of how many, not the log's own index
+                    // for the event: `event 37` was a number about our
+                    // file, not about this session.
+                    format!(" match 1 of {} · {} ", row.match_count, row.age)
                 } else {
                     format!(" {} ", row.age)
                 }
@@ -2557,13 +2575,21 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
 pub(crate) struct ModelPicker {
     models: Vec<&'static ilar::model::ModelInfo>,
     active_model: String,
+    /// The reasoning level the session is on, when it has one. The
+    /// header named the model and not the level, so a picker opened to
+    /// change the level could not say which one it was changing from.
+    active_variant: Option<String>,
     query: String,
     pub(crate) nav: ListNav,
     pub(crate) error: Option<String>,
 }
 
 impl ModelPicker {
-    pub(crate) fn new(models: Vec<&'static ilar::model::ModelInfo>, active_model: &str) -> Self {
+    pub(crate) fn new(
+        models: Vec<&'static ilar::model::ModelInfo>,
+        active_model: &str,
+        active_variant: Option<&str>,
+    ) -> Self {
         let selected = models
             .iter()
             .position(|model| model.full_id() == active_model)
@@ -2571,6 +2597,7 @@ impl ModelPicker {
         Self {
             models,
             active_model: active_model.to_string(),
+            active_variant: active_variant.map(str::to_string),
             query: String::new(),
             nav: ListNav { selected },
             error: None,
@@ -3483,7 +3510,15 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
             body.push(
                 Line::styled(
                     truncate_display(
-                        &format!("current {}", picker.active_model),
+                        &format!(
+                            "current {}{}",
+                            picker.active_model,
+                            picker
+                                .active_variant
+                                .as_deref()
+                                .map(|variant| format!("@{variant}"))
+                                .unwrap_or_default()
+                        ),
                         inner.width as usize,
                         Truncation::Middle,
                     ),
@@ -3509,11 +3544,35 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
                 let full_id = model.full_id();
                 let active = full_id == picker.active_model;
                 let marker = choice_marker(is_selected, active);
+                // The fields a choice is actually made on, which the
+                // row named none of: what it costs, whether it takes
+                // pictures, and whether Enter opens a second picker
+                // for its reasoning levels.
+                let price = if ilar::model::plan_billed(&full_id) {
+                    " plan".to_string()
+                } else {
+                    match ilar::model::pricing_for(&full_id) {
+                        // Per million input tokens, which is how every
+                        // catalogue quotes it.
+                        Some(pricing) => format!(" {}/M", format_cost(pricing.input)),
+                        None => String::new(),
+                    }
+                };
+                let vision = if ilar::model::supports_vision(&full_id) {
+                    " 👁"
+                } else {
+                    ""
+                };
+                let levels = if model.variants().is_empty() {
+                    ""
+                } else {
+                    " ▸"
+                };
                 // Narrow terminals drop the display name and the
                 // context column; the id alone still identifies it.
                 let text = if inner.width >= 50 {
                     let suffix = format!(
-                        "  {full_id}  {}",
+                        "  {full_id}  {}{price}{vision}{levels}",
                         format_tokens_compact(model.context_limit)
                     );
                     // A column wider than `marked_row` reserves: the
@@ -3749,6 +3808,60 @@ mod tests {
     /// without the kitty protocol Ctrl-M *is* Enter and would fire off the
     /// draft. Do not advertise it there — and do not let a Shift-Enter
     /// sighting vouch for it, since tmux reports one and not the other.
+    /// Every other list filters as you type; this one listed the whole
+    /// inventory and let typed characters fall on the floor, so a long
+    /// skill set was a list to scroll.
+    #[test]
+    fn the_skill_picker_filters_like_every_other_list() {
+        let skills = vec![
+            ("review".to_string(), "read a diff closely".to_string()),
+            ("deploy".to_string(), "ship it to production".to_string()),
+            ("bench".to_string(), "measure a hot path".to_string()),
+        ];
+        let mut picker = SkillPicker::new(skills);
+        assert_eq!(picker.filtered().len(), 3);
+
+        picker.insert_query("prod");
+        let found = picker.filtered();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].0, "deploy", "matched on the description");
+
+        // And choosing takes the filtered row, not the row that index
+        // used to name in the unfiltered list.
+        assert_eq!(picker.choose(), PickerAction::Choose("deploy".into()));
+    }
+
+    /// The row a model is chosen on named the id and the window and
+    /// nothing a choice is actually made with: what it costs, whether
+    /// it takes pictures, whether Enter opens a second picker for its
+    /// reasoning levels. And the header named the model without the
+    /// level, so a picker opened to change the level could not say
+    /// which one it was changing from.
+    #[test]
+    fn the_model_picker_shows_the_fields_a_choice_is_made_on() {
+        let models: Vec<&'static ilar::model::ModelInfo> = ilar::model::catalog().iter().collect();
+        let priced = models
+            .iter()
+            .find(|model| ilar::model::pricing_for(&model.full_id()).is_some())
+            .map(|model| model.full_id())
+            .expect("the catalog prices something");
+        let picker = ModelPicker::new(models, &priced, Some("high"));
+        let (screen, _) = draw_modal(160, 40, |frame| render_model_picker(frame, &picker));
+
+        // The level the session is on, beside the model it is on.
+        assert!(
+            screen.contains(&format!("current {priced}@high")),
+            "{screen}"
+        );
+        // A price per million, and the levels marker for a model that
+        // has them.
+        assert!(screen.contains("/M"), "no price on any row: {screen}");
+        assert!(
+            screen.contains('👁') || screen.contains('▸'),
+            "neither vision nor levels marked: {screen}"
+        );
+    }
+
     #[test]
     fn help_only_offers_ctrl_m_when_the_terminal_can_report_it() {
         use crate::input::TerminalKeys;
@@ -3899,7 +4012,7 @@ mod tests {
     #[test]
     fn model_picker_searches_provider_id_and_display_name() {
         let models = ilar::model::catalog().iter().collect();
-        let mut picker = ModelPicker::new(models, "openai/gpt-5.6-sol");
+        let mut picker = ModelPicker::new(models, "openai/gpt-5.6-sol", None);
 
         picker.set_query("zai");
         assert!(
@@ -3952,7 +4065,7 @@ mod tests {
         link.insert_query("docs");
         assert_eq!(link.query, "docs");
 
-        let mut model = ModelPicker::new(ilar::model::catalog().iter().collect(), "none");
+        let mut model = ModelPicker::new(ilar::model::catalog().iter().collect(), "none", None);
         model.error = Some("stale".into());
         model.nav.selected = 2;
         model.insert_query("gpt");
@@ -4045,7 +4158,11 @@ mod tests {
         );
         assert_eq!(theme.query, "");
 
-        let mut model = ModelPicker::new(ilar::model::catalog().iter().take(3).collect(), "none");
+        let mut model = ModelPicker::new(
+            ilar::model::catalog().iter().take(3).collect(),
+            "none",
+            None,
+        );
         model.nav.selected = 2;
         model.insert_query("\n\r\t");
         assert_eq!(model.query, "");
@@ -4094,7 +4211,7 @@ mod tests {
     #[test]
     fn model_picker_rejects_control_characters() {
         let models = ilar::model::catalog().iter().take(3).collect();
-        let mut picker = ModelPicker::new(models, "missing/model");
+        let mut picker = ModelPicker::new(models, "missing/model", None);
         picker.handle_key(KeyCode::Down, false);
         assert_eq!(picker.selected_index(), 1);
 
@@ -4113,7 +4230,7 @@ mod tests {
     #[test]
     fn model_picker_navigation_confirmation_and_escape_are_explicit() {
         let models = ilar::model::catalog().iter().take(3).collect();
-        let mut picker = ModelPicker::new(models, "missing/model");
+        let mut picker = ModelPicker::new(models, "missing/model", None);
 
         assert_eq!(picker.selected_index(), 0);
         assert_eq!(picker.handle_key(KeyCode::Up, false), PickerAction::Stay);
@@ -4128,14 +4245,14 @@ mod tests {
         );
 
         let active = ilar::model::catalog()[0].full_id();
-        let mut picker = ModelPicker::new(vec![&ilar::model::catalog()[0]], &active);
+        let mut picker = ModelPicker::new(vec![&ilar::model::catalog()[0]], &active, None);
         assert!(matches!(
             picker.handle_key(KeyCode::Enter, false),
             PickerAction::Choose(_)
         ));
 
         let model = ilar::model::find("openai/gpt-4.1").unwrap();
-        let mut picker = ModelPicker::new(vec![model], &model.full_id());
+        let mut picker = ModelPicker::new(vec![model], &model.full_id(), None);
         assert_eq!(
             picker.handle_key(KeyCode::Enter, false),
             PickerAction::Dismiss

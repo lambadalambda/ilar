@@ -674,6 +674,11 @@ fn apply_intent(
                         picker.insert_query(&text);
                     }
                 }
+                Some(Modal::SkillPicker) => {
+                    if let Some(picker) = app.skill_picker.as_mut() {
+                        picker.insert_query(&text);
+                    }
+                }
                 Some(Modal::ModelPicker) => {
                     if let Some(picker) = app.model_picker.as_mut() {
                         picker.insert_query(&text);
@@ -5100,8 +5105,11 @@ async fn run_app(
                             continue;
                         }
                         app.clear_transient_notice();
-                        app.model_picker =
-                            Some(ModelPicker::new(model_choices.clone(), &app.current_model));
+                        app.model_picker = Some(ModelPicker::new(
+                            model_choices.clone(),
+                            &app.current_model,
+                            app.current_variant.as_deref(),
+                        ));
                         continue;
                     }
                     // Like F3: paint, so a running turn is no reason to
@@ -5137,8 +5145,11 @@ async fn run_app(
                         if !app.busy && !model_choices.is_empty() =>
                     {
                         app.clear_transient_notice();
-                        app.model_picker =
-                            Some(ModelPicker::new(model_choices.clone(), &app.current_model));
+                        app.model_picker = Some(ModelPicker::new(
+                            model_choices.clone(),
+                            &app.current_model,
+                            app.current_variant.as_deref(),
+                        ));
                     }
                     // Still answers: a documented shortcut that does
                     // nothing at all reads as a broken keyboard.
@@ -6021,6 +6032,7 @@ mod tests {
         app.model_picker = Some(ModelPicker::new(
             ilar::model::catalog().iter().collect(),
             "missing/model",
+            None,
         ));
         paste(&mut app, "glm-4.7");
         let picker = app.model_picker.as_mut().expect("picker open");

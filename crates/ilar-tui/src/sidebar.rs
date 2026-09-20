@@ -289,15 +289,27 @@ pub(crate) fn service_panel(
     // Service names and details come from the process registry, which
     // takes them from user configuration and program output: sanitize
     // them like every other borrowed string that reaches a row.
+    // The detail keeps its room and the name gives way, as an agent
+    // row's does: truncating the pair from the right meant a long
+    // service name pushed `up 3m` and the exit reason off the line,
+    // and the docs promise "who died how".
     let row = |marker: &'static str, marker_color, name: &str, detail: &str, text_color| {
+        let room = width.saturating_sub(2);
+        let detail = safe_text(detail);
+        let reserved = UnicodeWidthStr::width(detail.as_str()) + 3;
+        let text = match room.checked_sub(reserved).filter(|room| *room >= 4) {
+            Some(for_name) => format!(
+                "{} · {detail}",
+                truncate_display(&safe_text(name), for_name, Truncation::Right)
+            ),
+            // No room for both: the name, which is how the row is
+            // found at all.
+            None => safe_text(name),
+        };
         Line::from(vec![
             Span::styled(marker, Style::default().fg(marker_color)),
             Span::styled(
-                truncate_display(
-                    &safe_text(&format!("{name} · {detail}")),
-                    width.saturating_sub(2),
-                    Truncation::Right,
-                ),
+                truncate_display(&text, room, Truncation::Right),
                 Style::default().fg(text_color),
             ),
         ])

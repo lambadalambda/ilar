@@ -3039,7 +3039,11 @@ pub(crate) fn activate_palette_command(
     }
     match command {
         PaletteCommand::Model if !model_choices.is_empty() => {
-            app.model_picker = Some(ModelPicker::new(model_choices, &app.current_model));
+            app.model_picker = Some(ModelPicker::new(
+                model_choices,
+                &app.current_model,
+                app.current_variant.as_deref(),
+            ));
         }
         PaletteCommand::Model => {}
         PaletteCommand::Reasoning => {
@@ -3781,6 +3785,7 @@ mod tests {
         app.model_picker = Some(ModelPicker::new(
             ilar::model::catalog().iter().collect(),
             "zai/glm-4.7",
+            None,
         ));
         assert_eq!(app.active_modal(), Some(Modal::ModelPicker));
 
@@ -3884,7 +3889,7 @@ mod tests {
         // Pin the entry count so catalog reordering cannot flip this.
         let models: Vec<_> = ilar::model::catalog().iter().take(10).collect();
         let first = models[0].full_id();
-        app.model_picker = Some(ModelPicker::new(models, &first));
+        app.model_picker = Some(ModelPicker::new(models, &first, None));
         assert_eq!(app.model_picker.as_ref().unwrap().nav.selected, 0);
 
         assert!(app.scroll_active_modal(3));
@@ -3944,7 +3949,7 @@ mod tests {
         let models: Vec<_> = ilar::model::catalog().iter().take(5).collect();
         let first = models[0].full_id();
         let expected = models[3].full_id();
-        app.model_picker = Some(ModelPicker::new(models, &first));
+        app.model_picker = Some(ModelPicker::new(models, &first, None));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
@@ -7156,6 +7161,7 @@ mod tests {
         app.model_picker = Some(ModelPicker::new(
             ilar::model::catalog().iter().collect(),
             "openai/gpt-5.6-sol",
+            None,
         ));
 
         terminal.draw(|frame| app.render(frame)).unwrap();
@@ -7221,6 +7227,7 @@ mod tests {
         let mut picker = ModelPicker::new(
             ilar::model::catalog().iter().collect(),
             "openai/gpt-5.6-sol",
+            None,
         );
         picker.set_query("glm");
         app.model_picker = Some(picker);

@@ -127,6 +127,7 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
             | Modal::TurnPicker
             | Modal::LinkPicker
             | Modal::ModelPicker
+            | Modal::SkillPicker
             | Modal::ThemePicker,
         ) => PasteTarget::ModalQuery,
         // The sudo password is the one prompt a paste belongs in; the
@@ -142,7 +143,6 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
             | Modal::Todos
             | Modal::Aside
             | Modal::PendingManager
-            | Modal::SkillPicker
             | Modal::VariantPicker
             | Modal::ContextPicker,
         ) => PasteTarget::Discard,
@@ -659,6 +659,7 @@ mod tests {
             Modal::TurnPicker,
             Modal::LinkPicker,
             Modal::ModelPicker,
+            Modal::SkillPicker,
             Modal::ThemePicker,
         ] {
             let state = LoopState {
@@ -678,7 +679,6 @@ mod tests {
             Modal::Todos,
             Modal::Aside,
             Modal::PendingManager,
-            Modal::SkillPicker,
             Modal::VariantPicker,
             Modal::ContextPicker,
         ] {

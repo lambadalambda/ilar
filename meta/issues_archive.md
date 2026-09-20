@@ -449,3 +449,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Plain words on every surface](issues/plain-words-on-every-surface.md) — the implementation's vocabulary out of the user's messages, one disclosure pair, one label casing
 - [x] [Three places resummarize a tool call](issues/three-places-resummarize-a-tool-call.md) — exec and the gateway follow the loop's published summary; replay reads the log and cannot
 - [x] [The focus view earns its chrome](issues/the-focus-view-earns-its-chrome.md) — tail/percent, activity row and scrollbar; the title had to be computed before the frame was drawn
+- [x] [Pickers show the deciding field](issues/pickers-show-the-deciding-field.md) — price, vision and levels on a model row; the skill picker filters; a service row keeps its detail
