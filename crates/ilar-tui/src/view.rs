@@ -921,19 +921,17 @@ impl App {
                     // dispatcher can hit — the navigation surface the
                     // focus view opens from. An agent is two of them
                     // and one target, so the hover lights both.
-                    let entries = more_toggle
-                        .map(|index| (index, SidebarAction::ToggleAgents))
-                        .into_iter()
-                        .chain(
-                            row_hits
-                                .into_iter()
-                                .map(|(index, target)| (index, SidebarAction::Focus(target))),
-                        )
-                        .collect();
                     lay_out_hits(
                         agent_area,
                         &mut lines,
-                        entries,
+                        more_toggle
+                            .map(|index| (vec![index], SidebarAction::ToggleAgents))
+                            .into_iter()
+                            .chain(
+                                row_hits.into_iter().map(|(indices, target)| {
+                                    (indices, SidebarAction::Focus(target))
+                                }),
+                            ),
                         self.sidebar_hover(),
                         &mut self.sidebar_hits,
                     );
@@ -970,9 +968,7 @@ impl App {
                         service_area,
                         &mut lines,
                         exited_toggle
-                            .map(|index| (index, SidebarAction::ToggleExitedServices))
-                            .into_iter()
-                            .collect(),
+                            .map(|index| (vec![index], SidebarAction::ToggleExitedServices)),
                         self.sidebar_hover(),
                         &mut self.sidebar_hits,
                     );

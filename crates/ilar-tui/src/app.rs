@@ -2366,7 +2366,11 @@ impl App {
     /// `None` when a modal in front would eat the click the underline
     /// promises.
     pub(crate) fn sidebar_hover(&self) -> Option<(u16, u16)> {
-        self.mouse_reaches_content().then_some(self.hover_screen)?
+        if self.mouse_reaches_content() {
+            self.hover_screen
+        } else {
+            None
+        }
     }
 
     /// What a click on the sidebar does, `None` when it missed every
@@ -5129,18 +5133,26 @@ mod tests {
         use ratatui::style::Modifier;
 
         let mut app = App::new();
-        app.agents_view = vec![AgentRow {
-            session_id: "child-a".into(),
+        let row = |session: &str, agent: &str| AgentRow {
+            session_id: session.into(),
             depth: 0,
             description: "survey the picker core".into(),
-            agent: "explore".into(),
+            agent: agent.into(),
             background: false,
             delivering: false,
             foreign_parent: None,
             elapsed: std::time::Duration::from_secs(10),
             waiting: false,
             quiet: None,
-        }];
+        };
+        // A job among them on purpose: a job has no session to focus,
+        // so its target is the root's — the same value `● main`
+        // carries. Grouping the hover by that value lit up the root and
+        // every job at once.
+        app.agents_view = vec![
+            row("child-a", "explore"),
+            row("job-1", ilar::subagent::JOB_AGENT),
+        ];
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
 
@@ -5150,39 +5162,71 @@ mod tests {
         app.update_hover(second.x + 2, second.y);
         terminal.draw(|frame| app.render(frame)).unwrap();
 
-        let underlined = |row: u16| {
+        // Scoped to the sidebar: a count over the whole width would
+        // also be asserting about the transcript beside it.
+        let panel = app.sidebar_hits[0].0;
+        fn underlined(
+            terminal: &ratatui::Terminal<ratatui::backend::TestBackend>,
+            panel: ratatui::layout::Rect,
+            row: u16,
+        ) -> usize {
             let buffer = terminal.backend().buffer();
-            (0..buffer.area.width)
+            (panel.x..panel.right())
                 .filter(|column| {
                     let cell = &buffer[(*column, row)];
                     cell.symbol().trim() != "" && cell.modifier.contains(Modifier::UNDERLINED)
                 })
                 .count()
-        };
+        }
+
         // Both lines of the one target, not just the hovered one.
-        assert!(underlined(second.y) > 0, "the hovered line is bare");
         assert!(
-            underlined(second.y - 1) > 0,
+            underlined(&terminal, panel, second.y) > 0,
+            "the hovered line is bare"
+        );
+        assert!(
+            underlined(&terminal, panel, second.y - 1) > 0,
             "the other half of the same click target stayed bare"
         );
         // The row above them is "main", a different target.
         assert_eq!(
-            underlined(second.y - 2),
+            underlined(&terminal, panel, second.y - 2),
             0,
             "the hover spread to a target the pointer is not on"
         );
 
-        // The ▸ marker is structure and keeps its bare style.
+        // The ▸ marker is this row's chrome and keeps its bare style.
+        // Not behind an `if let`: a layout change that stops drawing it
+        // must fail here rather than quietly delete the assertion.
         let buffer = terminal.backend().buffer();
-        let marker = (0..buffer.area.width)
+        let marker = (panel.x..panel.right())
             .map(|column| &buffer[(column, second.y - 1)])
-            .find(|cell| cell.symbol().trim() == "▸");
-        if let Some(marker) = marker {
-            assert!(
-                !marker.modifier.contains(Modifier::UNDERLINED),
-                "the marker underlined with the content"
-            );
-        }
+            .find(|cell| cell.symbol().trim() == "▸")
+            .expect("the row marker is drawn");
+        assert!(
+            !marker.modifier.contains(Modifier::UNDERLINED),
+            "the marker underlined with the content"
+        );
+
+        // And the job below, whose target is the root's: hovering it
+        // must not light the root, nor the agent above it.
+        let job = app.sidebar_hits.last().expect("the job row").0;
+        app.update_hover(job.x + 2, job.y);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        assert!(
+            underlined(&terminal, panel, job.y) > 0,
+            "the hovered job is bare"
+        );
+        assert_eq!(
+            underlined(&terminal, panel, app.sidebar_hits[0].0.y),
+            0,
+            "hovering a job lit up the root, whose target it shares"
+        );
+        assert_eq!(
+            underlined(&terminal, panel, second.y),
+            0,
+            "the hover stayed on the agent"
+        );
     }
 
     /// The panel rows are a click map: every drawn line of an agent

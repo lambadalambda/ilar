@@ -667,23 +667,21 @@ pub(crate) fn pending_summary(message: &ilar::agent::Steer) -> String {
     }
 }
 
-/// Glyphs that are a row's chrome rather than its words: the branch
-/// drawing of a nested transcript row, and the markers the sidebar
-/// leads its rows with. The sidebar underlined these and the
-/// transcript did not, so the two surfaces disagreed about what
-/// clickable looks like.
-fn is_chrome(character: char) -> bool {
-    character.is_whitespace()
-        || ('\u{2500}'..='\u{257F}').contains(&character)
-        || matches!(character, '●' | '▸' | '▾' | '▶' | '▼' | '✉' | '⚙')
-}
-
 /// The hover affordance: underline what a click on this row would
-/// act on. Whitespace, branch glyphs and row markers are structure,
-/// not content, and stay bare.
+/// act on. Whitespace and box-drawing spans (indent, branch glyphs)
+/// are structure, not content, and stay bare.
+///
+/// A disclosure glyph is not structure here: on a tool row it *is*
+/// the thing the click acts on, so it underlines with the words. The
+/// sidebar's row markers are a different case and have their own
+/// predicate — widening this one punched a hole in the middle of
+/// every tool row's underline.
 pub(crate) fn underline_content_spans(line: &mut Line<'static>) {
     for span in &mut line.spans {
-        let structural = span.content.chars().all(is_chrome);
+        let structural = span
+            .content
+            .chars()
+            .all(|c| c.is_whitespace() || ('\u{2500}'..='\u{257F}').contains(&c));
         if !structural {
             span.style = span
                 .style

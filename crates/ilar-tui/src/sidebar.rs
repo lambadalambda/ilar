@@ -124,7 +124,10 @@ pub(crate) enum AgentTarget {
 pub(crate) struct AgentPanel {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) more_toggle: Option<usize>,
-    pub(crate) row_hits: Vec<(usize, AgentTarget)>,
+    /// The lines of each clickable row and where it navigates. An
+    /// agent is two lines and one target; a job's target is the root's,
+    /// so which lines belong together cannot be read off the target.
+    pub(crate) row_hits: Vec<(Vec<usize>, AgentTarget)>,
 }
 
 /// What a click on the sidebar means. Three surfaces used to carry
@@ -180,7 +183,7 @@ pub(crate) fn agent_panel(
     // The place you came from leads the map whenever the panel shows.
     let marker = truncate_display("● ", width, Truncation::Right);
     let remaining = width.saturating_sub(UnicodeWidthStr::width(marker.as_str()));
-    row_hits.push((lines.len(), AgentTarget::Main));
+    row_hits.push((vec![lines.len()], AgentTarget::Main));
     lines.push(Line::from(vec![
         Span::styled(marker, Style::default().fg(theme::PRIMARY)),
         Span::styled(
@@ -214,7 +217,7 @@ pub(crate) fn agent_panel(
         } else {
             AgentTarget::Focus(agent.session_id.clone())
         };
-        row_hits.push((lines.len(), target.clone()));
+        let first_line = lines.len();
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(TOOL_ACTIVE)),
             Span::styled(
@@ -240,7 +243,7 @@ pub(crate) fn agent_panel(
         // Before the elapsed time, which is the least urgent thing on
         // the line: a truncated row keeps the reason it is not moving.
         let state = agent_state_marker(agent);
-        row_hits.push((lines.len(), target));
+        row_hits.push((vec![first_line, lines.len()], target));
         lines.push(Line::styled(
             truncate_display(
                 &format!(
@@ -337,37 +340,68 @@ pub(crate) fn disclosure_hit(panel: Rect, index: usize) -> Option<Rect> {
         .then(|| Rect::new(panel.x + 1, row, panel.width.saturating_sub(2), 1))
 }
 
+/// The sidebar's own idea of structure: whitespace, and the markers a
+/// row is led with. A `▸` in the transcript is the thing a click acts
+/// on and underlines with the words; here it is chrome in front of the
+/// words, like the indent. Its own predicate for that reason — sharing
+/// the transcript's punched a hole in the middle of every tool row.
+fn underline_row_content(line: &mut Line<'static>) {
+    for span in &mut line.spans {
+        let chrome = span
+            .content
+            .chars()
+            .all(|c| c.is_whitespace() || matches!(c, '●' | '▸' | '▾' | '✉' | '⚙'));
+        if !chrome {
+            span.style = span.style.add_modifier(Modifier::UNDERLINED);
+        }
+    }
+}
+
 /// Lay out one panel's hit map and underline whatever the pointer is
 /// over — every line of it.
 ///
-/// An agent is two lines and one click target, and only the line under
-/// the pointer used to underline, so half a clickable lit up. The
-/// markers and the indent stay bare, as the transcript's hover does:
-/// the two surfaces disagreed about what clickable looks like.
+/// A clickable is *a set of lines* and one action: an agent is two
+/// rows and one place to go, and only the line under the pointer used
+/// to underline, so half a clickable lit up while the other half said
+/// it was something else. Which lines belong together is passed in
+/// rather than inferred from the action, because actions repeat —
+/// every background job's target is `AgentTarget::Main`, the same
+/// value the `● main` row carries, so grouping by value lit up every
+/// job and the root together.
 pub(crate) fn lay_out_hits(
     panel: Rect,
     lines: &mut [Line<'static>],
-    entries: Vec<(usize, SidebarAction)>,
+    clickables: impl IntoIterator<Item = (Vec<usize>, SidebarAction)>,
     hover: Option<(u16, u16)>,
     hits: &mut Vec<(Rect, SidebarAction)>,
 ) {
-    let placed: Vec<(usize, Rect, SidebarAction)> = entries
+    let placed: Vec<(Vec<(usize, Rect)>, SidebarAction)> = clickables
         .into_iter()
-        .filter_map(|(index, action)| Some((index, disclosure_hit(panel, index)?, action)))
+        .map(|(indices, action)| {
+            let rects = indices
+                .into_iter()
+                .filter_map(|index| Some((index, disclosure_hit(panel, index)?)))
+                .collect::<Vec<_>>();
+            (rects, action)
+        })
+        .filter(|(rects, _)| !rects.is_empty())
         .collect();
     let hovered = hover.and_then(|(column, row)| {
-        placed
-            .iter()
-            .find(|(_, rect, _)| rect.contains(ratatui::layout::Position::new(column, row)))
-            .map(|(_, _, action)| action.clone())
+        placed.iter().position(|(rects, _)| {
+            rects
+                .iter()
+                .any(|(_, rect)| rect.contains(ratatui::layout::Position::new(column, row)))
+        })
     });
-    for (index, rect, action) in placed {
-        if hovered.as_ref() == Some(&action)
-            && let Some(line) = lines.get_mut(index)
-        {
-            crate::transcript::underline_content_spans(line);
+    for (group, (rects, action)) in placed.into_iter().enumerate() {
+        for (index, rect) in rects {
+            if hovered == Some(group)
+                && let Some(line) = lines.get_mut(index)
+            {
+                underline_row_content(line);
+            }
+            hits.push((rect, action.clone()));
         }
-        hits.push((rect, action));
     }
 }
 
@@ -1011,18 +1045,17 @@ mod tests {
             "{text:?}"
         );
 
-        // Both lines of a row are the same click; main is one line.
+        // Both lines of a row are one click; main is one line. Said
+        // as a set rather than inferred later: a job's target is the
+        // root's, so equal targets do not mean one clickable.
         let focus = |index: usize| AgentTarget::Focus(format!("session-{index}"));
         assert_eq!(
             panel.row_hits,
             vec![
-                (0, AgentTarget::Main),
-                (1, focus(0)),
-                (2, focus(0)),
-                (3, focus(1)),
-                (4, focus(1)),
-                (5, focus(2)),
-                (6, focus(2)),
+                (vec![0], AgentTarget::Main),
+                (vec![1, 2], focus(0)),
+                (vec![3, 4], focus(1)),
+                (vec![5, 6], focus(2)),
             ]
         );
 
@@ -1032,7 +1065,7 @@ mod tests {
         assert_eq!(panel.more_toggle, Some(3));
         assert_eq!(
             panel.row_hits,
-            vec![(0, AgentTarget::Main), (1, focus(0)), (2, focus(0))]
+            vec![(vec![0], AgentTarget::Main), (vec![1, 2], focus(0))]
         );
     }
 

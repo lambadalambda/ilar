@@ -1298,6 +1298,55 @@ async fn slash_new_stops_the_turn_it_replaces() {
     gateway.cancel();
 }
 
+/// The guard `/new` leans on: a turn queued behind the one it
+/// cancelled belongs to the conversation that was left behind, so it
+/// does not run and says nothing to the chat. Without it the fresh
+/// chat's first words were the old chat's answer, addressed to
+/// somebody who had just started over.
+#[tokio::test]
+async fn a_turn_queued_behind_slash_new_never_speaks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![
+            calls("bash", serde_json::json!({"command": "sleep 20"})),
+            says("the old conversation's answer"),
+            says("the queued message's answer"),
+        ],
+    );
+    fake.inject("run something slow", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Queued behind the running turn, so it takes the seat's lock only
+    // after `/new` has cancelled that conversation.
+    fake.inject("and also this", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    fake.inject("/new", "chat-1", "alice").await;
+
+    let sent = fake.wait_for_sent(2, Duration::from_secs(15)).await;
+    let texts: Vec<String> = sent.iter().map(|m| m.text.clone()).collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == ilar_gateway::gateway::ABORTED_REPLY),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with("Started a fresh chat")),
+        "{texts:?}"
+    );
+
+    // And nothing else, ever: the queued turn was dropped rather than
+    // run against a conversation nobody is in any more.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let texts: Vec<String> = fake.sent().iter().map(|m| m.text.clone()).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(
+        !texts.iter().any(|t| t.contains("queued message")),
+        "a turn from the abandoned conversation spoke: {texts:?}"
+    );
+    gateway.cancel();
+}
+
 #[tokio::test]
 async fn a_restart_tells_the_chat_the_turn_it_dropped() {
     let dir = tempfile::tempdir().unwrap();
