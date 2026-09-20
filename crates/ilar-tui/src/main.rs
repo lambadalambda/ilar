@@ -5397,15 +5397,19 @@ async fn run_app(
                         // transcript. While a focus view is up the
                         // transcript under it must not take selection
                         // clicks meant for rows it is not showing.
-                        if !app.click_exited_services(mouse.column, mouse.row)
-                            && !app.click_agents_more(mouse.column, mouse.row)
                         {
-                            match app.click_agent_row(mouse.column, mouse.row) {
-                                Some(AgentTarget::Main) => {
+                            use crate::sidebar::SidebarAction;
+                            match app.click_sidebar(mouse.column, mouse.row) {
+                                // The disclosures answered themselves.
+                                Some(
+                                    SidebarAction::ToggleAgents
+                                    | SidebarAction::ToggleExitedServices,
+                                ) => {}
+                                Some(SidebarAction::Focus(AgentTarget::Main)) => {
                                     app.close_focus();
                                     focus_seed = None;
                                 }
-                                Some(AgentTarget::Focus(id)) => {
+                                Some(SidebarAction::Focus(AgentTarget::Focus(id))) => {
                                     // `None`: the view was already on
                                     // that agent, and re-seeding it
                                     // would replace a live tail with a

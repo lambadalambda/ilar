@@ -29,7 +29,7 @@ use crate::selection::{
 use crate::session_view::{
     accrue_usage, add_costs, task_notification_display, tool_notification_display,
 };
-use crate::sidebar::{AgentRow, AgentTarget};
+use crate::sidebar::{AgentRow, SidebarAction};
 use crate::text::{cache_share, format_cost, format_tokens_compact, safe_text};
 use crate::transcript::{
     Line_, ToolState, TranscriptHitTarget, TranscriptRenderCache, append_text_delta,
@@ -706,15 +706,15 @@ pub(crate) struct App {
     /// The exited-services disclosure: open?, and where its toggle
     /// line landed on screen last frame (None when not drawn).
     pub(crate) services_show_exited: bool,
-    pub(crate) services_exited_hit: Option<Rect>,
     /// The agents panel's "+N more" disclosure: expanded past the
-    /// half-height cap?, and where its row landed last frame.
+    /// half-height cap?
     pub(crate) agents_show_all: bool,
-    pub(crate) agents_more_hit: Option<Rect>,
-    /// Where each agent-panel row line landed last frame and where a
-    /// click on it navigates. Rebuilt by every render, like the
-    /// disclosure rects beside it.
-    pub(crate) agents_row_hits: Vec<(Rect, AgentTarget)>,
+    /// Where every clickable line of the sidebar landed last frame and
+    /// what a click on it means. Rebuilt by every render. One map for
+    /// all three surfaces: they each carried their own field, hover
+    /// block, click method and reset, and the next clickable row would
+    /// have carried a fourth.
+    pub(crate) sidebar_hits: Vec<(Rect, SidebarAction)>,
     /// A child session's transcript taken over the screen, if any.
     pub(crate) focus: Option<FocusView>,
     /// This directory's previous session, on offer above the
@@ -876,10 +876,9 @@ impl App {
             hover: None,
             pending_images: Vec::new(),
             services_show_exited: false,
-            services_exited_hit: None,
+
             agents_show_all: false,
-            agents_more_hit: None,
-            agents_row_hits: Vec::new(),
+            sidebar_hits: Vec::new(),
             focus: None,
             ghost: None,
             hover_screen: None,
@@ -2363,39 +2362,32 @@ impl App {
         self.hover_screen = Some((column, row));
     }
 
-    /// A click on the exited-services disclosure; false when it missed
-    /// (the transcript gets the click instead).
-    pub(crate) fn click_exited_services(&mut self, column: u16, row: u16) -> bool {
-        let hit = self
-            .services_exited_hit
-            .is_some_and(|rect| rect.contains(ratatui::layout::Position::new(column, row)));
-        if hit {
-            self.services_show_exited = !self.services_show_exited;
-        }
-        hit
+    /// Where the pointer is, for the sidebar's hover underline — or
+    /// `None` when a modal in front would eat the click the underline
+    /// promises.
+    pub(crate) fn sidebar_hover(&self) -> Option<(u16, u16)> {
+        self.mouse_reaches_content().then_some(self.hover_screen)?
     }
 
-    /// A click on the agents panel's "+N more" disclosure; false when
-    /// it missed (the transcript gets the click instead).
-    pub(crate) fn click_agents_more(&mut self, column: u16, row: u16) -> bool {
-        let hit = self
-            .agents_more_hit
-            .is_some_and(|rect| rect.contains(ratatui::layout::Position::new(column, row)));
-        if hit {
-            self.agents_show_all = !self.agents_show_all;
-        }
-        hit
-    }
-
-    /// Where a click on the agents panel navigates; `None` when it
-    /// missed every row (the transcript gets the click instead). The
-    /// caller acts — this only reads the map the render left.
-    pub(crate) fn click_agent_row(&self, column: u16, row: u16) -> Option<AgentTarget> {
+    /// What a click on the sidebar does, `None` when it missed every
+    /// clickable line and the transcript should have it. The two
+    /// disclosures are answered here; a focus target is the caller's,
+    /// which is where the session load lives.
+    pub(crate) fn click_sidebar(&mut self, column: u16, row: u16) -> Option<SidebarAction> {
         let position = ratatui::layout::Position::new(column, row);
-        self.agents_row_hits
+        let action = self
+            .sidebar_hits
             .iter()
             .find(|(rect, _)| rect.contains(position))
-            .map(|(_, target)| target.clone())
+            .map(|(_, action)| action.clone())?;
+        match &action {
+            SidebarAction::ToggleAgents => self.agents_show_all = !self.agents_show_all,
+            SidebarAction::ToggleExitedServices => {
+                self.services_show_exited = !self.services_show_exited;
+            }
+            SidebarAction::Focus(_) => {}
+        }
+        Some(action)
     }
 
     pub(crate) fn begin_transcript_selection(&mut self, column: u16, row: u16) {
@@ -4911,25 +4903,32 @@ mod tests {
             screen(&terminal)
         );
         assert!(!screen(&terminal).contains("build"));
-        let hit = app.services_exited_hit.expect("toggle rect recorded");
+        let hit =
+            sidebar_hit(&app, SidebarAction::ToggleExitedServices).expect("toggle rect recorded");
 
         // Click reveals the dead with their details…
-        assert!(app.click_exited_services(hit.x, hit.y));
+        assert_eq!(
+            app.click_sidebar(hit.x, hit.y),
+            Some(SidebarAction::ToggleExitedServices)
+        );
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(screen(&terminal).contains("▾ 2 exited"));
         assert!(screen(&terminal).contains("build · exit 1"));
         assert!(screen(&terminal).contains("lint · exit 2"));
 
         // …a second click folds them away.
-        assert!(app.click_exited_services(hit.x, hit.y));
+        assert_eq!(
+            app.click_sidebar(hit.x, hit.y),
+            Some(SidebarAction::ToggleExitedServices)
+        );
         terminal.draw(|frame| app.render(frame)).unwrap();
         assert!(!screen(&terminal).contains("build"));
 
         // A miss is not consumed, and no panel means no rect.
-        assert!(!app.click_exited_services(0, 0));
+        assert_eq!(app.click_sidebar(0, 0), None);
         app.services_view.clear();
         terminal.draw(|frame| app.render(frame)).unwrap();
-        assert!(app.services_exited_hit.is_none());
+        assert!(sidebar_hit(&app, SidebarAction::ToggleExitedServices).is_none());
     }
 
     #[test]
@@ -5072,31 +5071,37 @@ mod tests {
         assert!(collapsed.contains("hunt bug number 0"), "{collapsed}");
         assert!(!collapsed.contains("hunt bug number 7"), "{collapsed}");
         assert!(collapsed.contains("▸ +"), "{collapsed}");
-        let hit = app.agents_more_hit.expect("more rect recorded");
+        let hit = sidebar_hit(&app, SidebarAction::ToggleAgents).expect("more rect recorded");
 
         // Click: the whole roster, at the todo list's expense, with
         // the way back in its place.
-        assert!(app.click_agents_more(hit.x, hit.y));
+        assert_eq!(
+            app.click_sidebar(hit.x, hit.y),
+            Some(SidebarAction::ToggleAgents)
+        );
         let expanded = screen(&mut app);
         assert!(expanded.contains("hunt bug number 7"), "{expanded}");
         assert!(expanded.contains("▾ show less"), "{expanded}");
 
         // A second click folds it back.
-        let hit = app.agents_more_hit.expect("less rect recorded");
-        assert!(app.click_agents_more(hit.x, hit.y));
+        let hit = sidebar_hit(&app, SidebarAction::ToggleAgents).expect("less rect recorded");
+        assert_eq!(
+            app.click_sidebar(hit.x, hit.y),
+            Some(SidebarAction::ToggleAgents)
+        );
         let refolded = screen(&mut app);
         assert!(!refolded.contains("hunt bug number 7"), "{refolded}");
         assert!(refolded.contains("▸ +"), "{refolded}");
 
         // A miss is not consumed. And once the roster fits the cap,
         // a stale expansion releases itself: no disclosure at all.
-        assert!(!app.click_agents_more(0, 0));
+        assert_eq!(app.click_sidebar(0, 0), None);
         app.agents_show_all = true;
         app.agents_view.truncate(2);
         let fits = screen(&mut app);
         assert!(!fits.contains("show less"), "{fits}");
         assert!(!app.agents_show_all, "expansion released");
-        assert!(app.agents_more_hit.is_none());
+        assert!(sidebar_hit(&app, SidebarAction::ToggleAgents).is_none());
 
         // An expansion does not outlive its roster: everyone finishing
         // must not leave the next batch pre-expanded.
@@ -5104,6 +5109,80 @@ mod tests {
         app.agents_view.clear();
         let _ = screen(&mut app);
         assert!(!app.agents_show_all, "expansion died with the roster");
+    }
+
+    /// Where the render left one kind of clickable, if it drew it.
+    fn sidebar_hit(app: &App, wanted: SidebarAction) -> Option<ratatui::layout::Rect> {
+        app.sidebar_hits
+            .iter()
+            .find(|(_, action)| *action == wanted)
+            .map(|(rect, _)| *rect)
+    }
+
+    /// An agent is two lines and one click target, so hovering either
+    /// lights both — half a clickable underlining said the other half
+    /// was something else. The markers and the indent stay bare, as
+    /// the transcript's hover does: the two surfaces disagreed about
+    /// what clickable looks like.
+    #[test]
+    fn hovering_an_agent_underlines_all_of_it_and_none_of_its_chrome() {
+        use ratatui::style::Modifier;
+
+        let mut app = App::new();
+        app.agents_view = vec![AgentRow {
+            session_id: "child-a".into(),
+            depth: 0,
+            description: "survey the picker core".into(),
+            agent: "explore".into(),
+            background: false,
+            delivering: false,
+            foreign_parent: None,
+            elapsed: std::time::Duration::from_secs(10),
+            waiting: false,
+            quiet: None,
+        }];
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 30)).unwrap();
+
+        // Hover the agent's second line — the muted detail row.
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let second = app.sidebar_hits[2].0;
+        app.update_hover(second.x + 2, second.y);
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let underlined = |row: u16| {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.width)
+                .filter(|column| {
+                    let cell = &buffer[(*column, row)];
+                    cell.symbol().trim() != "" && cell.modifier.contains(Modifier::UNDERLINED)
+                })
+                .count()
+        };
+        // Both lines of the one target, not just the hovered one.
+        assert!(underlined(second.y) > 0, "the hovered line is bare");
+        assert!(
+            underlined(second.y - 1) > 0,
+            "the other half of the same click target stayed bare"
+        );
+        // The row above them is "main", a different target.
+        assert_eq!(
+            underlined(second.y - 2),
+            0,
+            "the hover spread to a target the pointer is not on"
+        );
+
+        // The ▸ marker is structure and keeps its bare style.
+        let buffer = terminal.backend().buffer();
+        let marker = (0..buffer.area.width)
+            .map(|column| &buffer[(column, second.y - 1)])
+            .find(|cell| cell.symbol().trim() == "▸");
+        if let Some(marker) = marker {
+            assert!(
+                !marker.modifier.contains(Modifier::UNDERLINED),
+                "the marker underlined with the content"
+            );
+        }
     }
 
     /// The panel rows are a click map: every drawn line of an agent
@@ -5143,32 +5222,35 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).unwrap();
 
         // Main leads, then two lines per agent, all recorded.
-        assert_eq!(app.agents_row_hits.len(), 5);
-        assert_eq!(app.agents_row_hits[0].1, AgentTarget::Main);
-        let main_rect = app.agents_row_hits[0].0;
-        assert_eq!(
-            app.click_agent_row(main_rect.x, main_rect.y),
-            Some(AgentTarget::Main)
-        );
+        use crate::sidebar::AgentTarget;
+        assert_eq!(app.sidebar_hits.len(), 5);
+        let focus = |app: &mut App, rect: ratatui::layout::Rect, dx| match app
+            .click_sidebar(rect.x + dx, rect.y)
+        {
+            Some(SidebarAction::Focus(target)) => Some(target),
+            other => panic!("{other:?}"),
+        };
+        let main_rect = app.sidebar_hits[0].0;
+        assert_eq!(focus(&mut app, main_rect, 0), Some(AgentTarget::Main));
         // Both lines of a row are the same click.
         for index in [1, 2] {
-            let rect = app.agents_row_hits[index].0;
+            let rect = app.sidebar_hits[index].0;
             assert_eq!(
-                app.click_agent_row(rect.x + 1, rect.y),
+                focus(&mut app, rect, 1),
                 Some(AgentTarget::Focus("child-a".into()))
             );
         }
-        let rect = app.agents_row_hits[3].0;
+        let rect = app.sidebar_hits[3].0;
         assert_eq!(
-            app.click_agent_row(rect.x, rect.y),
+            focus(&mut app, rect, 0),
             Some(AgentTarget::Focus("child-b".into()))
         );
-        assert_eq!(app.click_agent_row(0, 0), None);
+        assert_eq!(app.click_sidebar(0, 0), None);
 
         // No panel, no map: the rects die with the roster.
         app.agents_view.clear();
         terminal.draw(|frame| app.render(frame)).unwrap();
-        assert!(app.agents_row_hits.is_empty());
+        assert!(app.sidebar_hits.is_empty());
     }
 
     fn focus_activity(
@@ -5513,7 +5595,7 @@ mod tests {
         assert!(!focused.contains("root prose"), "{focused}");
         // The map stays on screen: main is still a click away.
         assert!(focused.contains("● main"), "{focused}");
-        assert!(!app.agents_row_hits.is_empty());
+        assert!(!app.sidebar_hits.is_empty());
 
         app.focus.as_mut().unwrap().running = false;
         let finished = screen(&mut app);

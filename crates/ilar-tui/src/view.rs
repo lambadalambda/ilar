@@ -26,9 +26,9 @@ use crate::modals::{
 };
 use crate::selection::{highlight_transcript_selection, selected_rows_unchanged, transcript_cells};
 use crate::sidebar::{
-    AgentPanel, ServicePanel, agent_panel, carve_panel, carve_panel_capped, content_areas,
-    disclosure_hit, render_todo_sidebar_snapshot, service_panel, todo_render_snapshot,
-    todo_summary, underline_row,
+    AgentPanel, ServicePanel, SidebarAction, agent_panel, carve_panel, carve_panel_capped,
+    content_areas, lay_out_hits, render_todo_sidebar_snapshot, service_panel, todo_render_snapshot,
+    todo_summary,
 };
 use crate::text::{
     Truncation, abbreviated_path, context_meter, context_usage, format_bytes, format_cost,
@@ -58,7 +58,7 @@ impl App {
     /// events by the same rule). Every hover underline outside a modal
     /// derives from this so the affordance cannot promise a click a
     /// modal would eat — or hide one it would not.
-    fn mouse_reaches_content(&self) -> bool {
+    pub(crate) fn mouse_reaches_content(&self) -> bool {
         matches!(self.active_modal(), None | Some(Modal::Search))
     }
 
@@ -587,9 +587,7 @@ impl App {
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         // Refreshed below only if their panels actually draw; a stale
         // rect would take phantom clicks.
-        self.services_exited_hit = None;
-        self.agents_more_hit = None;
-        self.agents_row_hits.clear();
+        self.sidebar_hits.clear();
         let input_width = frame.area().width.saturating_sub(2);
         let desired_input_height = self
             .input
@@ -919,34 +917,26 @@ impl App {
                     cap.saturating_sub(2) as usize,
                 );
                 if let Some(agent_area) = carve_panel_capped(&mut todo_area, lines.len(), cap) {
-                    if let Some((index, rect)) = more_toggle
-                        .and_then(|index| Some((index, disclosure_hit(agent_area, index)?)))
-                    {
-                        self.agents_more_hit = Some(rect);
-                        if self.mouse_reaches_content()
-                            && self.hover_screen.is_some_and(|(column, hover_row)| {
-                                rect.contains(ratatui::layout::Position::new(column, hover_row))
-                            })
-                        {
-                            underline_row(&mut lines[index]);
-                        }
-                    }
                     // Each drawn row line becomes a screen rect the
                     // dispatcher can hit — the navigation surface the
-                    // focus view opens from.
-                    for (index, target) in row_hits {
-                        let Some(rect) = disclosure_hit(agent_area, index) else {
-                            continue;
-                        };
-                        if self.mouse_reaches_content()
-                            && self.hover_screen.is_some_and(|(column, hover_row)| {
-                                rect.contains(ratatui::layout::Position::new(column, hover_row))
-                            })
-                        {
-                            underline_row(&mut lines[index]);
-                        }
-                        self.agents_row_hits.push((rect, target));
-                    }
+                    // focus view opens from. An agent is two of them
+                    // and one target, so the hover lights both.
+                    let entries = more_toggle
+                        .map(|index| (index, SidebarAction::ToggleAgents))
+                        .into_iter()
+                        .chain(
+                            row_hits
+                                .into_iter()
+                                .map(|(index, target)| (index, SidebarAction::Focus(target))),
+                        )
+                        .collect();
+                    lay_out_hits(
+                        agent_area,
+                        &mut lines,
+                        entries,
+                        self.sidebar_hover(),
+                        &mut self.sidebar_hits,
+                    );
                     let agent_block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
@@ -976,18 +966,16 @@ impl App {
                 if let Some(service_area) = carve_panel(&mut todo_area, lines.len()) {
                     // The disclosure line's screen row, for the mouse —
                     // and the hover underline, like every clickable.
-                    if let Some((index, rect)) = exited_toggle
-                        .and_then(|index| Some((index, disclosure_hit(service_area, index)?)))
-                    {
-                        self.services_exited_hit = Some(rect);
-                        if self.mouse_reaches_content()
-                            && self.hover_screen.is_some_and(|(column, hover_row)| {
-                                rect.contains(ratatui::layout::Position::new(column, hover_row))
-                            })
-                        {
-                            underline_row(&mut lines[index]);
-                        }
-                    }
+                    lay_out_hits(
+                        service_area,
+                        &mut lines,
+                        exited_toggle
+                            .map(|index| (index, SidebarAction::ToggleExitedServices))
+                            .into_iter()
+                            .collect(),
+                        self.sidebar_hover(),
+                        &mut self.sidebar_hits,
+                    );
                     let service_block = Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)

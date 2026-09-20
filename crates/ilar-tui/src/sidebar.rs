@@ -127,6 +127,20 @@ pub(crate) struct AgentPanel {
     pub(crate) row_hits: Vec<(usize, AgentTarget)>,
 }
 
+/// What a click on the sidebar means. Three surfaces used to carry
+/// their own App field, hover block, click method and per-frame reset;
+/// naming the actions instead leaves one hit map, one hover pass and
+/// one dispatch, and makes the next clickable row nearly free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SidebarAction {
+    /// Show or hide the agents the panel is holding back.
+    ToggleAgents,
+    /// Show or hide the services that have stopped.
+    ToggleExitedServices,
+    /// Open that agent's transcript over the screen.
+    Focus(AgentTarget),
+}
+
 /// The running-agents panel: the places you can go, led by "main" —
 /// the root session — then what was delegated, to whom, and for how
 /// long, indented under the agent that delegated it. Two lines each —
@@ -323,10 +337,37 @@ pub(crate) fn disclosure_hit(panel: Rect, index: usize) -> Option<Rect> {
         .then(|| Rect::new(panel.x + 1, row, panel.width.saturating_sub(2), 1))
 }
 
-/// Mark a row as the clickable the pointer is over.
-pub(crate) fn underline_row(line: &mut Line<'static>) {
-    for span in &mut line.spans {
-        span.style = span.style.add_modifier(Modifier::UNDERLINED);
+/// Lay out one panel's hit map and underline whatever the pointer is
+/// over — every line of it.
+///
+/// An agent is two lines and one click target, and only the line under
+/// the pointer used to underline, so half a clickable lit up. The
+/// markers and the indent stay bare, as the transcript's hover does:
+/// the two surfaces disagreed about what clickable looks like.
+pub(crate) fn lay_out_hits(
+    panel: Rect,
+    lines: &mut [Line<'static>],
+    entries: Vec<(usize, SidebarAction)>,
+    hover: Option<(u16, u16)>,
+    hits: &mut Vec<(Rect, SidebarAction)>,
+) {
+    let placed: Vec<(usize, Rect, SidebarAction)> = entries
+        .into_iter()
+        .filter_map(|(index, action)| Some((index, disclosure_hit(panel, index)?, action)))
+        .collect();
+    let hovered = hover.and_then(|(column, row)| {
+        placed
+            .iter()
+            .find(|(_, rect, _)| rect.contains(ratatui::layout::Position::new(column, row)))
+            .map(|(_, _, action)| action.clone())
+    });
+    for (index, rect, action) in placed {
+        if hovered.as_ref() == Some(&action)
+            && let Some(line) = lines.get_mut(index)
+        {
+            crate::transcript::underline_content_spans(line);
+        }
+        hits.push((rect, action));
     }
 }
 
