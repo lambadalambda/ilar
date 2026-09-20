@@ -780,7 +780,12 @@ impl SessionStore {
     /// session, no user message, no mail waiting for it. Whether it has
     /// children takes a directory scan, so the callers add that — once
     /// per id here, once for the whole sweep there.
-    fn is_unspoken_root(&self, id: &str, outbox_dir: &Path) -> bool {
+    ///
+    /// Public because whether a session is the disposable kind is a
+    /// premise other code rests on: `ilar exec` withholds a session's
+    /// id until the turn starts precisely because an unstarted one is
+    /// removed on the way out.
+    pub fn is_unspoken_root(&self, id: &str, outbox_dir: &Path) -> bool {
         let Ok(parsed) = SessionId::parse(id) else {
             return false;
         };

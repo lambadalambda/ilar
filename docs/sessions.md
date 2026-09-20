@@ -262,11 +262,21 @@ failed. The `question` tool is not attached, since nobody is there to
 answer; a model that asks is told so immediately. Background tasks and
 services do not outlive the process.
 
-Every run names its session before the turn starts — `session <id>` on
-stderr, or `{"type":"session","id":"…"}` under `--json`, ahead of the
-notices below and of every other event, so `--json | head -1` finds it
-— and a script can hand it to the next run's `--session`, or to
-`ilar --view <id>`, even if the run is killed halfway. A tool row on
+Every run names its session as the turn starts — `session <id>` on
+stderr, or `{"type":"session","id":"…"}` under `--json`, ahead of every
+event the turn publishes. Reach for it with
+`jq -r 'select(.type=="session").id'` rather than `head -1`: a notice
+may come first. A script can hand the id to the next run's `--session`,
+or to `ilar --view <id>`, and it stays valid even if the run is killed
+halfway.
+
+The id is deliberately not printed any earlier. A turn resolves its
+provider before it writes anything, so a run that fails there — a key
+that is not set, a model nothing can route — leaves a session with
+nothing in it, and an empty session goes with the run that made it.
+Printing the id first would have advertised one that the same run then
+deleted. A run that never gets that far names no session and has no
+work to point at. A tool row on
 stderr carries what the call was about (`· read src/main.rs`), clipped
 to a line and with secrets redacted where the summary can tell. A turn
 that stops short of an answer says so under the answer and names the

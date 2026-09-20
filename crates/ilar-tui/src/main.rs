@@ -1236,7 +1236,8 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
     runtime.services.stop_all();
     // A turn that never reached the provider — a bad key, a refused
     // model — leaves a session with nothing in it. It goes with the
-    // run that made it.
+    // run that made it, and exec never printed its id: the id is
+    // published on the turn's first event, which the append precedes.
     ilar::runtime::end_session(config, &runtime.store, &runtime.session_id);
 
     if let Err(error) = &outcome {
