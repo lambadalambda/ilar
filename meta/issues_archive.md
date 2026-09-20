@@ -444,3 +444,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A tool summary redacts only its generic path](issues/a-tool-summary-redacts-only-its-generic-path.md) — every arm's free text goes through the one redaction policy, not just the fallthrough
 - [x] [exec names a session it then deletes](issues/exec-names-a-session-it-then-deletes.md) — the id is published on the turn's first event, which the user-message append precedes
 - [x] [Help catches up with the surfaces](issues/help-catches-up-with-the-surfaces.md) — the sidebar, the focus view, the watchdog and the pending manager's keys; six entries were being clipped at the overlay's real 43-column budget
+- [x] [One hit map for the sidebar](issues/one-hit-map-for-the-sidebar.md) — SidebarAction, one hover pass, one dispatch; three copies of the plumbing gone
+- [x] [Hover claims the whole row](issues/hover-claims-the-whole-row.md) — every line of the hovered target underlines, and the markers stay bare like the transcript's

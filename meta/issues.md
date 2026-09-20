@@ -75,13 +75,11 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [The focus view earns its chrome](issues/the-focus-view-earns-its-chrome.md)
 - [ ] [The agents panel reaches its tail](issues/the-agents-panel-reaches-its-tail.md)
-- [ ] [Hover claims the whole row](issues/hover-claims-the-whole-row.md)
 
 ## Milestone 17 — Sweep: structure
 
 - [ ] [One fold for live and restored](issues/one-fold-for-live-and-restored.md)
 - [ ] [One delivery engine](issues/one-delivery-engine.md) — *core engine landed; the serve-side fold is parked with serve*
-- [ ] [One hit map for the sidebar](issues/one-hit-map-for-the-sidebar.md)
 - [ ] [The loop top joins the spine](issues/the-loop-top-joins-the-spine.md)
 - [ ] [The big files find their seams](issues/the-big-files-find-their-seams.md)
 - [ ] [Engines retire when idle](issues/engines-retire-when-idle.md)
