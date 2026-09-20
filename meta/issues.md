@@ -73,7 +73,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 16 — Sweep: texture
 
-- [ ] [The focus view earns its chrome](issues/the-focus-view-earns-its-chrome.md)
 - [ ] [The agents panel reaches its tail](issues/the-agents-panel-reaches-its-tail.md)
 
 ## Milestone 17 — Sweep: structure

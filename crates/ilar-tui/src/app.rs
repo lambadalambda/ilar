@@ -5125,6 +5125,74 @@ mod tests {
             .map(|(rect, _)| *rect)
     }
 
+    /// The surface built for watching an agent work said nothing about
+    /// whether it was working: no activity row, no scrollbar, and no
+    /// tail-or-percent fragment, so a stalled child and a view scrolled
+    /// up looked identical.
+    #[test]
+    fn a_focus_view_says_where_it_is_and_whether_its_agent_is_moving() {
+        let screen = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|column| buffer[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut app = App::new();
+        app.focus = Some(FocusView::new(
+            "child-a".into(),
+            "explore · survey the API".into(),
+            (0..80)
+                .map(|n| Line_::System(format!("line {n}")))
+                .collect(),
+            true,
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        // Following the tail of a timeline taller than the view.
+        let drawn = screen(&terminal);
+        assert!(drawn.contains("· tail"), "{drawn}");
+        // The scrollbar's track, which nothing else on this screen
+        // draws — `┃` is also the input box's own border.
+        assert!(drawn.contains('│'), "no scrollbar: {drawn}");
+        // The agent is running, so the view says so the way the root
+        // transcript does — and stops when the agent does.
+        assert!(drawn.contains("thinking"), "no activity row: {drawn}");
+
+        // Scrolled up: a percentage rather than the tail.
+        app.focus.as_mut().unwrap().follow_tail = false;
+        app.focus.as_mut().unwrap().scroll_top = 10;
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let scrolled = screen(&terminal);
+        assert!(!scrolled.contains("· tail"), "{scrolled}");
+        assert!(scrolled.contains('%'), "{scrolled}");
+
+        // A timeline that fits has nowhere to go, and says nothing.
+        app.focus = Some(FocusView::new(
+            "child-a".into(),
+            "explore · survey the API".into(),
+            vec![Line_::System("one line".into())],
+            false,
+        ));
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let short = screen(&terminal);
+        assert!(!short.contains("· tail"), "{short}");
+        assert!(
+            !short.contains('│'),
+            "a scrollbar with nothing to scroll: {short}"
+        );
+        assert!(
+            !short.contains("thinking"),
+            "a finished agent was reported as working: {short}"
+        );
+    }
+
     /// An agent is two lines and one click target, so hovering either
     /// lights both — half a clickable underlining said the other half
     /// was something else. The markers and the indent stay bare, as

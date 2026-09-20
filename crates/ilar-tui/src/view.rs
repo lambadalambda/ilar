@@ -546,11 +546,47 @@ impl App {
             (true, true) => " ↑↓ scroll · Enter messages it · ^G cancel ×2 · Esc close ",
             (true, false) => " agent finished · ↑↓ scroll · Enter resumes it · Esc close ",
         };
+        // The title says where in the timeline this is, so the rows
+        // have to be laid out before the frame is drawn: the row count
+        // is what `max_scroll` reads, and taking it from the previous
+        // frame meant the first one said nothing and every one after
+        // said where the view had been. A bordered rect's inside is
+        // one cell in on each side — `Block::inner`, done by hand
+        // because the block cannot be drawn yet.
+        let inner_width = area.width.saturating_sub(2);
+        let inner_height = area.height.saturating_sub(2);
+        focus.cache.update(
+            &focus.lines,
+            &std::collections::HashSet::new(),
+            focus.revision,
+            inner_width,
+            std::time::Instant::now(),
+            focus.opened,
+        );
+        focus.content_rows = focus.cache.row_count();
+        // The activity row takes a line of the viewport, not a line
+        // past it: appended after the visible rows were trimmed, it
+        // was clipped and the view said nothing after all.
+        let activity_row = u16::from(focus.running);
+        focus.viewport_rows = inner_height.saturating_sub(activity_row) as usize;
+        let max_scroll = focus.max_scroll();
+        if focus.follow_tail {
+            focus.scroll_top = max_scroll;
+        } else {
+            focus.scroll_top = focus.scroll_top.min(max_scroll);
+        }
+        let scroll_label = if max_scroll == 0 {
+            String::new()
+        } else if focus.follow_tail {
+            " · tail".to_string()
+        } else {
+            format!(" · {}%", focus.scroll_top.saturating_mul(100) / max_scroll)
+        };
         let title = format!(
-            " {} ",
+            " {}{scroll_label} ",
             truncate_display(
                 &focus.title,
-                (area.width as usize).saturating_sub(4),
+                (area.width as usize).saturating_sub(4 + scroll_label.len()),
                 Truncation::Right
             )
         );
@@ -558,30 +594,49 @@ impl App {
         else {
             return;
         };
-        // Same cache machinery as the main transcript, owned by the
-        // view: rows arrive wrapped to the inner width. No expanded
-        // groups — expansion clicks stay with the root transcript.
-        focus.cache.update(
-            &focus.lines,
-            &std::collections::HashSet::new(),
-            focus.revision,
-            inner.width,
-            std::time::Instant::now(),
-            focus.opened,
-        );
-        focus.content_rows = focus.cache.row_count();
-        focus.viewport_rows = inner.height as usize;
-        let max_scroll = focus.max_scroll();
-        if focus.follow_tail {
-            focus.scroll_top = max_scroll;
-        } else {
-            focus.scroll_top = focus.scroll_top.min(max_scroll);
-        }
+        // Laid out above, against the same width this rect has: the
+        // cache machinery is the main transcript's, owned by the view.
+        // No expanded groups — expansion clicks stay with the root.
+        debug_assert_eq!(inner.width, inner_width);
         let rows = focus
             .cache
             .visible_rows(focus.scroll_top, focus.viewport_rows, &[]);
-        let lines = rows.into_iter().map(|row| row.line).collect::<Vec<_>>();
+        let mut lines = rows.into_iter().map(|row| row.line).collect::<Vec<_>>();
+        // A stalled child and a quiet one looked the same on the
+        // surface built for watching them work. The same row the root
+        // transcript ends with, from the same function.
+        if focus.running
+            && let Some(activity) = activity_line(
+                true,
+                Activity::Thinking,
+                std::time::Instant::now(),
+                focus.opened,
+                None,
+            )
+        {
+            lines.push(activity);
+        }
         frame.render_widget(Paragraph::new(lines), inner);
+
+        // And the scrollbar, on the same terms as the transcript's: a
+        // view with nothing above or below it gets none.
+        if max_scroll > 0 && area.height > 2 {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .thumb_symbol("┃");
+            let mut state = ScrollbarState::new(max_scroll.saturating_add(1))
+                .position(focus.scroll_top)
+                .viewport_content_length(focus.viewport_rows);
+            let bar = Rect::new(
+                area.right().saturating_sub(2),
+                area.y.saturating_add(1),
+                1,
+                area.height.saturating_sub(2),
+            );
+            frame.render_stateful_widget(scrollbar, bar, &mut state);
+        }
     }
 
     pub(crate) fn render(&mut self, frame: &mut Frame) {
