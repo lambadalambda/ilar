@@ -588,7 +588,14 @@ pub(crate) fn ghost_step(state: &LoopState, key: crossterm::event::KeyEvent) -> 
     match key.code {
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => GhostStep::Keep,
         KeyCode::Enter if state.input_blank => GhostStep::Resume,
-        KeyCode::Enter => GhostStep::Dismiss,
+        // Enter with a draft sends it, and *sending* is what answers
+        // the offer — a refused send leaves the draft in the prompt
+        // and has to leave the offer with it, since nothing brings a
+        // dismissed one back. The submit site decides. A character
+        // that reaches the prompt has already dismissed the offer, so
+        // this only covers a draft that arrived another way: a popped
+        // stash, or a prefill carried in from the session before.
+        KeyCode::Enter => GhostStep::Keep,
         KeyCode::Esc if state.input_blank => GhostStep::Dismiss,
         // A character typed is the choice made — and only a character
         // that reaches the prompt, so Ctrl-P and every other chord
@@ -1445,8 +1452,9 @@ mod tests {
         );
         assert_eq!(
             ghost_step(&drafting, press(KeyCode::Enter)),
-            GhostStep::Dismiss,
-            "a message sent goes to the fresh session, and the offer is answered"
+            GhostStep::Keep,
+            "the send answers the offer, not the keypress: a refused \
+             submit keeps its draft and must keep the offer too"
         );
         assert_eq!(ghost_step(&idle(), press(KeyCode::Esc)), GhostStep::Dismiss);
         assert_eq!(

@@ -5357,6 +5357,12 @@ async fn run_app(
                             // wait for the turn to end.
                             if decide::refused(&decided) {
                                 app.input = InputBuffer::from(text.as_str());
+                            } else if app.ghost.is_some() {
+                                // The send happened, so the offer is
+                                // answered. Dismissing on the keypress
+                                // instead took the offer along with a
+                                // refusal, and nothing brings it back.
+                                app.dismiss_ghost();
                             }
                             apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
                         }

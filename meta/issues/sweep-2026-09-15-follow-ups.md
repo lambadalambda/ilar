@@ -93,6 +93,13 @@ reasoning step, which no signal here can tell from a hang. The marker
 is a threshold, and picking a new number is a judgement call rather
 than a defect to fix.
 
+Stream O, 2026-09-20: Enter dismissed the offer on the keypress, so a
+submit that was then refused took the offer with it and nothing brings
+one back. The send answers it now, at the site that knows whether the
+send happened. Only reachable with a draft that arrived without
+typing — a popped stash or a carried prefill — because a typed
+character or a paste dismisses the offer on the spot.
+
 Gateway:
 - `/abort` a second before shutdown gets the restart wording
   (`aborted_reply` reads the cancel flag at delivery time).
