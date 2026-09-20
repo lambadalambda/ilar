@@ -15,7 +15,7 @@ pub use agents_md::{
 pub(crate) use frontmatter::parse as parse_frontmatter;
 pub use toml::{
     CacheCompactConfig, CompactionConfig, Config, Dirs, Loader, ProviderConfig, SubagentConfig,
-    ThemePersistOutcome, load, persist_general_theme,
+    ThemePersistOutcome, load, persist_general_theme, provider_key_variables,
 };
 pub(crate) use toml::{credential_sources, markdown_files};
 

@@ -241,24 +241,55 @@ struct ExecArgs {
 /// What a fresh box needs and `--help` never said: where configuration
 /// and state live, and which variable carries which provider's key.
 /// Printed under the flags so the first `ilar --help` names a next step.
-const AFTER_HELP: &str = "\
+/// The CLI's closing help. The provider keys come from the same table
+/// the refusals read, rather than a second list beside it: adding a
+/// provider used to mean remembering two places, and the one nobody
+/// remembered was this one.
+fn after_help() -> &'static str {
+    // Grouped by variable: two providers share one key, and a line
+    // each listed the same variable twice.
+    let mut grouped: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+    for (name, variable) in ilar::config::provider_key_variables() {
+        match grouped.iter_mut().find(|(seen, _)| *seen == variable) {
+            Some((_, names)) => names.push(name),
+            None => grouped.push((variable, vec![name])),
+        }
+    }
+    let keys = grouped
+        .into_iter()
+        .map(|(variable, names)| {
+            let served = names
+                .into_iter()
+                .map(|name| format!("{name}/<model>"))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            format!("  {variable:<24}{served}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Box::leak(
+        format!(
+            "\
 Configuration:
   ILAR_CONFIG_DIR   config directory (default ~/.config/ilar); ilar.toml lives here
   ILAR_STATE_DIR    sessions, secret store, auth tokens (default ~/.local/state/ilar)
 
 Provider keys (or providers.<name>.api_key in ilar.toml, or `ilar secret set`):
-  ILAR_ZAI_API_KEY        zai/<model>, the default general.model
-  ILAR_OPENAI_API_KEY     openai/<model>; or `ilar login` for a ChatGPT account
-  ILAR_OPENCODE_API_KEY   opencode/<model> and opencode-go/<model>
+{keys}
+  (zai is the default general.model; `ilar login` signs in a ChatGPT account)
 
-See docs/configuration.md; `ilar --print-prompt` shows what the model gets.";
+See docs/configuration.md; `ilar --print-prompt` shows what the model gets."
+        )
+        .into_boxed_str(),
+    )
+}
 
 #[derive(Parser, Debug)]
 #[command(
     name = "ilar",
     version,
     about = "Personal coding agent",
-    after_help = AFTER_HELP
+    after_help = after_help()
 )]
 struct Args {
     #[command(subcommand)]

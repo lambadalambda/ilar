@@ -80,6 +80,19 @@ its agent — saying nothing twice, and now nothing at all. And
 docs/interface.md no longer opens with "Press F1 any time", which a
 grant prompt and a question both outrank.
 
+Structure, 2026-09-20: `AFTER_HELP` listed the provider key variables
+by hand beside `credential_sources`, which reads them from the
+provider table — so adding a provider meant remembering two places and
+the one nobody remembered was the help. It is generated from that
+table now, grouped by variable because two providers share one.
+
+Struck rather than done: the `· quiet 45s` marker against a heartbeat
+touched by loop events. The heartbeat already *is* touched by every
+event; what is left is a provider that emits none at all during a long
+reasoning step, which no signal here can tell from a hang. The marker
+is a threshold, and picking a new number is a judgement call rather
+than a defect to fix.
+
 Gateway:
 - `/abort` a second before shutdown gets the restart wording
   (`aborted_reply` reads the cancel flag at delivery time).

@@ -81,7 +81,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 - [ ] [One delivery engine](issues/one-delivery-engine.md) — *core engine landed; the serve-side fold is parked with serve*
 - [ ] [The loop top joins the spine](issues/the-loop-top-joins-the-spine.md)
 - [ ] [The big files find their seams](issues/the-big-files-find-their-seams.md)
-- [ ] [Engines retire when idle](issues/engines-retire-when-idle.md)
+- [ ] [Engines retire when idle](issues/engines-retire-when-idle.md) — *parked with serve*
 - [ ] [Serve folds once and caches](issues/serve-folds-once-and-caches.md) — *parked with serve*
 
 ## Milestone 18 — Sweep: responsiveness & memory

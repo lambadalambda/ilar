@@ -1290,6 +1290,17 @@ fn available_models_in(
 /// to tell someone which one a server refused. The candidates, not the
 /// one that won: a resolved key is a secret, and its provenance is not
 /// carried down to the wire alongside it.
+/// Every provider whose key can come from the environment, as
+/// `(name, variable)` in the order they are declared. The CLI's help
+/// listed these by hand next to a function that already knew them,
+/// so adding a provider meant remembering two places.
+pub fn provider_key_variables() -> Vec<(&'static str, &'static str)> {
+    PROVIDERS
+        .iter()
+        .map(|kind| (kind.name, kind.api_key_env))
+        .collect()
+}
+
 pub(crate) fn credential_sources(provider: &str) -> String {
     if provider == crate::model::CUSTOM_PROVIDER {
         return "the api_key of the [models.*] entry that serves it".to_string();
