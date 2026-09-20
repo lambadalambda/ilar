@@ -454,3 +454,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Two user messages arrive as one word](issues/two-user-messages-arrive-as-one-word.md)
 - [x] [A late arrival takes the resume offer](issues/a-late-arrival-takes-the-resume-offer.md)
 - [x] [A parked question pays before it fails](issues/a-parked-question-pays-before-it-fails.md)
+- [x] [UX sweep 2026-09-03](issues/ux-sweep-2026-09-03.md) — index; all ten subissues closed
