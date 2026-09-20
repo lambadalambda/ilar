@@ -855,7 +855,8 @@ static HELP_SECTIONS: &[HelpSection] = &[
                 "dismiss overlay · deny a grant · abort turn · clear input (a multi-line draft stashes)"
             ),
             binding!("Ctrl-D", "quit (blank input, nothing open)"),
-            binding!("Ctrl-Q", "pending manager: queue, goal, tasks, held, retry"),
+            binding!("Ctrl-Q", "pending manager: queue, goal, tasks, held, mail"),
+            binding!("d in that manager", "delete the highlighted item (twice)"),
             binding!("Ctrl-R", "resume a failed or aborted turn from its state"),
             binding!("Ctrl-V", "attach a clipboard image (vision models)"),
             binding!("Ctrl-S", "stash the draft · pops it back when blank"),
@@ -896,6 +897,21 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("F3", "switch theme"),
             binding!("Ctrl-X, M / T", "leader: models / themes"),
             binding!("↑↓ · Enter · Esc", "navigate · choose · dismiss"),
+            binding!("Ctrl-N / Ctrl-P", "down / up, in every list"),
+        ],
+    },
+    HelpSection {
+        title: "The sidebar",
+        bindings: &[
+            binding!("click an agent row", "its transcript over the screen"),
+            binding!("click +N more", "show the agents the panel is hiding"),
+            binding!("click N exited", "show the services that have stopped"),
+            binding!(
+                "a delivering row",
+                "a finished task on its way to another session"
+            ),
+            binding!("✉ … delivered to …", "it arrived; nothing is owed"),
+            binding!("", "a result nobody could take says held, and why"),
         ],
     },
     HelpSection {
@@ -905,7 +921,8 @@ static HELP_SECTIONS: &[HelpSection] = &[
                 "click an agents-panel row",
                 "its transcript over the screen"
             ),
-            binding!("↑↓ / PgUp / PgDn / Home / End", "scroll the view"),
+            binding!("↑↓ / PgUp / PgDn / wheel", "scroll the view"),
+            binding!("Home / End", "top / tail — the root needs Ctrl-Home/End"),
             binding!(
                 "Enter",
                 "message the agent on screen: steers it or resumes it"
@@ -913,6 +930,17 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("^G ×2", "cancel that one agent; its result is held"),
             binding!("Esc", "close the view; the root's keys work again"),
             binding!("", "the root's other chords are not routed here"),
+        ],
+    },
+    HelpSection {
+        title: "While a turn runs",
+        bindings: &[
+            binding!("", "type to steer it; the text reaches the model mid-turn"),
+            binding!(
+                "",
+                "a provider gone quiet warns at 5m and is aborted at 10m"
+            ),
+            binding!("Ctrl-R", "resume an aborted turn from where it stopped"),
         ],
     },
     HelpSection {
@@ -3772,6 +3800,49 @@ mod tests {
             "{}",
             rendered(nothing)
         );
+    }
+
+    /// The overlay is the only place most of these surfaces are
+    /// explained, and it had stopped at milestone 14: no sidebar
+    /// section, no wheel in a focus view, no `d` in the pending
+    /// manager, nothing about the watchdog that aborts a quiet turn.
+    #[test]
+    fn help_covers_the_surfaces_that_came_after_it() {
+        let text = help_lines(
+            80,
+            crate::input::TerminalKeys {
+                enhanced: true,
+                modified_enter: true,
+            },
+        )
+        .iter()
+        .map(rendered_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        for expected in [
+            // Clickable sidebar rows: `sidebar.rs` builds a hit for each.
+            "click +N more",
+            "click N exited",
+            // What a person actually asked about: the roster row and
+            // the transcript receipt that follows it.
+            "delivering",
+            "delivered to",
+            // Lists take Ctrl-N/Ctrl-P through `nav_delta`.
+            "Ctrl-N / Ctrl-P",
+            // The pending manager's own key, and what Ctrl-Q holds.
+            "d in that manager",
+            // The wheel reaches a focus view: `App::scroll_wheel`
+            // hands it to `focus` before the transcript.
+            "wheel",
+            // The watchdog: ROOT_STALL_WARN_AFTER / _ABORT_AFTER.
+            "warns at 5m",
+        ] {
+            assert!(text.contains(expected), "help never mentions {expected}");
+        }
+        // Ctrl-Q's summary used to end at "retry" and omit the thing a
+        // person opens it for after a subagent finishes.
+        assert!(text.contains("held, mail"), "{text}");
     }
 
     #[test]
