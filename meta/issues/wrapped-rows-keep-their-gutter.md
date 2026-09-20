@@ -83,3 +83,24 @@ Left, with why — both are larger than "cosmetic" reads:
   recorded — the turn ended before the tool returned".
 - **The compaction summary as an expandable note** is unchanged and is
   the one genuinely worth taking next.
+
+## Progress (2026-09-20, later)
+
+The `you` label is done after all. It needed a `Line_` variant, which
+is what I had called too big — and it was three sites, not the
+thirty-one I counted: most matches over `Line_::User` are patterns
+with a rest, and the two that render it now share one function with a
+speaker label as a parameter. `Line_::Incoming` is what a subagent
+timeline shows for its parent's `task_message`, labelled `from` and
+coloured as delegation rather than as the person.
+
+Note which way the label goes: it belongs to the *timeline*, not to
+the event. The same log read as a session in its own right — `--view`
+on a child — is still a transcript of user messages, and the test
+pins both readings.
+
+Left: the compaction summary as an expandable note, and `done`
+flipping to `×` a frame later. The second still wants a fourth
+`ToolState` across 85 match arms, because keeping a `Complete` row as
+`Complete` would leave it counted as active and re-rendering for the
+rest of the session.

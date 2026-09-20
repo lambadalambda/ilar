@@ -507,9 +507,19 @@ fn restored_session_invocation_view(
                             text,
                             expanded: false,
                         }),
-                        None => lines.push(Line_::User(crate::transcript::user_text_with_images(
-                            text, images,
-                        ))),
+                        // Inside a subagent's timeline a user message
+                        // is the parent's `task_message`, not anything
+                        // the person typed — labelling it `you` there
+                        // claimed they had written something they
+                        // never saw.
+                        None => {
+                            let said = crate::transcript::user_text_with_images(text, images);
+                            lines.push(if nested {
+                                Line_::Incoming(said)
+                            } else {
+                                Line_::User(said)
+                            });
+                        }
                     },
                 }
             }
@@ -1711,6 +1721,71 @@ mod tests {
         assert!(rendered.contains("child decisions retained"), "{rendered}");
         assert!(rendered.contains("child current history"), "{rendered}");
         assert!(!rendered.contains("child obsolete history"), "{rendered}");
+    }
+
+    /// Inside a subagent's timeline a user message is the parent's
+    /// `task_message`, not anything the person typed. Labelling it
+    /// `you` there claimed they had written something they never saw.
+    #[test]
+    fn a_parents_message_in_a_child_timeline_is_not_labelled_you() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(directory.path().join("sessions"));
+        let child_id = new_id();
+        let mut child = store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(new_id()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::SubagentInvocation {
+                id: new_id(),
+                parent_tool_call_id: "task-1".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        child
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "also check the picker".into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(child);
+
+        let reader = store.load(&child_id).unwrap();
+        // The child's own timeline: the message came from whoever
+        // delegated the work.
+        let nested = restored_session_invocation_view(
+            reader.events(),
+            None,
+            Some("task-1"),
+            Liveness::Settled,
+        );
+        assert!(
+            nested.lines.iter().any(
+                |line| matches!(line, Line_::Incoming(text) if text == "also check the picker")
+            ),
+            "{:?}",
+            nested.lines
+        );
+
+        // The same log read as a session in its own right is the
+        // person's: `--view` on a child is still a transcript, and the
+        // label belongs to the timeline, not to the event.
+        let root = restored_session_invocation_view(reader.events(), None, None, Liveness::Settled);
+        assert!(
+            root.lines
+                .iter()
+                .any(|line| matches!(line, Line_::User(text) if text == "also check the picker")),
+            "{:?}",
+            root.lines
+        );
     }
 
     /// The live rule from fc625c6, on the restore path: a call that has

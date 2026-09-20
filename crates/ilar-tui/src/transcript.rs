@@ -61,6 +61,11 @@ pub(crate) enum Line_ {
         child_running: bool,
         child_session_id: Option<String>,
     },
+    /// A message the *parent* sent into a subagent's session — a
+    /// `task_message` call, replayed. It is a user message on the
+    /// wire, and labelling it `you` inside a child's timeline claimed
+    /// the person had typed something they never saw.
+    Incoming(String),
     System(String),
 }
 
@@ -666,6 +671,29 @@ pub(crate) fn pending_summary(message: &ilar::agent::Steer) -> String {
         1 => format!("{text} · 1 image"),
         count => format!("{text} · {count} images"),
     }
+}
+
+/// A message row: the speaker's label on the first line, blank space
+/// of the same width under it, and the words beside both.
+fn speaker_lines(
+    text: &str,
+    label: &'static str,
+    colour: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    let blank = " ".repeat(label.len());
+    safe_lines(text)
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| {
+            Line::from(vec![
+                Span::styled(
+                    if index == 0 { label } else { blank.as_str() }.to_string(),
+                    theme::title(colour),
+                ),
+                Span::styled(text, Style::default().fg(theme::PRIMARY)),
+            ])
+        })
+        .collect()
 }
 
 /// The hover affordance: underline what a click on this row would
@@ -2360,19 +2388,10 @@ pub(crate) fn transcript_entry_lines(
             }
             output
         }
-        Line_::User(text) => safe_lines(text)
-            .into_iter()
-            .enumerate()
-            .map(|(index, text)| {
-                Line::from(vec![
-                    Span::styled(
-                        if index == 0 { "you  " } else { "     " },
-                        theme::title(theme::USER),
-                    ),
-                    Span::styled(text, Style::default().fg(theme::PRIMARY)),
-                ])
-            })
-            .collect(),
+        Line_::User(text) => speaker_lines(text, "you  ", theme::USER),
+        // The same shape, a different speaker: this one came from the
+        // agent that delegated the work.
+        Line_::Incoming(text) => speaker_lines(text, "from ", theme::REASONING),
         Line_::Task { text, expanded, .. } => {
             notification_lines(text, *expanded, "task ", theme::REASONING, width)
         }
@@ -2446,6 +2465,11 @@ fn append_markdown(output: &mut String, lines: &[Line_]) {
         match line {
             Line_::User(text) => {
                 output.push_str("\n## You\n\n");
+                output.push_str(text);
+                output.push('\n');
+            }
+            Line_::Incoming(text) => {
+                output.push_str("\n## From the parent\n\n");
                 output.push_str(text);
                 output.push('\n');
             }

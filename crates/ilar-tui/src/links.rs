@@ -46,7 +46,10 @@ pub(crate) fn collect_links(lines: &[Line_]) -> Vec<LinkEntry> {
 
 fn collect_from_line(line: &Line_, out: &mut Vec<LinkEntry>) {
     match line {
-        Line_::User(text) | Line_::Assistant(text) | Line_::System(text) => {
+        Line_::User(text)
+        | Line_::Incoming(text)
+        | Line_::Assistant(text)
+        | Line_::System(text) => {
             links_in(text, out);
         }
         Line_::Task { text, .. } | Line_::Job { text, .. } | Line_::Thought { text, .. } => {
