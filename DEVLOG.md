@@ -1,5 +1,45 @@
 # DEVLOG
 
+## 2026-09-20 — Three things a review found, fixed
+
+The salvage review turned up three defects outside the change it was
+reviewing. All three are now closed.
+
+**`append` can no longer write a log that will not load.** This was
+the one worth the alarm. `validate_replay` runs on every open, reader
+and writer alike, and rejects a whole file for an ordinary event
+written between a tool call and its result. `Session::append` checked
+nothing, so a caller in that state wrote the file, got `Ok`, and
+bricked the session — silently, until someone next opened it.
+
+Three callers guarded it by hand, in three different words, and a
+fourth would have got it wrong. The invariant belongs to `append`, so
+it lives there: a backwards scan over the tail, which is all the state
+is. Results answer calls, two event kinds the validator skips are
+skipped here too, and the assistant message that made the calls is
+where the walk stops. Anything else reached first was only legal with
+nothing outstanding, so nothing is.
+
+The salvage's own guard came back out. One place, not four.
+
+**Two user messages no longer arrive as one word.** Consecutive
+same-role events merge into a single message with two text blocks,
+which is what makes them safe on the wire. Both providers then
+concatenated the blocks with nothing between, so a task-notification
+envelope ran straight into the prompt after it:
+`…</task-notification>fix the bug`. The neighbouring arms in the same
+function already knew better — the image gap prepends a newline, and
+thinking a blank line "rather than glued into one word". The text arm
+does now too.
+
+**A task result no longer takes the resume offer.** `ends_mid_turn`
+read any trailing user message as the session having moved on. A task
+result is the one user message nobody typed: delivered it starts a
+turn, salvaged it starts none, and either way it did not end the turn
+it landed behind. An interrupted turn that a background result landed
+after silently stopped offering Ctrl-R on reopen, while the live offer
+was still on screen.
+
 ## 2026-09-20 — The salvage that was not saved
 
 A delivery that fails terminally salvages the child's final word into
