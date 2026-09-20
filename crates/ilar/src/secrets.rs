@@ -1467,6 +1467,21 @@ fn ilar_own_secret(name: &str) -> bool {
     (name.starts_with("ILAR_") && name.ends_with("_API_KEY")) || name == "ILAR_SERVE_TOKEN"
 }
 
+/// How a prompt names who is asking for a secret.
+///
+/// A secret a child of this session wants is not one the person asked
+/// for themselves, and with three agents running "(subagent)" alone
+/// does not say whose it is. Both frontends spelled this rule out —
+/// with the boolean the other way round, which is how two copies of a
+/// rule start to disagree.
+pub fn asker_label(tool: &str, from_subagent: bool, agent: Option<&str>) -> String {
+    match (from_subagent, agent) {
+        (true, Some(agent)) => format!("{tool} ({agent} subagent)"),
+        (true, None) => format!("{tool} (subagent)"),
+        (false, _) => tool.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2451,5 +2466,20 @@ mod tests {
             value: "/bi".into(),
         }];
         assert!(shielded_env_from([("PATH".to_string(), "/bi".to_string())], &short).is_empty());
+    }
+
+    /// One rule for both frontends. They each had a copy, with the
+    /// boolean the other way round — the TUI's `from_subagent` against
+    /// the gateway's `own_session` — which is the shape a rule is in
+    /// just before the two stop agreeing.
+    #[test]
+    fn a_prompt_names_whose_subagent_is_asking() {
+        assert_eq!(asker_label("bash", false, None), "bash");
+        assert_eq!(asker_label("bash", false, Some("explore")), "bash");
+        assert_eq!(asker_label("bash", true, None), "bash (subagent)");
+        assert_eq!(
+            asker_label("bash", true, Some("explore")),
+            "bash (explore subagent)"
+        );
     }
 }

@@ -104,11 +104,7 @@ impl GrantModal {
 
     /// Who is asking, for the title and the transcript line.
     fn asker(&self) -> String {
-        format!(
-            "{}{}",
-            self.tool,
-            subagent_mark(self.from_subagent, self.agent.as_deref())
-        )
+        ilar::secrets::asker_label(&self.tool, self.from_subagent, self.agent.as_deref())
     }
 
     /// The transcript's record of a prompt nobody is waiting on any
@@ -235,17 +231,6 @@ fn render_body_over(
         Paragraph::new(rows),
         Rect::new(inner.x, body.bottom(), inner.width, rows_height),
     );
-}
-
-/// What a prompt wears when the ask came from a child of this session:
-/// the person did not ask for that command themselves, and with three
-/// agents running "(subagent)" alone does not say whose it is.
-fn subagent_mark(from_subagent: bool, agent: Option<&str>) -> String {
-    match (from_subagent, agent) {
-        (true, Some(agent)) => format!(" ({agent} subagent)"),
-        (true, None) => " (subagent)".to_string(),
-        (false, _) => String::new(),
-    }
 }
 
 fn grant_word(grant: Grant) -> &'static str {
@@ -389,8 +374,8 @@ impl PasswordModal {
             Wants::Unlock { tool } => format!("secret store password — {tool} is waiting"),
         };
         format!(
-            " {what}{} ",
-            subagent_mark(self.from_subagent, self.agent.as_deref())
+            " {} ",
+            ilar::secrets::asker_label(&what, self.from_subagent, self.agent.as_deref())
         )
     }
 

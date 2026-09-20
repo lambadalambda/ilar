@@ -84,13 +84,9 @@ impl Asker {
     }
 
     fn named(tool: &str, own_session: bool, agent: Option<&str>) -> Self {
-        let shown = match (own_session, agent) {
-            (true, _) => tool.to_string(),
-            // Named where the name is known: several children can be
-            // working, and only one of them wants this secret.
-            (false, Some(agent)) => format!("{tool} ({agent} subagent)"),
-            (false, None) => format!("{tool} (subagent)"),
-        };
+        // One rule, in the core: this had its own copy here with the
+        // boolean the other way round.
+        let shown = ilar::secrets::asker_label(tool, !own_session, agent);
         Self {
             shown,
             tool: tool.to_string(),
