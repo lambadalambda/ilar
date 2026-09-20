@@ -1,5 +1,36 @@
 # DEVLOG
 
+## 2026-09-20 — The salvage that was not saved
+
+A delivery that fails terminally salvages the child's final word into
+the transcript, and retires the outbox entry on the spot so the next
+open does not re-announce and re-fail it forever. Both halves were
+right and together they lost the work: transcript lines are memory,
+the entry was gone, and quitting took the only copy.
+
+It goes into this session's log now, as the user message a delivered
+notification would have been — the salvage *is* the delivery of last
+resort, so it should look like one.
+
+What makes this worth writing down is what the review found. Appending
+a user message to a session parked on a question writes a log that
+**no later open can read**. `Session::append` validates nothing;
+`validate_replay`, which runs on every load, rejects an ordinary event
+between a tool call and its result — and a parked question is exactly
+one unanswered call, left that way on purpose. The append returns Ok.
+The session is bricked, silently, until someone tries to open it.
+
+I confirmed it rather than taking it on faith: append the assistant
+message with the question call, append the user message, load. *new
+event before tool calls received results.* Every time, for good.
+
+The salvage refuses to write in that state. The real defect is that
+`append` allows it at all — three callers now guard this by hand, each
+in its own words, and a fourth will get it wrong. That is its own
+issue, along with two more the same review turned up: adjacent user
+messages reach the model concatenated with no separator, and a task
+result landing after an interrupted turn takes its Ctrl-R offer away.
+
 ## 2026-09-20 — A tool that knows when it exists
 
 **The `secrets` tool was decided once and asked never again.** The

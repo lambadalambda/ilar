@@ -114,6 +114,17 @@ answer `is_published` for themselves now, and this one reads the store
 file per turn. `Config::provider_for` is gone; its eight test call
 sites ask `provider_result` directly.
 
+Also 2026-09-20: the TUI's Exhausted and Salvage salvage wrote only to
+the in-memory transcript while retiring the outbox entry on the spot,
+so a quit lost the child's last word for good. It goes into this
+session's log now, as the user message a delivered one would have
+been — except where the log will not take it, which the message says
+rather than glossing. The review of that change found three things
+outside it, now their own issues: an append that can write a log no
+later open can read, two consecutive user messages concatenated with
+no separator on the wire, and a late arrival that takes an interrupted
+turn's resume offer away.
+
 Struck rather than done: the TUI grant line saying "(always)" when the
 store write failed. The modal writes that line from the answer, and
 the write happens in the broker on the far side of a one-way channel —

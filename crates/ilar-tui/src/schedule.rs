@@ -83,6 +83,15 @@ pub(crate) trait Runtime {
     /// announce and re-attempt the same entry forever. Never called
     /// for transient (Requeue) outcomes: those hold and retry.
     fn retire_notification(&mut self, notification: &Notification);
+    /// Write a salvaged result into *this* session's log, the way a
+    /// delivered one would have been written into its own. The
+    /// transcript lines the salvage pushes live in memory, and the
+    /// outbox entry is retired the moment it is salvaged, so without
+    /// this the child's final word lasts until the session is closed
+    /// and no longer. Answers whether it landed: another writer holds
+    /// the lease while a turn runs, and the user is told which of the
+    /// two happened rather than promised the better one.
+    fn record_salvage(&mut self, notification: &Notification) -> bool;
     /// A notification for another session: spawn its delivery beside
     /// whatever else is running. It resumes a child, so it takes
     /// neither the turn slot nor the keyboard, and several may run.
@@ -434,10 +443,12 @@ fn routed_complete<R: Runtime>(
             // it ends where a terminal failure ends: in front of the
             // user, and retired so the next open does not start the
             // same climb.
+            let kept = runtime.record_salvage(&notification);
             let message = format!(
-                "a task result could not find a session to land in after \
-                 {} hops — its parent chain loops",
-                ilar::delivery::PROPAGATION_HOPS
+                "a task result could not find a session to land in after {} hops — its parent \
+                 chain loops{}",
+                ilar::delivery::PROPAGATION_HOPS,
+                in_memory_only(kept)
             );
             app.set_notice(&message, NoticeLevel::Error);
             app.push_transcript_line(Line_::System(message));
@@ -465,14 +476,21 @@ fn routed_complete<R: Runtime>(
             // it had already started appended the result, so replaying
             // it would deliver it twice. Say what happened, at the
             // level a cancel deserves.
+            let kept = runtime.record_salvage(&notification);
             let (message, level) = if cancelled {
                 (
-                    format!("the delivery of a task result to {target} was cancelled"),
+                    format!(
+                        "the delivery of a task result to {target} was cancelled{}",
+                        in_memory_only(kept)
+                    ),
                     NoticeLevel::Warning,
                 )
             } else {
                 (
-                    format!("a task result could not be delivered to {target}: {error}"),
+                    format!(
+                        "a task result could not be delivered to {target}: {error}{}",
+                        in_memory_only(kept)
+                    ),
                     NoticeLevel::Error,
                 )
             };
@@ -487,6 +505,18 @@ fn routed_complete<R: Runtime>(
             // re-attempt and re-fail it forever.
             runtime.retire_notification(&notification);
         }
+    }
+}
+
+/// What a salvage adds to its own message when the log would not take
+/// it — a running turn holds the writer, or the session is parked on a
+/// question. The text is in front of the user either way; only how long
+/// it lasts differs, and that is worth a clause rather than a line.
+fn in_memory_only(kept: bool) -> &'static str {
+    if kept {
+        ""
+    } else {
+        ". Its text is in this transcript only, and goes when the session closes"
     }
 }
 
@@ -590,6 +620,9 @@ mod tests {
         paused: bool,
         pending: VecDeque<Parcel>,
         log: Vec<String>,
+        /// Whether `record_salvage` gets the writer. False stands for a
+        /// turn holding it.
+        log_takes_salvage: bool,
     }
 
     impl FakeRuntime {
@@ -601,6 +634,7 @@ mod tests {
                 paused: false,
                 pending: VecDeque::new(),
                 log: Vec::new(),
+                log_takes_salvage: true,
             }
         }
 
@@ -664,6 +698,11 @@ mod tests {
 
         fn retire_notification(&mut self, notification: &Notification) {
             self.log.push(format!("retire:{}", notification.text));
+        }
+
+        fn record_salvage(&mut self, notification: &Notification) -> bool {
+            self.log.push(format!("record:{}", notification.text));
+            self.log_takes_salvage
         }
 
         fn route(&mut self, _app: &mut App, parcel: Parcel) {
@@ -1544,8 +1583,60 @@ mod tests {
         ));
         assert_eq!(
             runtime.log,
-            vec!["retire:the build is green"],
-            "the salvaged entry must be retired from the outbox"
+            vec!["record:the build is green", "retire:the build is green"],
+            "the salvaged text is written to the log before its entry is retired"
+        );
+    }
+
+    /// The salvage is the last copy of the child's work: the outbox
+    /// entry is retired on the spot, and transcript lines are not
+    /// persisted. It goes into this session's log, and when the log
+    /// will not take it — a turn holds the writer — the message says
+    /// so rather than implying the text is safe.
+    #[test]
+    fn a_salvaged_result_is_written_to_the_log_or_says_it_was_not() {
+        let notification = || Notification {
+            parent_session_id: "child".into(),
+            description: "builder task".into(),
+            text: "the build is green".into(),
+            is_error: false,
+        };
+        let run = |takes: bool| {
+            let mut app = App::new();
+            let mut runtime = FakeRuntime::new();
+            runtime.log_takes_salvage = takes;
+            pass(
+                &mut app,
+                vec![Completion::Routed {
+                    result: Err(anyhow::anyhow!("unknown persisted agent")),
+                    parcel: Parcel::fresh(notification()),
+                    cancelled: false,
+                }],
+                Vec::new(),
+                &mut runtime,
+            )
+            .unwrap();
+            app.lines()
+                .iter()
+                .filter_map(|line| match line {
+                    Line_::System(text) if text.contains("could not be delivered") => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .next()
+                .expect("the failure is said out loud")
+        };
+
+        let kept = run(true);
+        assert!(
+            !kept.contains("this transcript only"),
+            "a log that took it promises nothing extra: {kept}"
+        );
+        let lost = run(false);
+        assert!(
+            lost.contains("this transcript only"),
+            "a log that refused it must not be passed off as durable: {lost}"
         );
     }
 
@@ -1600,6 +1691,13 @@ mod tests {
                 .log
                 .contains(&"retire:the build is green".to_string()),
             "{:?}",
+            runtime.log
+        );
+        assert!(
+            runtime
+                .log
+                .contains(&"record:the build is green".to_string()),
+            "a spent climb is as terminal as a failure: write it down too — {:?}",
             runtime.log
         );
     }

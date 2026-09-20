@@ -1997,6 +1997,40 @@ const FOCUS_ERROR_CHARS: usize = 200;
 /// with the task's uuid in it — and a resumed agent's whole answer, up
 /// to 16 KiB of unrendered markdown, is not a record of anything: the
 /// focus view already shows it rendered.
+/// Write a salvaged result into a session's log as the user message a
+/// delivered one would have been. Answers whether it landed.
+///
+/// Two ways it does not, and both are refusals rather than damage:
+///
+/// A running turn holds the writer. `acquire_writer` does not block on
+/// that, it says no.
+///
+/// The session is parked on a question. A log may not carry an
+/// ordinary event between a tool call and its result — the replay
+/// validator rejects the whole file for it — and a question is the one
+/// call `load` leaves unanswered on purpose, waiting for the person.
+/// Appending here would write a log that no later open could read,
+/// which is worse than losing the text, so it is not written.
+fn record_salvage_in(store: &SessionStore, session_id: &str, text: &str) -> bool {
+    let Ok(mut session) = store
+        .acquire_writer(session_id)
+        .and_then(|writer| writer.load())
+    else {
+        return false;
+    };
+    if session.pending_question().is_some() {
+        return false;
+    }
+    session
+        .append(ilar::session::SessionEvent::UserMessage {
+            id: ilar::session::new_id(),
+            text: text.to_string(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
+        })
+        .is_ok()
+}
+
 fn focus_outcome_line(target: &str, outcome: ilar::subagent::TaskMessage) -> (String, NoticeLevel) {
     use ilar::subagent::TaskMessage;
     match outcome {
@@ -2457,6 +2491,10 @@ impl schedule::Runtime for LoopRuntime<'_> {
 
     fn retire_notification(&mut self, notification: &ilar::subagent::Notification) {
         ilar::outbox::retire(self.outbox_dir, notification);
+    }
+
+    fn record_salvage(&mut self, notification: &ilar::subagent::Notification) -> bool {
+        record_salvage_in(self.store, self.session_id, &notification.text)
     }
 
     fn route(&mut self, _app: &mut App, parcel: ilar::delivery::Parcel) {
@@ -6850,5 +6888,92 @@ mod tests {
         app.pending_model_override = pending();
         adopt_pending_model_override(&mut app, &RootTurn::Resume, &deps);
         assert_eq!(app.pending_model_override, pending());
+    }
+}
+
+#[cfg(test)]
+mod salvage_tests {
+    use super::record_salvage_in;
+    use ilar::session::{ContentBlock, SessionEvent, SessionMeta, SessionStore, new_id};
+
+    fn store_with_session() -> (tempfile::TempDir, SessionStore, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "test/model".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        (dir, store, session_id)
+    }
+
+    /// The salvage is the last copy of a child's work, so it goes into
+    /// the log — and a reopen finds it there.
+    #[test]
+    fn a_salvage_lands_in_the_log() {
+        let (_dir, store, session_id) = store_with_session();
+        assert!(record_salvage_in(&store, &session_id, "the build is green"));
+        let session = store.load(&session_id).unwrap();
+        assert!(
+            session.events().iter().any(|event| matches!(
+                event,
+                SessionEvent::UserMessage { text, .. } if text == "the build is green"
+            )),
+            "{:?}",
+            session.events()
+        );
+    }
+
+    /// A session parked on a question has an unanswered tool call, and
+    /// the replay validator refuses a log that puts an ordinary event
+    /// between a call and its result — every later open of that file,
+    /// for good. Losing the salvaged text is bad; bricking the session
+    /// it was salvaged into is worse.
+    #[test]
+    fn a_salvage_never_bricks_a_session_parked_on_a_question() {
+        let (_dir, store, session_id) = store_with_session();
+        let mut session = store.acquire_writer(&session_id).unwrap().load().unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                id: new_id(),
+                model: "test/model".into(),
+                content: vec![ContentBlock::ToolCall {
+                    id: "q-1".into(),
+                    name: "question".into(),
+                    input: serde_json::json!({"questions": [{
+                        "id": "which",
+                        "prompt": "which branch?",
+                        "required": true,
+                        "type": "free_text"
+                    }]}),
+                    item_id: None,
+                }],
+                usage: Default::default(),
+                stop_reason: "tool_use".into(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        assert!(
+            !record_salvage_in(&store, &session_id, "the build is green"),
+            "a parked question must refuse the write, not take it"
+        );
+        let session = store
+            .load(&session_id)
+            .expect("the log is still readable after the refusal");
+        assert!(
+            !session.events().iter().any(|event| matches!(
+                event,
+                SessionEvent::UserMessage { text, .. } if text == "the build is green"
+            )),
+            "nothing was written"
+        );
     }
 }
