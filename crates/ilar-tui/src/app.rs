@@ -685,10 +685,11 @@ pub(crate) struct App {
     pub(crate) commands: Vec<ilar::command::Command>,
     pub(crate) theme: theme::ThemeId,
     pub(crate) theme_picker: Option<ThemePicker>,
-    /// Whether the terminal speaks the kitty keyboard protocol. Without
-    /// it Ctrl-M is indistinguishable from Enter, so the help overlay
-    /// must not advertise it.
-    pub(crate) keyboard_enhanced: bool,
+    /// Which modified keys this terminal has been shown able to report.
+    /// Without the handshake Ctrl-M is indistinguishable from Enter, so
+    /// the help overlay must not advertise it; Shift-Enter has a second
+    /// route to being believed. See [`crate::input::TerminalKeys`].
+    pub(crate) keys: crate::input::TerminalKeys,
     pub(crate) model_key_pending: bool,
     pub(crate) transcript_text_area: Rect,
     pub(crate) transcript_cache: TranscriptRenderCache,
@@ -866,7 +867,7 @@ impl App {
             // the window before that and for tests.
             theme: theme::ThemeId::default(),
             theme_picker: None,
-            keyboard_enhanced: false,
+            keys: crate::input::TerminalKeys::default(),
             model_key_pending: false,
             transcript_text_area: Rect::default(),
             transcript_cache: TranscriptRenderCache::default(),

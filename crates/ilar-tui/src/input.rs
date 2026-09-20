@@ -484,34 +484,52 @@ fn moved(moved: bool) -> PromptAction {
     }
 }
 
-/// How to name the keys that put a newline in a draft, to someone
-/// about to press one.
+/// What this terminal has been shown able to report.
 ///
-/// Shift-Enter needs the kitty keyboard protocol: without it a terminal
-/// sends the same byte for Enter and Shift-Enter, the modifier never
-/// arrives, and the arm below sends the draft instead. tmux ships with
-/// `extended-keys off`, so this is the common case, not the exotic one.
-/// Naming a key the terminal cannot report reads as ilar losing
-/// keystrokes. Ctrl-J is the literal line feed and always arrives.
-/// Whether this key event proves the terminal can tell a modified
-/// Enter from a plain one.
-///
-/// The startup query is not the last word. tmux answers nothing to the
-/// kitty protocol query even under `extended-keys always`, where it
-/// does send `CSI 13;2u` for Shift-Enter — so the handshake says no
-/// while the terminal says yes with every keystroke. A modified Enter
-/// that arrives carrying its modifier could not have been a bare CR,
-/// and that is exactly the capability Shift-Enter and Ctrl-M need.
-pub(crate) fn disambiguates_enter(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    code == KeyCode::Enter
-        && modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT)
+/// Two claims, and they come apart. Measured on tmux 3.7 under
+/// `extended-keys always`: Shift-Enter arrives as `CSI 13;2u` while
+/// Ctrl-M arrives as a bare `\r`, indistinguishable from Enter. That is
+/// modifyOtherKeys mode 1, which modifies only keys with no well-known
+/// representation, and CR is one. So a proof about Shift-Enter must not
+/// vouch for Ctrl-M: advertising that chord costs a sent draft.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TerminalKeys {
+    /// The kitty-protocol handshake answered yes. The only evidence
+    /// that covers every chord, Ctrl-M included.
+    pub(crate) enhanced: bool,
+    /// A modified Enter has arrived carrying its modifier. tmux answers
+    /// nothing to the handshake even where it sends these, so for some
+    /// terminals this is the only evidence there will ever be.
+    pub(crate) modified_enter: bool,
 }
 
-pub(crate) fn newline_keys(keyboard_enhanced: bool) -> &'static str {
-    if keyboard_enhanced {
-        "Shift-Enter/Ctrl-J"
-    } else {
-        "Ctrl-J"
+impl TerminalKeys {
+    /// Whether Shift-Enter reaches the prompt as something other than
+    /// a plain Enter.
+    pub(crate) fn shift_enter(self) -> bool {
+        self.enhanced || self.modified_enter
+    }
+
+    /// How to name the keys that put a newline in a draft, to someone
+    /// about to press one. Naming one that cannot arrive reads as ilar
+    /// losing keystrokes — tmux ships with `extended-keys off`, so that
+    /// is the common case, not the exotic one. Ctrl-J is the literal
+    /// line feed and needs no protocol, so a draft can always gain a
+    /// line.
+    pub(crate) fn newline_keys(self) -> &'static str {
+        if self.shift_enter() {
+            "Shift-Enter/Ctrl-J"
+        } else {
+            "Ctrl-J"
+        }
+    }
+
+    /// Take what a key event proves. A modified Enter could not have
+    /// been a bare CR, whatever the handshake said about this terminal.
+    pub(crate) fn observe(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        self.modified_enter |= code == KeyCode::Enter
+            && modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT);
     }
 }
 
@@ -1021,18 +1039,44 @@ mod tests {
 
     /// A terminal that cannot report Shift-Enter is not told about it:
     /// pressing it there sends the draft, which reads as a lost
-    /// keystroke rather than as a key this terminal does not have.
+    /// keystroke rather than as a key this terminal does not have. And
+    /// the two claims stay apart — tmux under `extended-keys always`
+    /// sends `CSI 13;2u` for Shift-Enter and a bare CR for Ctrl-M, so
+    /// proving the first must not advertise the second.
     #[test]
-    fn the_newline_keys_offered_are_the_ones_that_arrive() {
-        assert_eq!(newline_keys(true), "Shift-Enter/Ctrl-J");
-        assert_eq!(newline_keys(false), "Ctrl-J");
-        // Whichever is shown, Ctrl-J is among them: it is the literal
-        // line feed and needs no protocol at all.
-        for enhanced in [true, false] {
-            assert!(newline_keys(enhanced).contains("Ctrl-J"));
-            // The shorter one is never wider, so a footer that fits the
-            // enhanced form fits this one too.
-            assert!(newline_keys(false).len() <= newline_keys(enhanced).len());
+    fn a_modified_enter_proves_itself_and_nothing_else() {
+        let handshake = TerminalKeys {
+            enhanced: true,
+            ..TerminalKeys::default()
+        };
+        assert_eq!(handshake.newline_keys(), "Shift-Enter/Ctrl-J");
+        assert_eq!(TerminalKeys::default().newline_keys(), "Ctrl-J");
+
+        let mut proven = TerminalKeys::default();
+        proven.observe(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(
+            !proven.shift_enter(),
+            "a bare Enter is what an unenhanced terminal sends for the chord too"
+        );
+        // Other keys carry modifiers on any terminal; Enter is the one
+        // that collapses to a byte without the protocol.
+        proven.observe(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        proven.observe(KeyCode::Tab, KeyModifiers::SHIFT);
+        assert!(!proven.shift_enter());
+
+        proven.observe(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert!(proven.shift_enter());
+        assert_eq!(proven.newline_keys(), "Shift-Enter/Ctrl-J");
+        // The handshake is what vouches for Ctrl-M, and the keystroke
+        // did not touch it.
+        assert!(
+            !proven.enhanced,
+            "a Shift-Enter sighting vouched for Ctrl-M, which tmux still sends as a bare CR"
+        );
+
+        // Ctrl-J is offered either way: it is the literal line feed.
+        for keys in [handshake, proven, TerminalKeys::default()] {
+            assert!(keys.newline_keys().contains("Ctrl-J"));
         }
         let mut input = InputBuffer::default();
         assert_eq!(
@@ -1043,34 +1087,6 @@ mod tests {
             PromptAction::Edited
         );
         assert_eq!(input.text(), "\n");
-    }
-
-    /// tmux under `extended-keys always` sends `CSI 13;2u` for
-    /// Shift-Enter and answers nothing to the protocol query, so the
-    /// handshake says the terminal cannot disambiguate while it
-    /// demonstrably can. The keystroke settles it.
-    #[test]
-    fn a_modified_enter_proves_what_the_handshake_denied() {
-        for modifier in [
-            KeyModifiers::SHIFT,
-            KeyModifiers::CONTROL,
-            KeyModifiers::ALT,
-        ] {
-            assert!(
-                disambiguates_enter(KeyCode::Enter, modifier),
-                "{modifier:?}"
-            );
-        }
-        // A bare Enter is what an unenhanced terminal sends for every
-        // one of those chords, so it proves nothing either way.
-        assert!(!disambiguates_enter(KeyCode::Enter, KeyModifiers::NONE));
-        // Other keys carry modifiers on any terminal; only Enter is
-        // the one that collapses to a byte without the protocol.
-        assert!(!disambiguates_enter(
-            KeyCode::Char('j'),
-            KeyModifiers::CONTROL
-        ));
-        assert!(!disambiguates_enter(KeyCode::Tab, KeyModifiers::SHIFT));
     }
 
     /// The edges of a multiline draft are not dead keys: `move_vertical`

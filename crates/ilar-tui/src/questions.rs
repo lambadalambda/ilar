@@ -11,6 +11,10 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::input::{InputBuffer, PromptAction, handle_prompt_key};
 use crate::theme;
 
+/// The modal's outer width. Two of those cells are its borders, so a
+/// footer has `MODAL_WIDTH - 2` to live in before it is clipped.
+const MODAL_WIDTH: u16 = 76;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum QuestionAction {
     Stay,
@@ -306,12 +310,12 @@ impl QuestionModal {
             .collect()
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame<'_>, available: Rect, keyboard_enhanced: bool) {
+    pub(crate) fn render(&self, frame: &mut Frame<'_>, available: Rect, newline_keys: &str) {
         if available.width == 0 || available.height == 0 || self.request.questions.is_empty() {
             return;
         }
         let question = &self.request.questions[self.current];
-        let area = crate::modals::centered_rect(available, 76, available.height.min(24));
+        let area = crate::modals::centered_rect(available, MODAL_WIDTH, available.height.min(24));
         let title = format!(
             " Question {}/{} ",
             self.current + 1,
@@ -324,7 +328,7 @@ impl QuestionModal {
             area,
             &title,
             theme::MARKUP,
-            &question_footer(question, keyboard_enhanced),
+            &question_footer(question, newline_keys),
         ) else {
             return;
         };
@@ -483,12 +487,16 @@ fn append_choices<'a>(
 
 /// Padded like every other `modal_frame` footer: it is right-aligned in
 /// the bottom border and would otherwise butt into the corner.
-fn question_footer(question: &Question, keyboard_enhanced: bool) -> String {
+/// It also has to fit: the modal is capped at [`MODAL_WIDTH`] and a
+/// right-aligned title is clipped from the tail, so an overlong footer
+/// loses `Esc cancel` — the one key that always has to be findable.
+/// The free-text form says `↑↓` alone for that reason, where the choice
+/// form has the room to say `↑↓ navigate`.
+fn question_footer(question: &Question, newline_keys: &str) -> String {
     match &question.kind {
-        QuestionKind::FreeText => format!(
-            " Enter next · {} newline · ↑↓ question · BackTab back · Esc cancel ",
-            crate::input::newline_keys(keyboard_enhanced)
-        ),
+        QuestionKind::FreeText => {
+            format!(" Enter next · {newline_keys} newline · ↑↓ · BackTab back · Esc cancel ")
+        }
         QuestionKind::SingleChoice { .. } | QuestionKind::MultipleChoice { .. } => {
             " ↑↓ navigate · Space select · Enter next · BackTab back · Esc cancel ".to_string()
         }
@@ -820,18 +828,13 @@ mod tests {
     }
 
     fn screen(modal: &QuestionModal, width: u16, height: u16) -> String {
-        screen_with(modal, width, height, true)
+        screen_with(modal, width, height, "Shift-Enter/Ctrl-J")
     }
 
-    fn screen_with(
-        modal: &QuestionModal,
-        width: u16,
-        height: u16,
-        keyboard_enhanced: bool,
-    ) -> String {
+    fn screen_with(modal: &QuestionModal, width: u16, height: u16, newline_keys: &str) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| modal.render(frame, frame.area(), keyboard_enhanced))
+            .draw(|frame| modal.render(frame, frame.area(), newline_keys))
             .unwrap();
         terminal.backend().buffer().content.iter().enumerate().fold(
             String::new(),
@@ -857,9 +860,12 @@ mod tests {
     }
 
     /// The footer of a free-text question offers Shift-Enter only where
-    /// the terminal can report it; Ctrl-J is offered either way.
+    /// the terminal can report it; Ctrl-J is offered either way. And it
+    /// fits: the footer is right-aligned in the bottom border and is
+    /// clipped from the tail, so the longer form used to eat
+    /// `Esc cancel` at every terminal width.
     #[test]
-    fn the_free_text_footer_offers_the_keys_that_arrive() {
+    fn the_free_text_footer_offers_the_keys_that_arrive_and_fits() {
         let free_text = QuestionRequest {
             questions: vec![Question {
                 id: "q".into(),
@@ -870,19 +876,34 @@ mod tests {
             }],
         };
         let modal = QuestionModal::new(free_text);
+        let question = &modal.request.questions[0];
 
-        let enhanced = screen_with(&modal, 100, 24, true);
+        let enhanced = screen_with(&modal, 100, 24, "Shift-Enter/Ctrl-J");
         assert!(
             enhanced.contains("Shift-Enter/Ctrl-J newline"),
             "{enhanced}"
         );
+        assert!(enhanced.contains("Esc cancel"), "{enhanced}");
 
-        let plain = screen_with(&modal, 100, 24, false);
+        let plain = screen_with(&modal, 100, 24, "Ctrl-J");
         assert!(plain.contains("Ctrl-J newline"), "{plain}");
         assert!(
             !plain.contains("Shift-Enter"),
             "a key this terminal cannot send was offered: {plain}"
         );
+        assert!(plain.contains("Esc cancel"), "{plain}");
+
+        // Measured, not eyeballed: two of the modal's cells are its
+        // borders.
+        for newline_keys in ["Shift-Enter/Ctrl-J", "Ctrl-J"] {
+            let footer = question_footer(question, newline_keys);
+            let width = unicode_width::UnicodeWidthStr::width(footer.as_str());
+            assert!(
+                width <= usize::from(MODAL_WIDTH) - 2,
+                "{width} cells of footer in {} : {footer}",
+                MODAL_WIDTH - 2
+            );
+        }
     }
 
     #[test]

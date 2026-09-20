@@ -5,14 +5,15 @@ covers the parts that deserve more than a one-line hint.
 
 ## Keys your terminal has to be able to send
 
-Some chords do not survive an ordinary terminal. Without the kitty
-keyboard protocol, **Shift-Enter** arrives as a plain Enter and
-**Ctrl-M** arrives as Enter too, so pressing either would send the
-draft. ilar asks the terminal what it can report at startup and offers
-only what it will get: the footer and F1 name **Shift-Enter/Ctrl-J** on
-a terminal that can tell them apart and **Ctrl-J** alone on one that
-cannot. Ctrl-J is the literal line feed and always works, so a draft
-can always gain a line.
+Some chords do not survive an ordinary terminal. A bare terminal sends
+one byte, a carriage return, for **Enter**, **Shift-Enter** and
+**Ctrl-M** alike, so pressing any of them sends the draft. Telling them
+apart takes an extended-keys protocol — kitty's, or xterm's
+modifyOtherKeys in its `csi-u` form. ilar offers only the chords it
+will actually receive: the footer and F1 name **Shift-Enter/Ctrl-J**
+where the two can be told apart and **Ctrl-J** alone where they cannot.
+Ctrl-J is the literal line feed and always works, so a draft can always
+gain a line.
 
 tmux is the usual reason a capable terminal looks incapable: it ships
 with `extended-keys off` and will not pass modified keys through. If
@@ -22,16 +23,35 @@ Shift-Enter sends instead of inserting a newline, put this in
 ```
 set -s extended-keys always
 set -s extended-keys-format csi-u
+set -as terminal-features '*:extkeys'
 ```
 
-`always` rather than `on`: `on` forwards extended keys only once the
-application has asked for them, and tmux never answers the question
-that does the asking. Under `always` it sends `CSI 13;2u` for
-Shift-Enter regardless, which is what makes the key work — but the
-startup query still comes back empty, so ilar starts by offering
-Ctrl-J alone. The first Shift-Enter you press settles it: a modified
-Enter could not have arrived as a bare carriage return, so ilar takes
-that as proof and offers both from then on.
+`extended-keys` needs tmux 3.2 and `extended-keys-format` needs 3.4; on
+anything older, leave the second line out and expect the first to do
+less.
+
+Three things about that recipe are load-bearing.
+
+`always` rather than `on`, because `on` forwards extended keys only
+once the application has asked, and tmux answers nothing to the query
+that does the asking. Under `always` it sends them regardless.
+
+`csi-u` rather than the default `xterm`, because the two formats are
+not interchangeable: crossterm, which reads ilar's input, parses
+`CSI 13;2u` and has no handler at all for xterm's `CSI 27;2;13~`. With
+the wrong format Shift-Enter is not misread, it is dropped.
+
+`terminal-features` with `extkeys`, because tmux asks the terminal
+outside it for extended keys only when it believes that terminal can
+supply them.
+
+One consequence worth knowing. Because tmux never answers the startup
+query, ilar begins by offering Ctrl-J alone even where Shift-Enter now
+works. The first Shift-Enter you press settles it: a modified Enter
+could not have arrived as a bare carriage return, so ilar takes that as
+proof and names both from then on. It is proof about Shift-Enter only —
+under `always` tmux still sends a bare carriage return for Ctrl-M, so
+that chord stays hidden and **F2** remains the way to switch models.
 
 ## Starting
 
@@ -456,12 +476,17 @@ diffs for the tools that change files — an `edit` as a real diff, a
 `write` as the body it wrote, labelled `rewrite` when it replaced a
 file that was already there. **Ctrl-F** searches it, **Ctrl-O** opens any link it
 contains, mouse drag selects and copies, and the palette's "Export
-transcript" writes the session as a Markdown file. ilar holds the mouse
-for as long as it runs, which is what its own selection needs and which
-takes the terminal's away: hold **Shift** while dragging to get the
-terminal's selection back. Over SSH a copy travels by OSC 52, so it
-lands on the clipboard of the machine you are sitting at rather than
-the one ilar is running on. Tool rows expand on
+transcript" writes the session as a Markdown file.
+
+ilar holds the mouse for as long as it runs, which is what its own
+selection needs and which takes the terminal's away. Hold **Shift**
+while dragging to get the terminal's selection back; that one belongs
+to the terminal and ilar never sees it. A selection ilar does make goes
+to the clipboard on release, and over SSH it asks the terminal to do
+the copying (OSC 52) rather than reaching for a clipboard on the host,
+so the text lands at your end of the connection. The protocol has no
+reply, and some terminals ship it turned off, so a copy that went
+quiet was sent and may not have been honoured. Tool rows expand on
 click (or Enter targeting) to show arguments, diffs and output — and a
 truncated block's "… more" row is itself clickable, advancing the
 expansion right where the eye stopped; grouped tool calls align their

@@ -769,12 +769,39 @@ pub(crate) enum PickerAction {
     Choose(String),
 }
 
+/// What a chord needs before it is worth advertising. Two claims, not
+/// one: tmux under `extended-keys always` reports Shift-Enter as
+/// `CSI 13;2u` and still sends a bare CR for Ctrl-M, so a terminal can
+/// have the second without the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Needs {
+    /// The kitty-protocol handshake — the only evidence that covers
+    /// every chord, Ctrl-M included.
+    Handshake,
+    /// Only that a modified Enter arrives, which the handshake may deny
+    /// on a terminal that manages it anyway.
+    ModifiedEnter,
+}
+
+impl Needs {
+    fn met_by(self, keys: crate::input::TerminalKeys) -> bool {
+        match self {
+            Self::Handshake => keys.enhanced,
+            Self::ModifiedEnter => keys.shift_enter(),
+        }
+    }
+}
+
 struct HelpBinding {
     keys: &'static str,
     action: &'static str,
     /// Shown instead of `keys` when the terminal cannot report the
     /// chord (Ctrl-M is plain Enter without the kitty protocol).
     portable_keys: Option<&'static str>,
+    /// What `keys` depends on. Only consulted when `portable_keys` is
+    /// set, since that is the only binding with something to fall back
+    /// to.
+    needs: Needs,
 }
 
 struct HelpSection {
@@ -788,13 +815,23 @@ macro_rules! binding {
             keys: $keys,
             action: $action,
             portable_keys: None,
+            needs: Needs::Handshake,
         }
     };
     ($keys:literal, $action:literal, portable = $portable:literal) => {
+        binding!(
+            $keys,
+            $action,
+            portable = $portable,
+            needs = Needs::Handshake
+        )
+    };
+    ($keys:literal, $action:literal, portable = $portable:literal, needs = $needs:expr) => {
         HelpBinding {
             keys: $keys,
             action: $action,
             portable_keys: Some($portable),
+            needs: $needs,
         }
     };
 }
@@ -810,7 +847,8 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!(
                 "Shift-Enter / Ctrl-J",
                 "insert newline",
-                portable = "Ctrl-J"
+                portable = "Ctrl-J",
+                needs = Needs::ModifiedEnter
             ),
             binding!(
                 "Esc / Ctrl-C",
@@ -840,10 +878,9 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
             binding!("Up / Down", "scroll line (at the edges of the draft)"),
             binding!("mouse wheel / drag", "scroll · select and copy"),
-            binding!(
-                "Shift-drag",
-                "select with the terminal instead of ilar (ilar holds the mouse while it runs)"
-            ),
+            // Short enough to survive the 53-cell action column: the
+            // long form truncated away the part that mattered.
+            binding!("Shift-drag", "select with the terminal, not with ilar"),
             binding!("click ▸/▾", "fold or expand tool details"),
         ],
     },
@@ -953,7 +990,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
     },
 ];
 
-fn help_lines(width: usize, keyboard_enhanced: bool) -> Vec<Line<'static>> {
+fn help_lines(width: usize, keys: crate::input::TerminalKeys) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for section in HELP_SECTIONS {
         if !lines.is_empty() {
@@ -968,7 +1005,7 @@ fn help_lines(width: usize, keyboard_enhanced: bool) -> Vec<Line<'static>> {
             // branch, so without the kitty protocol Ctrl-M is literally
             // Enter and would send the draft. Offer only the portable key.
             let keys = match binding.portable_keys {
-                Some(portable) if !keyboard_enhanced => portable,
+                Some(portable) if !binding.needs.met_by(keys) => portable,
                 _ => binding.keys,
             };
             if width < 30 {
@@ -1058,7 +1095,7 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
     body.finish(frame, inner)
 }
 
-pub(crate) fn render_help(frame: &mut Frame, scroll: usize, keyboard_enhanced: bool) {
+pub(crate) fn render_help(frame: &mut Frame, scroll: usize, keys: crate::input::TerminalKeys) {
     let area = centered_rect(frame.area(), 72, 24);
     let Some(inner) = modal_frame(
         frame,
@@ -1069,12 +1106,7 @@ pub(crate) fn render_help(frame: &mut Frame, scroll: usize, keyboard_enhanced: b
     ) else {
         return;
     };
-    render_scrolled(
-        frame,
-        inner,
-        help_lines(inner.width as usize, keyboard_enhanced),
-        scroll,
-    );
+    render_scrolled(frame, inner, help_lines(inner.width as usize, keys), scroll);
 }
 
 /// The whole todo list, wrapped for `width`. The sidebar shows what
@@ -3685,41 +3717,60 @@ mod tests {
 
     /// Crossterm maps CR to Enter before the control-character branch, so
     /// without the kitty protocol Ctrl-M *is* Enter and would fire off the
-    /// draft. Do not advertise it there.
+    /// draft. Do not advertise it there — and do not let a Shift-Enter
+    /// sighting vouch for it, since tmux reports one and not the other.
     #[test]
     fn help_only_offers_ctrl_m_when_the_terminal_can_report_it() {
-        let rendered = |enhanced| {
-            help_lines(80, enhanced)
+        use crate::input::TerminalKeys;
+
+        let rendered = |keys| {
+            help_lines(80, keys)
                 .iter()
                 .map(rendered_text)
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        assert!(rendered(true).contains("Ctrl-M"));
+        let handshake = TerminalKeys {
+            enhanced: true,
+            modified_enter: false,
+        };
+        let nothing = TerminalKeys::default();
+        // Measured on tmux 3.7 under `extended-keys always`: Shift-Enter
+        // arrives as CSI 13;2u, Ctrl-M as a bare CR.
+        let tmux = TerminalKeys {
+            enhanced: false,
+            modified_enter: true,
+        };
+
+        assert!(rendered(handshake).contains("Ctrl-M"));
         assert!(
-            !rendered(false).contains("Ctrl-M"),
+            !rendered(nothing).contains("Ctrl-M"),
             "Ctrl-M is indistinguishable from Enter without keyboard enhancement"
         );
-        // F2 is portable and must always be offered.
-        assert!(rendered(false).contains("F2"));
-
-        // Same rule, same reason: without the protocol the terminal
-        // sends one byte for Enter and Shift-Enter, so pressing the
-        // chord sends the draft. Ctrl-J is the line feed and survives
-        // any terminal, so it is offered either way.
-        assert!(rendered(true).contains("Shift-Enter / Ctrl-J"));
         assert!(
-            !rendered(false).contains("Shift-Enter"),
+            !rendered(tmux).contains("Ctrl-M"),
+            "a Shift-Enter sighting vouched for Ctrl-M, which tmux sends as a bare CR"
+        );
+        // F2 is portable and must always be offered.
+        assert!(rendered(nothing).contains("F2"));
+
+        // Same rule, different evidence: the newline chord is believed
+        // on either proof, and Ctrl-J — the literal line feed — is
+        // offered whatever the terminal turns out to be.
+        assert!(rendered(handshake).contains("Shift-Enter / Ctrl-J"));
+        assert!(rendered(tmux).contains("Shift-Enter / Ctrl-J"));
+        assert!(
+            !rendered(nothing).contains("Shift-Enter"),
             "Shift-Enter is indistinguishable from Enter without keyboard enhancement"
         );
-        assert!(rendered(false).contains("Ctrl-J"));
+        assert!(rendered(nothing).contains("Ctrl-J"));
 
         // ilar holds the mouse for its own selection, which takes the
         // terminal's away; the way back is worth writing down.
         assert!(
-            rendered(false).contains("Shift-drag"),
+            rendered(nothing).contains("Shift-drag"),
             "{}",
-            rendered(false)
+            rendered(nothing)
         );
     }
 
@@ -4069,11 +4120,17 @@ mod tests {
 
     #[test]
     fn help_overlay_lists_load_bearing_bindings() {
-        let text = help_lines(80, true)
-            .iter()
-            .map(rendered_text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = help_lines(
+            80,
+            crate::input::TerminalKeys {
+                enhanced: true,
+                modified_enter: true,
+            },
+        )
+        .iter()
+        .map(rendered_text)
+        .collect::<Vec<_>>()
+        .join("\n");
         for needle in [
             "Ctrl-P",
             "F2",
@@ -4098,7 +4155,13 @@ mod tests {
         }
         // Tiny widths must not panic and must stay within bounds.
         for width in 0..=12 {
-            for line in help_lines(width, true) {
+            for line in help_lines(
+                width,
+                crate::input::TerminalKeys {
+                    enhanced: true,
+                    modified_enter: true,
+                },
+            ) {
                 assert!(line.width() <= width.max(1) + 1, "width {width}");
             }
         }

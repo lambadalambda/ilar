@@ -27,8 +27,12 @@ pub(crate) async fn run(config: &Config, id: &str, theme: crate::theme::ThemeId)
     let model = reader.effective_model();
     let cwd = reader.meta().and_then(|meta| meta.cwd.clone());
     drop(reader);
-    let (mut terminal, _session) = crate::TerminalSession::start()?;
+    let (mut terminal, session) = crate::TerminalSession::start()?;
     let mut app = App::new();
+    // The read-only prompt shows no footer and there is no help
+    // overlay here, so nothing reads this today — but an App whose
+    // terminal capabilities are a lie is a trap for whoever adds F1.
+    app.keys.enhanced = session.keyboard_enhanced;
     app.theme = theme;
     app.session_id = id.to_string();
     app.read_only = true;
@@ -234,21 +238,29 @@ mod tests {
     fn the_read_only_prompt_offers_no_send() {
         // "Enter send ·" with the separator: the welcome line in the
         // transcript says "Enter sends, …" and is not the footer.
-        let watching = screen(true, true);
+        let watching = screen(true, enhanced());
         assert!(watching.contains("read-only · q leaves"), "{watching}");
         assert!(!watching.contains("Enter send ·"), "{watching}");
-        let live = screen(false, true);
+        let live = screen(false, enhanced());
         assert!(live.contains("Enter send ·"), "{live}");
         assert!(!live.contains("read-only · q leaves"), "{live}");
     }
 
-    fn screen(read_only: bool, keyboard_enhanced: bool) -> String {
+    /// A terminal whose handshake answered yes.
+    fn enhanced() -> crate::input::TerminalKeys {
+        crate::input::TerminalKeys {
+            enhanced: true,
+            modified_enter: false,
+        }
+    }
+
+    fn screen(read_only: bool, keys: crate::input::TerminalKeys) -> String {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let mut app = App::new();
         app.read_only = read_only;
-        app.keyboard_enhanced = keyboard_enhanced;
+        app.keys = keys;
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         terminal
@@ -267,23 +279,38 @@ mod tests {
     /// names only the key that always works.
     #[test]
     fn the_prompt_offers_only_the_newline_keys_that_arrive() {
-        let enhanced = screen(false, true);
+        let by_handshake = screen(false, enhanced());
         assert!(
-            enhanced.contains("Enter send · Shift-Enter/Ctrl-J newline"),
-            "{enhanced}"
+            by_handshake.contains("Enter send · Shift-Enter/Ctrl-J newline"),
+            "{by_handshake}"
+        );
+        // Including the welcome line, which is the first thing read and
+        // is built before the terminal has been asked anything.
+        assert!(
+            !by_handshake.contains("Enter sends, Shift-Enter"),
+            "the welcome line promises a key it cannot know about"
         );
 
-        let plain = screen(false, false);
+        // The other route to being believed: tmux answers nothing to
+        // the handshake and sends CSI 13;2u anyway, so a keystroke is
+        // the only evidence there will be.
+        let by_keystroke = screen(
+            false,
+            crate::input::TerminalKeys {
+                enhanced: false,
+                modified_enter: true,
+            },
+        );
+        assert!(
+            by_keystroke.contains("Enter send · Shift-Enter/Ctrl-J newline"),
+            "{by_keystroke}"
+        );
+
+        let plain = screen(false, crate::input::TerminalKeys::default());
         assert!(plain.contains("Enter send · Ctrl-J newline"), "{plain}");
         assert!(
             !plain.contains("Shift-Enter"),
             "a key this terminal cannot send was offered: {plain}"
-        );
-        // Including the welcome line, which is the first thing read and
-        // is built before the question has been asked.
-        assert!(
-            !screen(false, true).contains("Enter sends, Shift-Enter"),
-            "the welcome line promises a key it cannot know about"
         );
     }
 }

@@ -1429,6 +1429,11 @@ async fn main() -> Result<()> {
     // Settings that parsed but were not honoured. Shown once, on the
     // first session: they are a property of the config, not the session.
     let mut config_warnings = config.warnings.clone();
+    // A property of the terminal, not of the session, so it outlives
+    // the App: a session switch used to rebuild the App and lose what
+    // a keystroke had already proved, and the footer quietly went back
+    // to offering Ctrl-J alone.
+    let mut proven_keys = crate::input::TerminalKeys::default();
 
     loop {
         let resume_target = if first_run {
@@ -1666,9 +1671,14 @@ async fn main() -> Result<()> {
         if terminal_hold.is_none() {
             terminal_hold = Some(TerminalSession::start()?);
         }
-        app.keyboard_enhanced = terminal_hold
-            .as_ref()
-            .is_some_and(|(_, session)| session.keyboard_enhanced);
+        // The handshake is asked again for this session's terminal; what
+        // a keystroke proved about that terminal is carried over.
+        app.keys = crate::input::TerminalKeys {
+            enhanced: terminal_hold
+                .as_ref()
+                .is_some_and(|(_, session)| session.keyboard_enhanced),
+            ..proven_keys
+        };
         // Completions published by an earlier run of this tree that
         // never reached their session: the outbox kept them, and they
         // enter this run as if freshly notified — held for the user.
@@ -1710,6 +1720,9 @@ async fn main() -> Result<()> {
         )
         .await?;
         active_theme = app.theme;
+        // What this run's keystrokes proved about the terminal belongs
+        // to the terminal, so it outlives the session being left.
+        proven_keys.modified_enter |= app.keys.modified_enter;
         // The session this run is leaving — quit or switch. One created
         // by the launch and never typed into leaves nothing behind;
         // before this, every `ilar` opened and closed left a
@@ -4064,13 +4077,13 @@ async fn run_app(
                     ..
                 },
             ) => {
-                // Proof beats the handshake. tmux with `extended-keys
-                // always` sends CSI u for a modified Enter but answers
-                // no to the protocol query, so the startup check says
-                // the terminal cannot disambiguate while it plainly
-                // can. A modified Enter arriving *is* the capability
-                // both Shift-Enter and Ctrl-M need, so take it.
-                app.keyboard_enhanced |= crate::input::disambiguates_enter(code, modifiers);
+                // Proof beats the handshake. tmux under `extended-keys
+                // always` sends CSI u for a modified Enter and answers
+                // nothing to the protocol query, so the startup check
+                // says the terminal cannot disambiguate while it
+                // plainly can. It vouches for Shift-Enter alone —
+                // Ctrl-M still arrives there as a bare CR.
+                app.keys.observe(code, modifiers);
                 let control = modifiers.contains(KeyModifiers::CONTROL);
                 let alt = modifiers.contains(KeyModifiers::ALT);
                 // Ctrl-C is an interrupt, not the exit: it is rewritten

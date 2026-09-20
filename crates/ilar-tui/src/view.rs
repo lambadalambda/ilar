@@ -1104,17 +1104,21 @@ impl App {
         // keep none of them, and in a focus view the prompt belongs to
         // the agent on screen — the stash, the history and the images
         // are the root's, and Esc is the way back to them.
-        // Only the keys this terminal can actually deliver: without the
-        // kitty protocol Shift-Enter is Enter, and offering it is how a
-        // sent draft looks like a swallowed keystroke.
-        let newline = crate::input::newline_keys(self.keyboard_enhanced);
+        // Only the keys this terminal can actually deliver: without an
+        // extended-keys protocol Shift-Enter *is* Enter, and offering
+        // it is how a sent draft looks like a swallowed keystroke.
+        let newline = self.keys.newline_keys();
+        // The thresholds below are tuned to the long form. The short
+        // one is that much narrower, so it earns the difference back
+        // rather than being suppressed at a width where it would fit.
+        let room = input_chunk.width as usize + ("Shift-Enter/Ctrl-J".len() - newline.len());
         let input_help: Option<String> =
             if self.read_only || focus_send == Some(false) || prompt_hint.is_some() {
                 // Under the offer's hint the footer's "Enter send" would
                 // be a second, contradictory promise about the same key.
                 None
             } else if self.focus.is_some() {
-                Some(if input_chunk.width >= 70 {
+                Some(if room >= 70 {
                     format!(" Enter sends to the agent · {newline} newline · Esc close ")
                 } else if input_chunk.width >= 48 {
                     " Enter sends to the agent · Esc close ".to_string()
@@ -1123,9 +1127,9 @@ impl App {
                 } else {
                     " Enter sends ".to_string()
                 })
-            } else if input_chunk.width >= 62 {
+            } else if room >= 62 {
                 Some(format!(" Enter send · {newline} newline · Ctrl-S stash "))
-            } else if input_chunk.width >= 48 {
+            } else if room >= 48 {
                 Some(format!(" Enter send · {newline} newline "))
             } else {
                 Some(" Enter send ".to_string())
@@ -1243,7 +1247,7 @@ impl App {
                 self.question_modal
                     .as_ref()
                     .expect("question modal")
-                    .render(frame, frame.area(), self.keyboard_enhanced);
+                    .render(frame, frame.area(), self.keys.newline_keys());
                 None
             }
             Some(Modal::Grant) => {
@@ -1264,7 +1268,7 @@ impl App {
                 .pending_snapshot()
                 .map(|snapshot| render_pending_manager(frame, &snapshot)),
             Some(Modal::Help) => {
-                render_help(frame, self.help_scroll, self.keyboard_enhanced);
+                render_help(frame, self.help_scroll, self.keys);
                 None
             }
             Some(Modal::Todos) => {
