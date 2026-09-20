@@ -164,3 +164,31 @@ rows.
 Remaining: the web glyph map's per-tool progress labels and the
 UI-spawned subtask's missing started line, which needs a synthetic
 `call_id` rather than a new log variant.
+
+## Progress (2026-09-20, later)
+
+**A user-started subtask has a row now.** It had no tool call behind
+it, so `ToolContext::call_id` was `None`, `parent_call_id` came out
+empty, and `push_subagent_activity` dropped every event it produced —
+by design, since an empty id can never attach and buffering it would
+crowd the retry queue. A `/command` subtask therefore showed a system
+line and then nothing at all, where a model-spawned one nests its
+whole child timeline.
+
+It gets a synthetic call id and the same agent row: `push_tool_row` +
+`configure_subagent_row` on the way in, `finish_tool_row` with the
+task tool's own "started in the background" on the way out, exactly as
+a detached model-spawned task settles. A second benefit fell out of
+it: the *child's* `SubagentInvocation` now records a distinct parent
+id rather than an empty one, so two user-started subtasks in a session
+no longer collide when a nested view looks its slice up.
+
+**The persistence half is not this.** Nothing about a user-started
+subtask reaches the *parent's* log: `SubagentInvocation` goes into the
+child's. Recording it in the parent needs a new event variant, or an
+assistant message carrying a `ToolCall` block — which would be a lie,
+since no model called it. That is a log-format decision, not a fix to
+slot in here.
+
+Remaining: the web glyph map's per-tool progress labels, which is
+parked with serve.

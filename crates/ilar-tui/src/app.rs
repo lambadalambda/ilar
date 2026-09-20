@@ -1428,6 +1428,40 @@ impl App {
         self.touch_transcript(Some(self.lines.len() - 1));
     }
 
+    /// The agent row a subtask the *user* started gets, and the call
+    /// id its activity will arrive under.
+    ///
+    /// A model-spawned task has a tool call, so it has a row and its
+    /// child's events nest inside it. A `/command` subtask had
+    /// neither: its start was a system line the log never kept, and
+    /// every event it produced carried an empty `parent_call_id` and
+    /// was dropped on the floor. The id is synthetic — nothing on the
+    /// wire answers to it — but it is the same kind of handle, so the
+    /// same nesting works.
+    pub(crate) fn start_subtask_row(
+        &mut self,
+        description: &str,
+        agent: &str,
+        model: Option<String>,
+    ) -> String {
+        let id = format!("ui:{}", ilar::session::new_id());
+        let group = format!("live:{}", self.next_tool_group);
+        let index = crate::transcript::push_tool_row(&mut self.lines, &id, group, "task");
+        crate::transcript::configure_subagent_row(&mut self.lines, &id, agent, &model, description);
+        self.touch_transcript(Some(index));
+        id
+    }
+
+    /// Settle the row [`Self::start_subtask_row`] opened. A detached
+    /// task settles as soon as it is *started*, exactly as the task
+    /// tool's own row does: what it goes on to do arrives as activity
+    /// nested underneath.
+    pub(crate) fn finish_subtask_row(&mut self, id: &str, is_error: bool, result: &str) {
+        let touched =
+            crate::transcript::finish_tool_row(&mut self.lines, id, is_error, result, &None);
+        self.touch_transcript(touched);
+    }
+
     pub(crate) fn push_notification(&mut self, description: &str, text: &str) {
         let from = self.lines.len();
         if !self.push_notification_row(text) {
@@ -3525,6 +3559,55 @@ mod tests {
             row.0
         );
         assert!(!row.1.is_empty(), "the child's work is shown, not hidden");
+    }
+
+    /// A subtask the user starts has no tool call behind it, so it had
+    /// no row and no call id — and every event it produced carried an
+    /// empty `parent_call_id` and was dropped outright. Its start was
+    /// a system line, which the log does not keep either, so a reopened
+    /// session showed no sign the task had ever run. It gets the same
+    /// agent row a model-spawned task gets, under a synthetic id.
+    #[test]
+    fn a_user_started_subtask_gets_a_row_its_work_nests_under() {
+        let mut app = App::new();
+        app.session_id = "root".into();
+
+        let call_id = app.start_subtask_row("sweep the web", "build", None);
+        assert!(!call_id.is_empty(), "the caller needs an id to hand on");
+
+        app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+            parent_session_id: "root".into(),
+            parent_call_id: call_id.clone(),
+            child_session_id: "child".into(),
+            agent: "build".into(),
+            event: LoopEvent::ThinkingDelta("reading the docs".into()),
+        });
+        app.finish_subtask_row(&call_id, false, "started in the background");
+
+        let (kind, arguments, state, child_lines) = app
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                Line_::Tool {
+                    kind,
+                    arguments,
+                    state,
+                    child_lines,
+                    ..
+                } => Some((kind, arguments, state, child_lines)),
+                _ => None,
+            })
+            .expect("the subtask row");
+        assert!(
+            matches!(kind, ToolKind::Agent { name, .. } if name == "build"),
+            "{kind:?}"
+        );
+        assert_eq!(arguments, "sweep the web");
+        assert_eq!(*state, crate::transcript::ToolState::Succeeded);
+        assert!(
+            !child_lines.is_empty(),
+            "the child's work nests, where it used to be dropped"
+        );
     }
 
     /// Running over SSH there is no clipboard on this machine worth

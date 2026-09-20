@@ -2648,6 +2648,12 @@ impl schedule::Runtime for LoopRuntime<'_> {
         // wedges the pipeline.
         let mut task_ctx = self.tool_ctx.clone();
         task_ctx.session_id = self.session_id.to_string();
+        // A row first, and the call id that goes with it. Without one
+        // the subtask's every event carried an empty `parent_call_id`
+        // and was dropped: a task the user started showed nothing of
+        // what it did, where a model-spawned one nests it all.
+        let call_id = app.start_subtask_row(&description, &request.agent, request.model.clone());
+        task_ctx.call_id = Some(call_id.clone());
         let output = self
             .spawner
             .run_task(
@@ -2664,22 +2670,14 @@ impl schedule::Runtime for LoopRuntime<'_> {
                 &task_ctx,
             )
             .await;
+        app.finish_subtask_row(&call_id, output.is_error, &output.content);
         if output.is_error {
+            // The row says what happened; the notice says it where the
+            // eye already is.
             app.set_notice(
                 format!("{description}: {}", output.content),
                 NoticeLevel::Error,
             );
-            app.push_transcript_line(Line_::System(format!(
-                "{description} failed to start: {}",
-                output.content
-            )));
-        } else {
-            // The transcript line and the agents panel both say so; the
-            // notice line stays free.
-            app.push_transcript_line(Line_::System(format!(
-                "{description} running in the background as {} — its result will land here when it finishes",
-                request.agent
-            )));
         }
     }
 

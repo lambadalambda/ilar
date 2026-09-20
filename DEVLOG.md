@@ -1,5 +1,34 @@
 # DEVLOG
 
+## 2026-09-20 — The task nobody could watch
+
+A subtask started from the TUI — `/command`, the picker — ran with no
+tool call behind it. No call meant no `call_id`, which meant every
+event the child produced carried an empty `parent_call_id`, and the
+router drops those: an empty id can never attach to a row, and
+buffering it would fill the retry queue with entries that stay
+forever. So the person got one system line saying it had started, and
+then nothing, for the whole run. A model-spawned task nests its entire
+child timeline in the same session.
+
+The fix is a synthetic id. Not a real one — nothing on the wire
+answers to it — but the same kind of handle, so the same nesting
+works. The subtask gets the agent row a task tool call would have
+made, settles with the task tool's own "started in the background",
+and its child's work folds underneath it.
+
+Something fell out of it that I had not gone looking for: the child
+writes a `SubagentInvocation` naming its parent call, and that was
+being written with an empty id too. Two user-started subtasks in one
+session would both have claimed it, and a nested view looking up its
+own slice would have found whichever came first.
+
+What is *not* fixed is persistence. Nothing about a user-started
+subtask reaches the parent's log at all, so a reopened session still
+shows no sign it ran. Recording it needs a new event variant, or an
+assistant message carrying a tool call that no model ever made. That
+is a log-format decision and it is filed as one.
+
 ## 2026-09-20 — A screenful of past, folded
 
 Every restored session that had ever been compacted opened with the
