@@ -151,10 +151,10 @@ impl ToolArguments {
     pub(crate) fn take(&mut self, id: &str, name: &str) -> Option<String> {
         let arguments = self.0.remove(id)?;
         let value = serde_json::from_str(&arguments).ok()?;
-        // Redacted where it can be: `summarize_tool_input` scrubs
-        // sensitive keys, shell commands and URL credentials, but a
-        // tool with an arm of its own — a `task_message`'s message, a
-        // `grep` pattern — returns its free text as written.
+        // Redacted at the source: `summarize_tool_input` scrubs
+        // sensitive keys, shell commands and URL credentials from every
+        // arm, which matters here more than on a transcript — stderr is
+        // redirected to a file.
         let summary = ilar::agent::summarize_tool_input(name, &value);
         (!summary.is_empty())
             .then(|| ilar::text::truncate_chars_ellipsis(&summary, MAX_ROW_ARGUMENT_CHARS))
@@ -335,6 +335,31 @@ fn emit(line: ExecLine, out: &mut dyn Write, err: &mut dyn Write) -> std::io::Re
     sink.flush()
 }
 
+/// The session line, once, on the turn's first event.
+///
+/// Not before the turn, which is what it looks like it should be: a
+/// run whose provider never resolves — a bad key, a refused model —
+/// leaves the session with nothing in it, because `run_turn` appends
+/// the user message only after resolving, and `end_session` then
+/// removes it. Printing the id first advertised one that the same run
+/// deleted, and `--session <id>` on it failed.
+///
+/// The first event is `TurnStarted`, published after that append, so
+/// by the time anything arrives the session is durable. A run that
+/// dies before then prints no id and has no work to point at.
+fn name_session_once(
+    named: &mut bool,
+    session_id: &str,
+    format: ExecFormat,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> std::io::Result<()> {
+    if std::mem::replace(named, true) {
+        return Ok(());
+    }
+    emit(session_line(session_id, format), out, err)
+}
+
 /// One event, printed. Split out so the select loop and the drain that
 /// follows it cannot disagree about what a line costs.
 fn show(
@@ -386,10 +411,9 @@ pub(crate) async fn exec_turn(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<TurnOutcome> {
-    // First of all, ahead of the notices: a run killed halfway still
-    // told the script which session holds what it got done, and
-    // `--json | head -1` is how a script will reach for it.
-    emit(session_line(session_id, format), out, err)?;
+    // Ahead of everything the turn says, and said even when the turn
+    // never starts: a setting that was not honoured may be the reason
+    // it did not.
     emit_notices(notices, format, out, err)?;
     let (events, mut rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let turn = ilar::agent::run_turn(
@@ -408,13 +432,15 @@ pub(crate) async fn exec_turn(
     );
     tokio::pin!(turn);
     let mut wrote_answer = false;
+    let mut named = false;
     let mut arguments = ToolArguments::default();
     let outcome = loop {
         tokio::select! {
             event = rx.recv() => match event {
-                Some(event) => show(
-                    &event, format, &mut arguments, &mut wrote_answer, out, err,
-                )?,
+                Some(event) => {
+                    name_session_once(&mut named, session_id, format, out, err)?;
+                    show(&event, format, &mut arguments, &mut wrote_answer, out, err)?;
+                }
                 None => break (&mut turn).await,
             },
             outcome = &mut turn => break outcome,
@@ -422,6 +448,7 @@ pub(crate) async fn exec_turn(
     };
     // Drain whatever the loop published before it finished.
     while let Ok(event) = rx.try_recv() {
+        name_session_once(&mut named, session_id, format, out, err)?;
         show(&event, format, &mut arguments, &mut wrote_answer, out, err)?;
     }
     // Streamed text arrives without a trailing newline; a shell prompt
@@ -822,19 +849,22 @@ mod tests {
         assert!(matches!(ran.outcome, Ok(TurnOutcome::Completed)));
         assert_eq!(ran.out, "the answer\n", "the answer, and only the answer");
         let lines: Vec<&str> = ran.err.lines().collect();
+        // The notice leads — it may be the reason the turn went the way
+        // it did, and it is said even when no turn happens at all. The
+        // session follows, ahead of everything the turn says.
+        assert_eq!(lines.first(), Some(&"notice: [providers] is ignored"));
         assert_eq!(
-            lines.first(),
+            lines.get(1),
             Some(&format!("session {}", ran.session_id).as_str()),
             "{lines:?}"
         );
-        assert_eq!(lines.get(1), Some(&"notice: [providers] is ignored"));
         assert!(ran.err.contains("· glob *.rs"), "{:?}", ran.err);
     }
 
-    /// Under `--json` the session is an event like any other, and it is
-    /// the first one, notice or no notice.
+    /// Under `--json` the session is an event like any other, ahead of
+    /// every event the turn publishes.
     #[tokio::test]
-    async fn a_json_run_leads_with_its_session() {
+    async fn a_json_run_names_its_session_before_the_turn_speaks() {
         let provider = MockProvider::new(vec![answer("hello")]);
         let ran = run_with(
             provider,
@@ -846,10 +876,81 @@ mod tests {
 
         assert!(matches!(ran.outcome, Ok(TurnOutcome::Completed)));
         assert!(ran.err.is_empty(), "{:?}", ran.err);
-        let first: serde_json::Value =
-            serde_json::from_str(ran.out.lines().next().unwrap()).unwrap();
-        assert_eq!(first["type"], "session");
-        assert_eq!(first["id"], ran.session_id.as_str());
+        let kinds: Vec<String> = ran
+            .out
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["type"].to_string()
+            })
+            .collect();
+        let session = kinds.iter().position(|kind| kind == "\"session\"");
+        let started = kinds.iter().position(|kind| kind == "\"turn_started\"");
+        assert!(session < started, "{kinds:?}");
+        assert_eq!(
+            kinds.iter().filter(|kind| *kind == "\"session\"").count(),
+            1
+        );
+        let line = ran
+            .out
+            .lines()
+            .find(|line| line.contains("\"session\""))
+            .unwrap();
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(event["id"], ran.session_id.as_str());
+    }
+
+    /// The id is published on the turn's first event, not before it.
+    ///
+    /// `run_turn` resolves the provider before appending the user
+    /// message, so a bad key leaves the session empty and the run's own
+    /// exit removes it. Printing the id first handed a script an id
+    /// that would not open.
+    #[tokio::test]
+    async fn a_turn_that_never_starts_names_no_session() {
+        /// A resolver that has no provider for anything — a key that is
+        /// not set, a model no configuration can route.
+        struct NoProvider;
+        impl ilar::provider::ProviderResolver for NoProvider {
+            fn resolve_provider(
+                &self,
+                model: &str,
+            ) -> anyhow::Result<ilar::provider::ProviderHandle<'_>> {
+                anyhow::bail!("no provider for {model}")
+            }
+        }
+
+        let (store, session_id, _dir) = temp_store();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = exec_turn(
+            &NoProvider,
+            &ToolRegistry::builtin(),
+            &store,
+            &session_id,
+            "do the thing",
+            Some("system"),
+            LoopConfig::default(),
+            ToolContext::root(std::env::temp_dir()),
+            ExecFormat::Text,
+            &[],
+            CancellationToken::new(),
+            &mut out,
+            &mut err,
+        )
+        .await;
+
+        assert!(outcome.is_err(), "{outcome:?}");
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            !err.contains("session "),
+            "an id was published for a session the exit will remove: {err:?}"
+        );
+        // And the session really is the disposable kind: nothing was
+        // ever said in it.
+        assert!(
+            store.is_unspoken_root(&session_id, &std::env::temp_dir().join("no-outbox")),
+            "the session has something in it after all; the id was safe to print"
+        );
     }
 
     /// The line is no use as a function nobody calls: a turn that runs

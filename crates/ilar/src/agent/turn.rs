@@ -1007,18 +1007,16 @@ fn skip_value(byte: u8) -> PartialJsonState {
 
 /// Bounded, redacted tool input summary suitable for persisted UI replay.
 pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
-    let string = |key: &str| {
-        input
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .map(collapse_whitespace)
-    };
+    // Every arm's free text goes through the one redaction policy, not
+    // only the generic fallthrough. Four surfaces read this as a
+    // redacted projection, and an arm of its own used to be the way a
+    // `task_message` body or a `grep` pattern got published as written.
+    let string = |key: &str| redacted_string(input, key);
     let summary = match name {
         // Whether it was detached is part of what ran: a background
         // command that summarised like a foreground one read as a turn
         // waiting on something it had already let go of.
         "bash" => string("command").map(|command| {
-            let command = redact_command(&command);
             match input
                 .get("run_in_background")
                 .and_then(serde_json::Value::as_bool)
@@ -1034,7 +1032,7 @@ pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
         // same when the name is missing.
         "service" => {
             let action = string("action").unwrap_or_else(|| "service".into());
-            let command = string("command").map(|command| redact_command(&command));
+            let command = string("command");
             Some(match (string("name"), command) {
                 (Some(name), Some(command)) => format!("{action} {name} · {command}"),
                 (Some(name), None) => format!("{action} {name}"),
@@ -1080,10 +1078,7 @@ pub fn summarize_tool_input(name: &str, input: &serde_json::Value) -> String {
             .and_then(serde_json::Value::as_array)
             .filter(|questions| !questions.is_empty())
             .map(|questions| {
-                let first = questions[0]
-                    .get("prompt")
-                    .and_then(serde_json::Value::as_str)
-                    .map(collapse_whitespace);
+                let first = redacted_string(&questions[0], "prompt");
                 match (first, questions.len() - 1) {
                     (Some(prompt), 0) => prompt,
                     (Some(prompt), rest) => format!("{prompt} · +{rest} more"),
@@ -1182,13 +1177,12 @@ fn summarized_value(key: &str, value: &serde_json::Value) -> Option<String> {
 }
 
 /// (description, agent, explicit model override) from task-tool input.
+/// Redacted like every other summarised argument: a description is
+/// free text the model wrote, and a credentialed URL is a secret under
+/// any key at all.
 pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String, Option<String>)> {
     let bounded = |key: &str, limit| {
-        input
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .map(collapse_whitespace)
-            .map(|value| value.chars().take(limit).collect::<String>())
+        redacted_string(input, key).map(|value| value.chars().take(limit).collect::<String>())
     };
     Some((
         bounded("description", 256)?,
@@ -1202,6 +1196,16 @@ pub fn summarize_task_input(input: &serde_json::Value) -> Option<(String, String
 /// [`summarize_tool_input`] does it one line up.
 pub fn tool_argument_detail(_name: &str, input: &serde_json::Value) -> String {
     crate::text::bounded_detail(&tool_argument_input(input))
+}
+
+/// One of `input`'s string values, put through [`redacted_argument`]
+/// and collapsed to a line. `None` when the key is absent or holds
+/// something that is not a string.
+fn redacted_string(input: &serde_json::Value, key: &str) -> Option<String> {
+    let value = input.get(key)?;
+    let redacted = redacted_argument(key, value);
+    let text = redacted.as_ref().unwrap_or(value).as_str()?;
+    Some(collapse_whitespace(text))
 }
 
 /// The one redaction policy for one argument: a value under a
@@ -2709,6 +2713,62 @@ mod tests {
             assert!(!detail.contains("also-secret"), "{tool}: {detail}");
             assert!(detail.contains("<redacted>"), "{tool}: {detail}");
         }
+    }
+
+    /// Four surfaces treat this as a redacted projection — the
+    /// transcript, replay, `serve` and `ilar exec`'s stderr, which is
+    /// redirected to a file more often than any of them. It was one
+    /// only where no arm had claimed the tool: every arm with a case of
+    /// its own returned its free text as written.
+    #[test]
+    fn every_arm_redacts_its_free_text_not_only_the_generic_one() {
+        let credentialed = "fetch https://user:hunter2@host/x";
+        let cases = [
+            (
+                "task_message",
+                serde_json::json!({"task_id": "t1", "message": credentialed}),
+            ),
+            (
+                "grep",
+                serde_json::json!({"pattern": credentialed, "path": "src"}),
+            ),
+            ("glob", serde_json::json!({"pattern": credentialed})),
+            ("read", serde_json::json!({"path": credentialed})),
+            ("write", serde_json::json!({"path": credentialed})),
+            (
+                "service",
+                serde_json::json!({"action": "start", "name": credentialed}),
+            ),
+            (
+                crate::question::QUESTION_TOOL_NAME,
+                serde_json::json!({"questions": [{"prompt": credentialed}]}),
+            ),
+            // `subagent_type`, the key the arm actually reads: with
+            // anything else it falls through to the generic path, which
+            // was never the half that leaked.
+            (
+                "task",
+                serde_json::json!({"description": credentialed, "subagent_type": "build"}),
+            ),
+        ];
+        for (tool, input) in &cases {
+            let summary = summarize_tool_input(tool, input);
+            assert!(
+                !summary.contains("hunter2"),
+                "{tool} published a credential: {summary}"
+            );
+            // The rest of the value survives — this is redaction, not
+            // blanking, and the row still says what the call was about.
+            assert!(summary.contains("host/x"), "{tool}: {summary}");
+        }
+
+        // A sensitive key goes entirely, under an arm as under the
+        // generic path.
+        let summary = summarize_tool_input(
+            "task_message",
+            &serde_json::json!({"task_id": "t1", "api_key": "sk-live-1"}),
+        );
+        assert!(!summary.contains("sk-live-1"), "{summary}");
     }
 
     /// A summary says which thing the call acted on. The generic path
