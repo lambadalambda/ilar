@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ilar::agent::{LoopEvent, summarize_tool_input};
+use ilar::agent::LoopEvent;
 use tokio::sync::mpsc;
 
 use crate::channel::Channel;
@@ -291,17 +291,19 @@ impl Narrator {
                 }
                 format!("calling {name}…")
             }
-            LoopEvent::ToolInputComplete { id, arguments } => {
+            // The loop's own summary, not the raw input parsed again:
+            // `ToolArguments` carries what `summarize_tool_input`
+            // made of the same call, and re-deriving it here meant
+            // cloning an unbounded `write` body to produce a line.
+            LoopEvent::ToolArguments { id, arguments } => {
                 let name = self.tools.get(id).cloned().unwrap_or_default();
                 if name == "message" {
                     return None;
                 }
-                let input: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
-                let summary = summarize_tool_input(&name, &input);
-                if summary.trim().is_empty() {
+                if arguments.trim().is_empty() {
                     format!("running {name}")
                 } else {
-                    format!("running {name}: {summary}")
+                    format!("running {name}: {arguments}")
                 }
             }
             LoopEvent::SubagentConfigured {
@@ -454,14 +456,25 @@ mod tests {
             }),
             Some("calling bash…".into())
         );
+        // The loop's own summary, which is what `ToolArguments`
+        // carries; the raw-input event is a different one and is not
+        // the narrator's to parse.
         let running = narrator
-            .observe(&LoopEvent::ToolInputComplete {
+            .observe(&LoopEvent::ToolArguments {
                 id: "1".into(),
-                arguments: r#"{"command": "cargo test -p ilar"}"#.into(),
+                arguments: "cargo test -p ilar".into(),
             })
             .unwrap();
         assert!(running.starts_with("running bash: "), "{running}");
         assert!(running.contains("cargo test"), "{running}");
+        assert_eq!(
+            narrator.observe(&LoopEvent::ToolInputComplete {
+                id: "1".into(),
+                arguments: r#"{"command": "cargo test -p ilar"}"#.into(),
+            }),
+            None,
+            "the narrator re-derived the summary from the raw input"
+        );
         assert_eq!(narrator.observe(&LoopEvent::TurnStarted), None);
         assert_eq!(
             narrator.observe(&LoopEvent::ToolStarted {

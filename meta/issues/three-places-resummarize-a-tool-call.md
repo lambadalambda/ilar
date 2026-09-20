@@ -38,3 +38,28 @@ body to summarise it to 100-odd characters.
   a consumer taking the name from the finish is robust against a
   provider that skips the started event. Whatever the helper does here
   should keep that property.
+
+## Outcome (2026-09-20)
+
+Two of the three, and the third cannot be done as the issue asks.
+
+`ilar::agent::ToolArguments` follows `LoopEvent::ToolArguments` — the
+summary the loop already computed from the same `ToolCallCompleted`
+that produces the raw input — and hands it back under the call's id.
+`ilar exec` and the gateway's status narrator both use it. Neither
+keeps the unbounded raw input, and neither parses or summarises
+anything: a `write` of two megabytes was being cloned and re-parsed
+per call to produce a hundred characters.
+
+**The replay path is not a third consumer of the same thing.** It
+reads the session log, which stores the raw input and no summary —
+there is no `ToolArguments` event to follow, because the events are
+not persisted. So "no consumer re-parses the raw input" is not
+reachable there, and `session_view` keeps calling
+`summarize_tool_input` directly. That is the right answer rather than
+a gap: the log is the input, and summarising it on the way out is what
+replay is for.
+
+What the acceptance criterion really wanted — the surfaces agreeing —
+holds by construction now for the two live ones, since they read the
+same published string rather than each deriving their own.

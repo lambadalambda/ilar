@@ -123,48 +123,10 @@ pub(crate) fn emit_notices(
     Ok(())
 }
 
-/// What a call was made with, kept from the event that carries the
-/// arguments until the one that finishes the call — they arrive under
-/// one id, several events apart, and only the second one prints.
-#[derive(Debug, Default)]
-pub(crate) struct ToolArguments(std::collections::HashMap<String, String>);
-
-/// How much of a call's arguments a progress row carries. The summary
-/// is capped at 512 for a transcript row that wraps; a line of stderr
-/// scrolling past between tool calls wants far less.
+/// How much of a call's summary a progress row carries. The summary
+/// itself is capped at 512 for a transcript row that wraps; a line of
+/// stderr scrolling past between tool calls wants far less.
 const MAX_ROW_ARGUMENT_CHARS: usize = 100;
-
-impl ToolArguments {
-    /// Keep the raw arguments of a call. Summarising waits for the
-    /// finish rather than reading the name off the `ToolStarted` before
-    /// it: a provider that skips the started event still gets a row.
-    pub(crate) fn remember(&mut self, event: &LoopEvent) {
-        if let LoopEvent::ToolInputComplete { id, arguments } = event {
-            self.0.insert(id.clone(), arguments.clone());
-        }
-    }
-
-    /// The summary for a finished call, taken rather than read: a turn
-    /// with thousands of calls should not carry every one of them to
-    /// the end. `None` when the arguments never arrived, or were not
-    /// JSON, or say nothing.
-    pub(crate) fn take(&mut self, id: &str, name: &str) -> Option<String> {
-        let arguments = self.0.remove(id)?;
-        let value = serde_json::from_str(&arguments).ok()?;
-        // Redacted at the source: `summarize_tool_input` scrubs
-        // sensitive keys, shell commands and URL credentials from every
-        // arm, which matters here more than on a transcript — stderr is
-        // redirected to a file.
-        let summary = ilar::agent::summarize_tool_input(name, &value);
-        (!summary.is_empty())
-            .then(|| ilar::text::truncate_chars_ellipsis(&summary, MAX_ROW_ARGUMENT_CHARS))
-    }
-
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
 
 /// What one event prints, or nothing when it is noise for this format.
 /// `argument` is what the call was made with, for the event that
@@ -365,7 +327,7 @@ fn name_session_once(
 fn show(
     event: &LoopEvent,
     format: ExecFormat,
-    arguments: &mut ToolArguments,
+    arguments: &mut ilar::agent::ToolArguments,
     wrote_answer: &mut bool,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -374,9 +336,16 @@ fn show(
     // has the arguments already, on their own event, unsummarised.
     let argument = match format {
         ExecFormat::Text => {
-            arguments.remember(event);
+            arguments.observe(event);
             match event {
-                LoopEvent::ToolFinished { id, name, .. } => arguments.take(id, name),
+                // Redacted at the source: the loop summarises through
+                // `summarize_tool_input`, which scrubs sensitive keys,
+                // shell commands and URL credentials from every arm.
+                // That matters here more than on a transcript — stderr
+                // is redirected to a file.
+                LoopEvent::ToolFinished { id, .. } => arguments.take(id).map(|summary| {
+                    ilar::text::truncate_chars_ellipsis(&summary, MAX_ROW_ARGUMENT_CHARS)
+                }),
                 _ => None,
             }
         }
@@ -433,7 +402,7 @@ pub(crate) async fn exec_turn(
     tokio::pin!(turn);
     let mut wrote_answer = false;
     let mut named = false;
-    let mut arguments = ToolArguments::default();
+    let mut arguments = ilar::agent::ToolArguments::default();
     let outcome = loop {
         tokio::select! {
             event = rx.recv() => match event {
@@ -737,38 +706,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(failure.text, "✗ read nope.rs: no such file");
-    }
-
-    /// The arguments arrive under one event and the row is printed on
-    /// another, several calls later; the id is what joins them.
-    #[test]
-    fn arguments_wait_for_the_row_that_finishes_them() {
-        let mut arguments = ToolArguments::default();
-        arguments.remember(&LoopEvent::ToolInputComplete {
-            id: "call-1".into(),
-            arguments: r#"{"pattern": "**/*.rs"}"#.into(),
-        });
-        arguments.remember(&LoopEvent::ToolInputComplete {
-            id: "call-2".into(),
-            arguments: r#"{"path": "/etc/hosts"}"#.into(),
-        });
-        // Out of order, and each one only once: the map is not a leak
-        // that grows for the length of the turn.
-        assert_eq!(
-            arguments.take("call-2", "read").as_deref(),
-            Some("/etc/hosts")
-        );
-        assert_eq!(arguments.take("call-2", "read"), None);
-        assert_eq!(arguments.take("call-1", "glob").as_deref(), Some("**/*.rs"));
-        assert!(arguments.is_empty());
-        // Arguments that are not JSON at all say nothing rather than
-        // printing the parse error into a progress row.
-        arguments.remember(&LoopEvent::ToolInputComplete {
-            id: "call-3".into(),
-            arguments: "{not json".into(),
-        });
-        assert_eq!(arguments.take("call-3", "read"), None);
-        assert_eq!(arguments.take("never-seen", "read"), None);
     }
 
     /// `--session <id>` on the next run has to come from somewhere, and

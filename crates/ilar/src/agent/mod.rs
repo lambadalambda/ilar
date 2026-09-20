@@ -4,7 +4,8 @@ mod event;
 mod turn;
 
 pub use event::{
-    LOOP_EVENT_CAPACITY, LoopEvent, LoopEventReceiver, LoopEventSender, loop_event_channel,
+    LOOP_EVENT_CAPACITY, LoopEvent, LoopEventReceiver, LoopEventSender, ToolArguments,
+    loop_event_channel,
 };
 pub use turn::{
     LoopConfig, Steer, SteerReceiver, SteerSender, TurnNeverStarted, TurnOutcome, redact_command,

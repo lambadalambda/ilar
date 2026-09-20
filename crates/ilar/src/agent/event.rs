@@ -383,6 +383,45 @@ impl LoopEventReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The summary arrives on one event and the row that prints it on
+    /// another, several calls later; the id is what joins them. Three
+    /// consumers kept the raw input and summarised it again instead —
+    /// cloning an unbounded `write` body to produce a hundred
+    /// characters the loop had already produced.
+    #[test]
+    fn a_summary_waits_for_the_row_that_finishes_its_call() {
+        let mut arguments = ToolArguments::default();
+        arguments.observe(&LoopEvent::ToolArguments {
+            id: "call-1".into(),
+            arguments: "**/*.rs".into(),
+        });
+        arguments.observe(&LoopEvent::ToolArguments {
+            id: "call-2".into(),
+            arguments: "/etc/hosts".into(),
+        });
+        // Out of order, and each one only once: the map is not a leak
+        // that grows for the length of the turn.
+        assert_eq!(arguments.take("call-2").as_deref(), Some("/etc/hosts"));
+        assert_eq!(arguments.take("call-2"), None);
+        assert_eq!(arguments.take("call-1").as_deref(), Some("**/*.rs"));
+        assert!(arguments.is_empty());
+        // A call nobody said anything about, and a summary that says
+        // nothing, are the same answer: no argument for the row.
+        assert_eq!(arguments.take("never-seen"), None);
+        arguments.observe(&LoopEvent::ToolArguments {
+            id: "call-3".into(),
+            arguments: String::new(),
+        });
+        assert_eq!(arguments.take("call-3"), None);
+        // The raw-input event is not this one: it carries JSON, not a
+        // summary, and reading it here is what the three copies did.
+        arguments.observe(&LoopEvent::ToolInputComplete {
+            id: "call-4".into(),
+            arguments: r#"{"path": "/etc/hosts"}"#.into(),
+        });
+        assert_eq!(arguments.take("call-4"), None);
+    }
     use crate::agent::TurnOutcome;
     use tokio_util::sync::CancellationToken;
 
@@ -538,5 +577,42 @@ mod tests {
             rx.recv().await,
             Some(LoopEvent::ToolInputProgress { id, .. }) if id == "write-1"
         ));
+    }
+}
+
+/// What each tool call was made with, followed from the loop's own
+/// events.
+///
+/// The loop publishes the finished summary on [`LoopEvent::ToolArguments`]
+/// — `turn.rs` computes it from the same `ToolCallCompleted` that
+/// produces the raw [`LoopEvent::ToolInputComplete`] — and three
+/// consumers were rebuilding it instead: keeping the unbounded raw
+/// input, parsing it again, and calling `summarize_tool_input`
+/// themselves. A `write` of two megabytes was cloned and re-parsed per
+/// call to produce a hundred characters.
+///
+/// The summary arrives before the call finishes, and the row that
+/// prints it comes later, so it waits here under the call's id.
+#[derive(Debug, Default)]
+pub struct ToolArguments(std::collections::HashMap<String, String>);
+
+impl ToolArguments {
+    /// Note what an event says about a call, if anything.
+    pub fn observe(&mut self, event: &LoopEvent) {
+        if let LoopEvent::ToolArguments { id, arguments } = event {
+            self.0.insert(id.clone(), arguments.clone());
+        }
+    }
+
+    /// The summary for a call, taken rather than read: a turn with
+    /// thousands of calls should not carry every one of them to the
+    /// end. `None` when nothing was ever said about it, or what was
+    /// said is empty.
+    pub fn take(&mut self, id: &str) -> Option<String> {
+        self.0.remove(id).filter(|summary| !summary.is_empty())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }

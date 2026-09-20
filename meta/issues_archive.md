@@ -447,3 +447,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [One hit map for the sidebar](issues/one-hit-map-for-the-sidebar.md) — SidebarAction, one hover pass, one dispatch; three copies of the plumbing gone
 - [x] [Hover claims the whole row](issues/hover-claims-the-whole-row.md) — every line of the hovered target underlines, and the markers stay bare like the transcript's
 - [x] [Plain words on every surface](issues/plain-words-on-every-surface.md) — the implementation's vocabulary out of the user's messages, one disclosure pair, one label casing
+- [x] [Three places resummarize a tool call](issues/three-places-resummarize-a-tool-call.md) — exec and the gateway follow the loop's published summary; replay reads the log and cannot
