@@ -1850,14 +1850,78 @@ context = 200000
     ) -> Value {
         // A minute: under the full all-features workspace run this
         // machine has taken more than the thirty seconds it used to get.
+        let mut last = Value::Null;
         for _ in 0..1200 {
             let page = harness.json(&format!("/api/sessions/{id}")).await;
             if ready(&page) {
                 return page;
             }
+            last = page;
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("the transcript never arrived");
+        // What it gave up on, not that it gave up. These tests flake on
+        // a loaded machine (see meta/issues/an-adoption-test-hangs-once-
+        // in-ten.md), and a bare "never arrived" told the next person
+        // nothing about which step was missing.
+        panic!(
+            "the transcript never satisfied the test after 60s; last seen: {} event(s): {}",
+            last.get("events")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+            event_digest(&last)
+        );
+    }
+
+    /// One line per event — role and a clipped first line — for a
+    /// patience loop that has to say what it saw.
+    fn event_digest(page: &Value) -> String {
+        let Some(events) = page.get("events").and_then(Value::as_array) else {
+            return format!("no events array in {page}");
+        };
+        events
+            .iter()
+            .map(|event| {
+                let kind = event
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .or_else(|| event.get("role").and_then(Value::as_str))
+                    .unwrap_or("?");
+                // A user message carries `text`; an assistant one
+                // carries typed content blocks, and a digest that read
+                // only the first said nothing about the half that
+                // matters.
+                let said = event
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        event
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .map(|blocks| {
+                                blocks
+                                    .iter()
+                                    .map(|block| {
+                                        let kind = block
+                                            .get("type")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("?");
+                                        match block.get("text").and_then(Value::as_str) {
+                                            Some(text) => text.to_string(),
+                                            None => format!("<{kind}>"),
+                                        }
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("|")
+                            })
+                            .unwrap_or_default()
+                    });
+                let said: String = said.chars().take_while(|c| *c != '\n').take(60).collect();
+                format!("{kind}({said})")
+            })
+            .collect::<Vec<_>>()
+            .join(" → ")
     }
 
     /// The heart of the issue: a driven turn detaches a task, the turn

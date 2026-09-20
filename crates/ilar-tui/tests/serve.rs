@@ -160,6 +160,28 @@ impl Server {
         }
         panic!("the listing never {expected}");
     }
+
+    /// A session's children, once there are that many. The listing and
+    /// the children come off the same cache but not necessarily in the
+    /// same refresh, so waiting for the roots does not mean the
+    /// children are there — which is how this read came back empty
+    /// about one run in nineteen on a loaded machine.
+    async fn children_once_there_are(&self, id: &str, count: usize) -> Vec<Value> {
+        let mut last = Vec::new();
+        for _ in 0..100 {
+            let page = self.json(&format!("/api/sessions/{id}/children")).await;
+            let children = page["children"].as_array().cloned().unwrap_or_default();
+            if children.len() >= count {
+                return children;
+            }
+            last = children;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!(
+            "session {id} never listed {count} children; last saw {}",
+            last.len()
+        );
+    }
 }
 
 impl Drop for Server {
@@ -400,11 +422,9 @@ async fn the_listing_carries_a_row_per_root_session() {
             .any(|row| row["cwd"] == "/tmp/beta" && row["id"] == second.as_str())
     );
 
-    // The other half of the same cache.
-    let children = server
-        .json(&format!("/api/sessions/{first}/children"))
-        .await;
-    let children = children["children"].as_array().unwrap();
+    // The other half of the same cache — and not necessarily filled by
+    // the same refresh, so it is waited for rather than assumed.
+    let children = server.children_once_there_are(&first, 1).await;
     assert_eq!(children.len(), 1);
     assert_eq!(children[0]["id"], child.as_str());
     assert_eq!(children[0]["agent"], "explore");
