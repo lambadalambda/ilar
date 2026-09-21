@@ -91,7 +91,7 @@ public box. Make the bot with BotFather and put its token here.
 | Key | Default | Meaning |
 |---|---|---|
 | `token` | — | The bot token from BotFather. |
-| `allow_from` | `[]` | Who may talk: numeric user ids, or usernames with or without the `@`. A stranger gets no turn and no reply. |
+| `allow_from` | `[]` | Who may talk: numeric user ids, or usernames with or without the `@`. Ids are the safer form — a username can be given up and taken by someone else. A stranger gets no turn and no reply. |
 | `allow_anyone` | `false` | Talk to whoever writes. Without it an empty `allow_from` refuses to start. |
 | `ack_reaction` | — | An emoji to react with on receipt; Telegram takes only the ones on its own list. |
 | `media_dir` | `<home>/telegram` | Where attachments are fetched to. |

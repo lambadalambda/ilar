@@ -27,7 +27,7 @@ impl Inbound {
 }
 
 /// A message the agent sends through a channel.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outbound {
     pub channel: String,
     pub chat_id: String,

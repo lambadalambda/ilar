@@ -11,6 +11,18 @@ use crate::bus::{Inbound, Outbound};
 
 pub type ChannelFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Whether a file is a picture to show as one, by its extension — the
+/// one rule every channel applies before choosing how to send a file.
+pub fn is_image(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp")
+    )
+}
+
 pub trait Channel: Send + Sync {
     fn name(&self) -> &str;
 

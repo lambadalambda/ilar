@@ -483,13 +483,15 @@ const BUBBLE_LINE_CHARS: usize = 100;
 /// — a zip with an `index.html` and a `manifest.toml` — as a webxdc
 /// app the person can open in the chat, anything else as a file.
 fn viewtype(path: &std::path::Path) -> &'static str {
+    if crate::channel::is_image(path) {
+        return "Image";
+    }
     match path
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
         .as_deref()
     {
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp") => "Image",
         Some("xdc") => "Webxdc",
         _ => "File",
     }

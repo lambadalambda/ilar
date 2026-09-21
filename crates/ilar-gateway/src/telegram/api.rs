@@ -35,9 +35,14 @@ pub trait BotApi: Send + Sync {
 /// How long a call may take. A long poll waits `POLL_SECS` on the
 /// server before answering; this leaves a margin over that.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(75);
+/// How long a file may take to go up or come down: the API allows
+/// 50 MB, and an uplink can be slow.
+const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 pub struct Http {
     client: reqwest::Client,
+    /// The same, with time for a file.
+    transfers: reqwest::Client,
     token: String,
     base: String,
     files: String,
@@ -49,8 +54,13 @@ impl Http {
             .timeout(CALL_TIMEOUT)
             .build()
             .context("building the Telegram client")?;
+        let transfers = reqwest::Client::builder()
+            .timeout(TRANSFER_TIMEOUT)
+            .build()
+            .context("building the Telegram client")?;
         Ok(Self {
             client,
+            transfers,
             token: token.to_string(),
             base: format!("https://api.telegram.org/bot{token}/"),
             files: format!("https://api.telegram.org/file/bot{token}/"),
@@ -137,7 +147,7 @@ impl BotApi for Http {
                 }
             }
             let response = self
-                .client
+                .transfers
                 .post(format!("{}{method}", self.base))
                 .multipart(form)
                 .send()
@@ -151,7 +161,7 @@ impl BotApi for Http {
     fn download<'a>(&'a self, file_path: &'a str, to: &'a Path) -> ChannelFuture<'a, Result<()>> {
         Box::pin(async move {
             let response = self
-                .client
+                .transfers
                 .get(format!("{}{file_path}", self.files))
                 .send()
                 .await

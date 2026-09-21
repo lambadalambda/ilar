@@ -11,7 +11,6 @@ pub mod api;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -48,12 +47,14 @@ pub struct TelegramConfig {
 /// How long one `getUpdates` waits on the server. The API allows 50.
 const POLL_SECS: u64 = 30;
 /// After a failed poll — the network is down, Telegram is not — before
-/// the next one.
+/// the next one; doubled per failure up to the cap.
 const POLL_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+const POLL_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 /// Telegram's cap on a message is 4096 characters and on a caption
-/// 1024. Pieces are cut by the gateway's line-counting splitter at 40
-/// lines of 100, which keeps every piece under 4000.
-const PIECE_LINES: usize = 40;
+/// 1024. Pieces are cut by the gateway's line-counting splitter at 36
+/// lines of 100 — at most 3,600 characters and 36 line breaks — with
+/// room to spare in case the cap counts wider than code points.
+const PIECE_LINES: usize = 36;
 const PIECE_LINE_CHARS: usize = 100;
 const CAPTION_CHARS: usize = 1024;
 /// A button's callback data may be at most 64 bytes.
@@ -65,7 +66,6 @@ pub struct Telegram {
     media_dir: PathBuf,
     /// The bot's own username from `getMe`, for stripping mentions.
     username: std::sync::Mutex<Option<String>>,
-    bot_id: AtomicI64,
 }
 
 impl Telegram {
@@ -90,7 +90,6 @@ impl Telegram {
             api,
             media_dir,
             username: std::sync::Mutex::new(None),
-            bot_id: AtomicI64::new(0),
         })
     }
 
@@ -123,10 +122,6 @@ impl Telegram {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        self.bot_id.store(
-            me.get("id").and_then(Value::as_i64).unwrap_or(0),
-            Ordering::Release,
-        );
         *self.username.lock().unwrap() = Some(username.clone());
         // The menu: what typing `/` offers. Best effort — a menu that
         // would not set is a bot without one, not a bot that is down.
@@ -194,28 +189,40 @@ impl Telegram {
             .map(|id| id.to_string())
             .context("a message without a chat")?;
         let is_group = chat.get("type").and_then(Value::as_str) != Some("private");
-        let message_id = message
-            .get("message_id")
-            .and_then(Value::as_i64)
-            .map(|id| id.to_string());
+        let message_id = message.get("message_id").and_then(Value::as_i64);
         let raw = message
             .get("text")
             .or_else(|| message.get("caption"))
             .and_then(Value::as_str)
             .unwrap_or("");
         let username = self.username.lock().unwrap().clone().unwrap_or_default();
-        let text = strip_mention(raw, &username);
+        let mut text = strip_mention(raw, &username);
+        // A file that cannot be fetched — too big for the API, a
+        // network blip — does not take the person's words with it: the
+        // text goes on, with a note where the file would have been.
         let media = match attachment(message) {
-            Some(file) => self.fetch(&file).await.map(|path| vec![path])?,
+            Some(file) => match self.fetch(&file).await {
+                Ok(path) => vec![path],
+                Err(error) => {
+                    log(&format!("telegram: attachment not fetched: {error:#}"));
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(
+                        "(an attachment came with this message but could not be fetched)",
+                    );
+                    Vec::new()
+                }
+            },
             None => Vec::new(),
         };
         if text.trim().is_empty() && media.is_empty() {
             return Ok(());
         }
-        if let (Some(emoji), Some(id)) = (&self.config.ack_reaction, message_id.as_deref()) {
+        if let (Some(emoji), Some(id)) = (&self.config.ack_reaction, message_id) {
             let reaction = json!({
                 "chat_id": chat_id,
-                "message_id": id.parse::<i64>().unwrap_or(0),
+                "message_id": id,
                 "reaction": [{"type": "emoji", "emoji": emoji}],
             });
             if let Err(error) = self.api.call("setMessageReaction", reaction).await {
@@ -227,7 +234,7 @@ impl Telegram {
                 channel: self.name().to_string(),
                 chat_id,
                 sender_id,
-                message_id,
+                message_id: message_id.map(|id| id.to_string()),
                 text,
                 media,
                 is_group,
@@ -378,12 +385,13 @@ fn attachment(message: &Value) -> Option<Attachment> {
 }
 
 /// A file name Telegram or a person chose, kept to characters that
-/// cannot leave the media directory.
+/// cannot leave the media directory. Letters in any script stay, so
+/// a name a person can read is still one.
 fn safe_name(name: &str) -> String {
     let kept: String = name
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') {
                 c
             } else {
                 '_'
@@ -399,30 +407,52 @@ fn safe_name(name: &str) -> String {
 }
 
 /// `/new@ilar_bot` is `/new`; `@ilar_bot hello` is `hello`. Telegram
-/// addresses a bot in a group both ways.
+/// addresses a bot in a group both ways. The mention has to be the
+/// whole first word — `@ilar_botty` is somebody else — and the text
+/// is walked by characters, never sliced by bytes: a message in
+/// Cyrillic or emoji has byte lengths that are nobody's business.
 fn strip_mention(text: &str, username: &str) -> String {
     let text = text.trim();
     if username.is_empty() {
         return text.to_string();
     }
-    let suffix = format!("@{username}");
-    if text.starts_with('/') {
-        let (head, tail) = match text.split_once(char::is_whitespace) {
-            Some((head, tail)) => (head, format!(" {tail}")),
-            None => (text, String::new()),
-        };
-        if let Some(command) = head
-            .strip_suffix(suffix.as_str())
-            .filter(|command| !command.is_empty())
+    let mention = format!("@{username}");
+    let (first, rest) = match text.split_once(char::is_whitespace) {
+        Some((first, rest)) => (first, rest.trim_start()),
+        None => (text, ""),
+    };
+    if let Some(command) = first.strip_prefix('/') {
+        // `/new@ilar_bot` — the mention is glued to the command.
+        if let Some((name, at)) = command.rsplit_once('@')
+            && !name.is_empty()
+            && at.eq_ignore_ascii_case(username)
         {
-            return format!("{command}{tail}").trim().to_string();
+            return if rest.is_empty() {
+                format!("/{name}")
+            } else {
+                format!("/{name} {rest}")
+            };
         }
         return text.to_string();
     }
-    if text.len() >= suffix.len() && text[..suffix.len()].eq_ignore_ascii_case(&suffix) {
-        return text[suffix.len()..].trim_start().to_string();
+    if first.eq_ignore_ascii_case(&mention) {
+        return rest.to_string();
     }
     text.to_string()
+}
+
+/// Whether an update from before this start would act on the present:
+/// a command, or a tapped button. A `/grant always` tapped hours ago
+/// must not answer whatever ask is standing now, and an `/unlock` the
+/// adapter deleted from the chat is still in Telegram's backlog.
+fn is_stale_command(update: &Value) -> bool {
+    if update.get("callback_query").is_some() {
+        return true;
+    }
+    update
+        .pointer("/message/text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.trim_start().starts_with('/'))
 }
 
 fn describe_user(user: &Value) -> String {
@@ -458,14 +488,20 @@ fn keyboard(buttons: &[Button]) -> Option<Value> {
     Some(json!({"inline_keyboard": rows}))
 }
 
-fn is_image(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
-            .as_deref(),
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp")
-    )
+/// Which upload a file is: Telegram shows a gif sent as a photo as a
+/// still, so it goes as an animation.
+fn upload_kind(path: &Path) -> (&'static str, &'static str) {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+    if ext.as_deref() == Some("gif") {
+        ("sendAnimation", "animation")
+    } else if crate::channel::is_image(path) {
+        ("sendPhoto", "photo")
+    } else {
+        ("sendDocument", "document")
+    }
 }
 
 impl Channel for Telegram {
@@ -475,7 +511,7 @@ impl Channel for Telegram {
 
     fn constraints(&self) -> &str {
         "plain text, no markdown rendering — asterisks and underscores show as typed; a long \
-         text is sent as several messages, each under 40 lines of 100 characters, split at line \
+         text is sent as several messages, each under 36 lines of 100 characters, split at line \
          breaks, so write it whole; files are attached by path, pictures are shown as photos, \
          and a text that fits one message rides as the first file's caption"
     }
@@ -488,26 +524,42 @@ impl Channel for Telegram {
         Box::pin(async move {
             self.setup().await?;
             let mut offset: Option<i64> = None;
+            // Telegram keeps what arrived while the gateway was down.
+            // The first poll takes it without waiting, and the commands
+            // in it are dropped — see [`is_stale_command`]; the
+            // messages are answered.
+            let mut backlog = true;
+            let mut retry = POLL_RETRY;
             loop {
-                let params = json!({
-                    "offset": offset,
-                    "timeout": POLL_SECS,
+                let mut params = json!({
+                    "timeout": if backlog { 0 } else { POLL_SECS },
                     "allowed_updates": ["message", "callback_query"],
                 });
+                if let Some(offset) = offset {
+                    params["offset"] = json!(offset);
+                }
                 let updates = tokio::select! {
                     () = cancel.cancelled() => return Ok(()),
                     updates = self.api.call("getUpdates", params) => updates,
                 };
                 let updates = match updates {
-                    Ok(updates) => updates,
+                    Ok(updates) => {
+                        retry = POLL_RETRY;
+                        updates
+                    }
                     Err(error) => {
                         // The network, most likely: wait and ask again
-                        // rather than restart the channel for it.
+                        // rather than restart the channel for it. A
+                        // failure that stays — the token revoked, a
+                        // second gateway on the same bot — backs off
+                        // to a line a minute rather than one every
+                        // five seconds.
                         log(&format!("telegram: poll failed: {error:#}"));
                         tokio::select! {
                             () = cancel.cancelled() => return Ok(()),
-                            () = tokio::time::sleep(POLL_RETRY) => {}
+                            () = tokio::time::sleep(retry) => {}
                         }
+                        retry = (retry * 2).min(POLL_RETRY_MAX);
                         continue;
                     }
                 };
@@ -515,10 +567,15 @@ impl Channel for Telegram {
                     if let Some(id) = update.get("update_id").and_then(Value::as_i64) {
                         offset = Some(offset.map_or(id + 1, |current| current.max(id + 1)));
                     }
+                    if backlog && is_stale_command(update) {
+                        log("telegram: a command from before the start was dropped");
+                        continue;
+                    }
                     if let Err(error) = self.update(update, &inbound).await {
                         log(&format!("telegram: update dropped: {error:#}"));
                     }
                 }
+                backlog = false;
             }
         })
     }
@@ -532,7 +589,12 @@ impl Channel for Telegram {
             let chat_id: i64 = chat_id.parse()?;
             let sent = self
                 .api
-                .call("sendMessage", json!({"chat_id": chat_id, "text": text}))
+                // Quiet: a line that changes every few seconds must
+                // not buzz the phone each time.
+                .call(
+                    "sendMessage",
+                    json!({"chat_id": chat_id, "text": text, "disable_notification": true}),
+                )
                 .await?;
             Ok(sent
                 .get("message_id")
@@ -644,11 +706,7 @@ impl Channel for Telegram {
             }
             let media_count = message.media.len();
             for (index, path) in message.media.iter().enumerate() {
-                let (method, field) = if is_image(path) {
-                    ("sendPhoto", "photo")
-                } else {
-                    ("sendDocument", "document")
-                };
+                let (method, field) = upload_kind(path);
                 let mut fields = json!({"chat_id": chat_id});
                 if let Some(caption) = caption.take() {
                     fields["caption"] = Value::String(caption);
@@ -680,6 +738,26 @@ mod tests {
         calls: Calls,
         updates: tokio::sync::Mutex<mpsc::Receiver<Value>>,
         downloads: Mutex<Vec<(String, PathBuf)>>,
+        /// Methods to refuse, once each, with the description given —
+        /// what a channel that is down, or a message that is gone,
+        /// answers.
+        failing: Mutex<Vec<(String, String)>>,
+    }
+
+    impl FakeApi {
+        fn fail_next(&self, method: &str, description: &str) {
+            self.failing
+                .lock()
+                .unwrap()
+                .push((method.to_string(), description.to_string()));
+        }
+
+        fn refusal(&self, method: &str) -> Option<anyhow::Error> {
+            let mut failing = self.failing.lock().unwrap();
+            let at = failing.iter().position(|(m, _)| m == method)?;
+            let (_, description) = failing.remove(at);
+            Some(anyhow::anyhow!("{method}: {description}"))
+        }
     }
 
     impl BotApi for FakeApi {
@@ -689,6 +767,9 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push((method.to_string(), params.clone()));
+                if let Some(error) = self.refusal(method) {
+                    return Err(error);
+                }
                 Ok(match method {
                     "getMe" => json!({"id": 99, "is_bot": true, "username": "ilar_bot"}),
                     "getUpdates" => match self.updates.lock().await.recv().await {
@@ -749,8 +830,136 @@ mod tests {
             calls: Arc::new(Mutex::new(Vec::new())),
             updates: tokio::sync::Mutex::new(rx),
             downloads: Mutex::new(Vec::new()),
+            failing: Mutex::new(Vec::new()),
         });
         (api, tx)
+    }
+
+    /// What piled up while the gateway was down is read once without
+    /// waiting, and its commands and taps are dropped: a `/grant
+    /// always` from hours ago must not answer the ask standing now.
+    /// The messages in it are answered, and everything after the first
+    /// poll is live.
+    #[tokio::test]
+    async fn stale_commands_in_the_backlog_are_dropped_and_messages_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = started(
+            TelegramConfig {
+                allow_from: vec!["1".into()],
+                ..TelegramConfig::default()
+            },
+            dir.path(),
+        );
+        let tap = json!({
+            "update_id": 2,
+            "callback_query": {
+                "id": "q2",
+                "from": user(1, Some("alice")),
+                "message": {"message_id": 42, "chat": {"id": 1, "type": "private"}},
+                "data": "/grant always",
+            }
+        });
+        run.updates
+            .send(json!([
+                text_message(1, user(1, Some("alice")), 1, "private", "/unlock hunter2"),
+                tap,
+                text_message(3, user(1, Some("alice")), 1, "private", "still here?"),
+            ]))
+            .await
+            .unwrap();
+        let live = next(&mut run.inbound).await;
+        assert_eq!(live.text, "still here?");
+        // The second poll is live: a command in it is a command.
+        run.updates
+            .send(json!([text_message(
+                4,
+                user(1, Some("alice")),
+                1,
+                "private",
+                "/new"
+            )]))
+            .await
+            .unwrap();
+        let command = next(&mut run.inbound).await;
+        assert_eq!(command.text, "/new");
+        assert!(run.inbound.try_recv().is_err());
+        let calls = run.api.calls.lock().unwrap().clone();
+        let polls: Vec<&Value> = calls
+            .iter()
+            .filter(|(m, _)| m == "getUpdates")
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(
+            polls[0]["timeout"], 0,
+            "the backlog is taken without waiting"
+        );
+        assert!(
+            polls[0].get("offset").is_none(),
+            "no offset means no null offset"
+        );
+        assert_eq!(polls[1]["timeout"], POLL_SECS);
+        assert_eq!(polls[1]["offset"], 4, "past the backlog");
+        run.stop().await;
+    }
+
+    /// The refusals that are not failures: the same status text again
+    /// is fine, a message Telegram will not delete is a `false`, and a
+    /// file that will not fetch still lets the words through.
+    #[tokio::test]
+    async fn refusals_are_handled_where_the_trait_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = started(
+            TelegramConfig {
+                allow_from: vec!["1".into()],
+                ..TelegramConfig::default()
+            },
+            dir.path(),
+        );
+        // Let setup finish before pushing refusals at the API.
+        run.updates.send(json!([])).await.unwrap();
+        for _ in 0..50 {
+            if methods(&run.api.calls).iter().any(|m| m == "getUpdates") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let channel = Telegram::over(
+            TelegramConfig {
+                allow_anyone: true,
+                ..TelegramConfig::default()
+            },
+            run.api.clone(),
+            dir.path(),
+        );
+        run.api
+            .fail_next("editMessageText", "Bad Request: message is not modified");
+        channel.edit_status("1", "42", "working…").await.unwrap();
+        run.api
+            .fail_next("deleteMessage", "Bad Request: message can't be deleted");
+        assert!(!channel.delete_message("1", "7").await.unwrap());
+        run.api.fail_next("getFile", "Bad Request: file is too big");
+        run.updates
+            .send(json!([{
+                "update_id": 9,
+                "message": {
+                    "message_id": 90,
+                    "from": user(1, Some("alice")),
+                    "chat": {"id": 1, "type": "private"},
+                    "caption": "the report",
+                    "document": {"file_id": "d1", "file_unique_id": "u9", "file_name": "big.pdf"},
+                }
+            }]))
+            .await
+            .unwrap();
+        let message = next(&mut run.inbound).await;
+        assert!(message.text.starts_with("the report\n"), "{}", message.text);
+        assert!(
+            message.text.contains("could not be fetched"),
+            "{}",
+            message.text
+        );
+        assert!(message.media.is_empty());
+        run.stop().await;
     }
 
     fn user(id: i64, username: Option<&str>) -> Value {
@@ -833,6 +1042,8 @@ mod tests {
             },
             dir.path(),
         );
+        // An empty backlog: what follows is live, commands included.
+        run.updates.send(json!([])).await.unwrap();
         let batch = json!([
             text_message(1, user(1, Some("alice")), 1, "private", "hello bot"),
             text_message(2, user(2, Some("mallory")), 2, "private", "let me in"),
@@ -949,6 +1160,9 @@ mod tests {
                 }
             })
         };
+        // An empty backlog first: a tap in the backlog is stale by
+        // definition and dropped, which is its own test.
+        run.updates.send(json!([])).await.unwrap();
         run.updates
             .send(json!([
                 tap(1, user(2, Some("mallory")), "/grant always"),
@@ -1100,6 +1314,20 @@ mod tests {
             "/new@other_bot"
         );
         assert_eq!(strip_mention("/new", ""), "/new");
+        // Walked by characters: a byte slice at the mention's length
+        // used to panic inside a Cyrillic or emoji message, and take
+        // the channel down with it.
+        assert_eq!(strip_mention("Привет", "ilar_bot"), "Привет");
+        assert_eq!(strip_mention("😀😀😀", "ilar_bot"), "😀😀😀");
+        assert_eq!(strip_mention("@ilar_bot привет", "ilar_bot"), "привет");
+        // The whole first word, or nothing: another bot's name that
+        // begins the same is not a mention of this one.
+        assert_eq!(
+            strip_mention("@ilar_botty hi", "ilar_bot"),
+            "@ilar_botty hi"
+        );
+        assert_eq!(strip_mention("@ilar_bot", "ilar_bot"), "");
+        assert_eq!(safe_name("報告 v2.pdf"), "報告_v2.pdf");
         assert_eq!(safe_name("../../etc/passwd"), "_.._etc_passwd");
         assert_eq!(safe_name("report v2.pdf"), "report_v2.pdf");
         assert_eq!(safe_name("..."), "file");
