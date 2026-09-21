@@ -1,5 +1,28 @@
 # DEVLOG
 
+## 2026-09-21 — The flake, second half
+
+The gate went red on the outbox test I had written this morning to
+pin the serve flake — the one that races a scan against a writer
+appending every millisecond. It failed one run in six on the branch
+and the same on main, side by side, under the load of two cargo loops.
+So the fix from this morning was real and insufficient: five tries
+twenty milliseconds apart made the loss rare, and a box under load
+made a whole replay slower than the gap between appends, so all five
+tries saw the file move.
+
+The retry was the wrong shape. The scan asks three things of a
+parent's log, and two of them never needed a replay: "is the session
+there" and "whose tree is it" are both answered by the head record,
+which no append touches. The second one was worse than the first —
+a refused replay in the ancestry walk read as "another process's
+tree", and the entry was left, with no message, by a scan that does
+not come back. The third question, "was this delivered", already read
+the file without a stamp check. Both probes read heads now; the retry
+loop and its constants are gone. Thirty runs green; then fifteen of
+fifteen with the old code looping beside it on the same box, where
+the old code managed nine.
+
 ## 2026-09-21 — A dead channel keeps its retries to itself
 
 The gateway's dispatcher was one task reading one queue and calling

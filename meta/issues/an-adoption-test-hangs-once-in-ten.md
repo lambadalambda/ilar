@@ -89,6 +89,19 @@ now runs the TUI's all-features suite crate-scoped, which is the same
 coverage without the interaction; the 30 s → 60 s patience change is
 kept but was not the fix.
 
+## And again (2026-09-21)
+
+The retry below made the loss rare, not impossible: under the load of
+two test loops on one box, a replay took longer than the gap between
+a writer's appends and all five tries saw the file move — the pinning
+test failed one run in six, on main. The scan's two liveness questions
+("is the session there", "whose tree is it") are answered by the head
+record now, which no append touches; the retry and its constants are
+gone. The ancestry walk was the quieter half of the bug: a refused
+replay there read as "another process's tree" and skipped the entry
+without a word. Thirty runs green; then fifteen of fifteen beside the
+old code looping on the same box, which managed nine.
+
 ## Found and fixed (2026-09-20)
 
 It was not a test problem. It was a real one, and the test was the only
