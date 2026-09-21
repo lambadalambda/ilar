@@ -457,3 +457,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [UX sweep 2026-09-03](issues/ux-sweep-2026-09-03.md) — index; all ten subissues closed
 - [x] [Two serve tests flake](issues/an-adoption-test-hangs-once-in-ten.md) — a real lost completion, not a test artifact
 - [x] [An export stops at the last compaction](issues/an-export-stops-at-the-last-compaction.md)
+- [x] [A share carries its delegations](issues/a-share-carries-its-delegations.md)

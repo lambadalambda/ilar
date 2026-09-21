@@ -487,7 +487,6 @@ pub(crate) fn live_reset() -> Value {
     json!({ "type": "reset" })
 }
 
-#[cfg(feature = "serve")]
 /// The `?invocation=` slice: one child-session turn, from the
 /// [`SessionEvent::SubagentInvocation`] naming `parent_tool_call_id`
 /// (exclusive) up to the next invocation or the end of the log. Empty
@@ -518,7 +517,6 @@ pub(crate) fn has_invocation(events: &[SessionEvent], parent_tool_call_id: &str)
     invocation_at(events, parent_tool_call_id).is_some()
 }
 
-#[cfg(feature = "serve")]
 fn invocation_at(events: &[SessionEvent], parent_tool_call_id: &str) -> Option<usize> {
     events.iter().position(|event| {
         matches!(
@@ -1226,8 +1224,7 @@ mod tests {
         }
     }
 
-    // A child slice is a serve route; a share carries one session.
-    #[cfg(feature = "serve")]
+    // A child slice is a serve route and a share's embedded answer to it.
     #[test]
     fn an_invocation_slice_ends_at_the_next_invocation() {
         let events = vec![
@@ -1255,7 +1252,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "serve")]
     #[test]
     fn an_unknown_invocation_yields_nothing() {
         let events = vec![meta("zai/glm-4.7"), invocation("task-1"), user("x", vec![])];

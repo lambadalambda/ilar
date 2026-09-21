@@ -18,54 +18,129 @@
 //! origin and nothing is fetched, so the graph resolves the same way
 //! everywhere. No import map, no build step, no CDN.
 
+use ilar::session::SessionEvent;
 use serde_json::{Value, json};
 
 /// Everything a shared page needs, in the shapes `app.js` would have
-/// fetched: the listing row, the session page, and the children it
-/// lists. Built from the whole log, so a compacted session shares in
-/// full and a rewound turn stays withdrawn.
+/// fetched: the listing row, the session page, the children it lists,
+/// and each delegation's own timeline under the two routes a task row
+/// asks for. Built from the whole log, so a compacted session shares
+/// in full and a rewound turn stays withdrawn.
 pub(crate) fn payload(
     store: &ilar::session::SessionStore,
     session_id: &str,
 ) -> std::io::Result<Value> {
     let events = store.whole_events(session_id)?;
     let head = store.head(session_id)?;
-    let children: Vec<Value> = store
-        .children_of(session_id)
-        .into_iter()
-        .map(|child| {
-            json!({
-                "id": child.id,
-                "agent": child.agent,
-                "model": child.model,
-                "title": child.title,
-                "parent_id": session_id,
-            })
-        })
-        .collect();
     // Never driven and never running: a file has no engine behind it,
     // and a row that said otherwise would offer controls nothing can
     // answer.
     let session = super::view::session_summary(&head, false, "idle", Value::Null);
-    // A result the projection had to cut carries a "show the whole
-    // thing" affordance, and on the server that is a route. A file has
-    // no route, so those texts travel with it — otherwise the
-    // affordance is there and answers with an error.
-    //
-    // Only the cut ones. The rest are already in `events` whole, and a
-    // second copy would undo the bulk-cutting the projection exists to
-    // do — on the one surface that leaves the machine.
-    //
-    // Redacted, through the same call `serve`'s own full-text route
-    // makes: the persisted body keeps raw values by design, and a
-    // route that hands them back undoes what every bounded display
-    // cut. This is the *only* copy that leaves the machine, so it is
-    // the last place that may forget.
-    let mut inputs = std::collections::HashMap::new();
-    super::view::harvest_call_inputs(&events, &mut inputs);
     let mut extra = serde_json::Map::new();
-    for event in &events {
-        let ilar::session::SessionEvent::ToolResult {
+    cut_results(&events, &events, session_id, &mut extra);
+
+    // A task row opens a child transcript. On the server that is two
+    // routes — the child a call is writing, then that child's slice
+    // for the call — and a file answers both from here. A child whose
+    // log cannot be read is still listed but carries no routes, so its
+    // row says so, rather than one delegation failing the whole share.
+    let mut children = Vec::new();
+    for child in store.children_of(session_id) {
+        children.push(json!({
+            "id": child.id,
+            "agent": child.agent,
+            "model": child.model,
+            "title": child.title,
+            "parent_id": session_id,
+        }));
+        let Ok(child_events) = store.whole_events(&child.id) else {
+            continue;
+        };
+        let calls = child_events.iter().filter_map(|event| match event {
+            SessionEvent::SubagentInvocation {
+                parent_tool_call_id,
+                ..
+            } => Some(parent_tool_call_id.as_str()),
+            _ => None,
+        });
+        for call in calls {
+            let slice = super::view::invocation_slice(&child_events, call);
+            extra.insert(
+                format!(
+                    "/api/sessions/{}/invocations/{}",
+                    urlish(session_id),
+                    urlish(call)
+                ),
+                json!({ "parent_tool_call_id": call, "child_session_id": child.id }),
+            );
+            extra.insert(
+                format!(
+                    "/api/sessions/{}?invocation={}",
+                    urlish(&child.id),
+                    urlish(call)
+                ),
+                page_of(&child.id, slice, Value::Null),
+            );
+            cut_results(&child_events, slice, &child.id, &mut extra);
+        }
+    }
+
+    Ok(json!({
+        "id": session_id,
+        "session": session,
+        "children": children,
+        "extra": extra,
+        "page": page_of(session_id, &events, session),
+    }))
+}
+
+/// One transcript page in the shape `/api/sessions/{id}` answers —
+/// the whole of `events` as a single page, since a file has nothing
+/// left to scroll back to. `session` is the listing row, or null for a
+/// child slice, which the server does not summarise either.
+fn page_of(id: &str, events: &[SessionEvent], session: Value) -> Value {
+    json!({
+        "id": id,
+        "session": session,
+        "events": super::view::project_page(events, events, false),
+        "cursor": 0,
+        "has_more": false,
+        "count": events.len(),
+        "line": events.len(),
+        "usage": super::view::usage_totals(events),
+    })
+}
+
+/// The full text behind every result in `page` the projection had to
+/// cut, under the route the page will ask for it by. Inputs are
+/// harvested from `view`, the whole log, the way the server's own
+/// route does: a resumed subagent can answer in one invocation a call
+/// it made in the one before, and the redaction reads the call.
+///
+/// A cut result carries a "show the whole thing" affordance, and on the
+/// server that is a route. A file has no route, so those texts travel
+/// with it — otherwise the affordance is there and answers with an
+/// error.
+///
+/// Only the cut ones. The rest are already in the page whole, and a
+/// second copy would undo the bulk-cutting the projection exists to do
+/// — on the one surface that leaves the machine.
+///
+/// Redacted, through the same call `serve`'s own full-text route makes:
+/// the persisted body keeps raw values by design, and a route that
+/// hands them back undoes what every bounded display cut. This is the
+/// *only* copy that leaves the machine, so it is the last place that
+/// may forget.
+fn cut_results(
+    view: &[SessionEvent],
+    page: &[SessionEvent],
+    session_id: &str,
+    extra: &mut serde_json::Map<String, Value>,
+) {
+    let mut inputs = std::collections::HashMap::new();
+    super::view::harvest_call_inputs(view, &mut inputs);
+    for event in page {
+        let SessionEvent::ToolResult {
             tool_use_id,
             content,
             images,
@@ -94,24 +169,6 @@ pub(crate) fn payload(
             Value::String(redacted),
         );
     }
-
-    Ok(json!({
-        "id": session_id,
-        "session": session,
-        "children": children,
-        "extra": extra,
-        "page": {
-            "id": session_id,
-            "session": session,
-            "events": super::view::project_page(&events, &events, false),
-            // One page, the whole log: nothing is left to scroll back to.
-            "cursor": 0,
-            "has_more": false,
-            "count": events.len(),
-            "line": events.len(),
-            "usage": super::view::usage_totals(&events),
-        },
-    }))
 }
 
 /// The bare specifiers the page's modules import, each with the source
@@ -519,36 +576,61 @@ mod tests {
     }
 }
 
-/// Write a share file from a seeded session, for a human or a browser
-/// to look at. Not a test: a fixture the verification uses.
+/// A session with one delegation, seeded into `store`: the parent asks
+/// a question, reads a file, hands the lexer to a subagent, and
+/// answers. The child's transcript holds the words the parent's does
+/// not. Returns `(parent, child)`.
+///
+/// Shared by the tests and the browser fixture, so what a test asserts
+/// about the payload is what a browser is then pointed at.
 #[cfg(test)]
-pub(crate) fn fixture(path: &std::path::Path) -> std::io::Result<()> {
-    use ilar::session::{ContentBlock, SessionEvent, SessionMeta, SessionStore, Usage, new_id};
+pub(crate) fn seed(store: &ilar::session::SessionStore) -> std::io::Result<(String, String)> {
+    use ilar::session::{ContentBlock, SessionEvent, SessionMeta, Usage, new_id};
 
-    let dir = path.parent().unwrap().join("store");
-    let store = SessionStore::new(dir);
-    let id = new_id();
-    let mut session = store.create(SessionMeta {
-        session_id: id.clone(),
-        parent_id: None,
-        agent: "build".into(),
+    let meta = |session_id: &str, parent_id: Option<&str>, agent: &str| SessionMeta {
+        session_id: session_id.into(),
+        parent_id: parent_id.map(str::to_string),
+        agent: agent.into(),
         model: "zai/glm-4.7".into(),
         workspace: None,
         cwd: Some(std::path::PathBuf::from("/tmp/alpha")),
-    })?;
-    session.append(SessionEvent::UserMessage {
+    };
+    let text = |text: &str| ContentBlock::Text { text: text.into() };
+    let assistant =
+        |content: Vec<ContentBlock>, stop_reason: &str| SessionEvent::AssistantMessage {
+            id: new_id(),
+            model: "zai/glm-4.7".into(),
+            content,
+            usage: Usage::default(),
+            stop_reason: stop_reason.into(),
+            ts: chrono::Utc::now(),
+        };
+    let result = |tool_use_id: &str, content: &str, child: Option<&str>| SessionEvent::ToolResult {
         id: new_id(),
-        text: "why does the lexer loop forever on `--`?\n\nnote: </ScRiPt><img src=x onerror=alert(1)> and <!-- a comment -->".into(),
+        tool_use_id: tool_use_id.into(),
+        content: content.into(),
+        is_error: false,
+        images: Vec::new(),
+        child_session_id: child.map(str::to_string),
+        state: None,
+        ts: chrono::Utc::now(),
+    };
+    let user = |text: &str| SessionEvent::UserMessage {
+        id: new_id(),
+        text: text.into(),
         images: Vec::new(),
         ts: chrono::Utc::now(),
-    })?;
-    session.append(SessionEvent::AssistantMessage {
-        id: new_id(),
-        model: "zai/glm-4.7".into(),
-        content: vec![
-            ContentBlock::Text {
-                text: "Let me read the lexer.\n\nIt looks like `peek` never advances.".into(),
-            },
+    };
+
+    let parent = new_id();
+    let child = new_id();
+    let mut session = store.create(meta(&parent, None, "build"))?;
+    session.append(user(
+        "why does the lexer loop forever on `--`?\n\nnote: </ScRiPt><img src=x onerror=alert(1)> and <!-- a comment -->",
+    ))?;
+    session.append(assistant(
+        vec![
+            text("Let me read the lexer.\n\nIt looks like `peek` never advances."),
             ContentBlock::ToolCall {
                 id: "read-1".into(),
                 name: "read".into(),
@@ -556,34 +638,161 @@ pub(crate) fn fixture(path: &std::path::Path) -> std::io::Result<()> {
                 item_id: None,
             },
         ],
-        usage: Usage::default(),
-        stop_reason: "tool_use".into(),
-        ts: chrono::Utc::now(),
-    })?;
-    session.append(SessionEvent::ToolResult {
-        id: new_id(),
-        tool_use_id: "read-1".into(),
-        content: "fn peek(&self) -> char { self.src[self.at] }".into(),
-        is_error: false,
-        images: Vec::new(),
-        child_session_id: None,
-        state: None,
-        ts: chrono::Utc::now(),
-    })?;
-    session.append(SessionEvent::AssistantMessage {
-        id: new_id(),
-        model: "zai/glm-4.7".into(),
-        content: vec![ContentBlock::Text {
-            text: "`peek` reads without advancing, so `--` never terminates.".into(),
-        }],
-        usage: Usage::default(),
-        stop_reason: "end_turn".into(),
-        ts: chrono::Utc::now(),
-    })?;
+        "tool_use",
+    ))?;
+    session.append(result(
+        "read-1",
+        "fn peek(&self) -> char { self.src[self.at] }",
+        None,
+    ))?;
+    session.append(assistant(
+        vec![
+            text("I'll have a subagent confirm where `peek` is called."),
+            ContentBlock::ToolCall {
+                id: "task-1".into(),
+                name: "task".into(),
+                input: serde_json::json!({
+                    "agent": "explore",
+                    "prompt": "find every caller of peek in src/lex.rs",
+                }),
+                item_id: None,
+            },
+        ],
+        "tool_use",
+    ))?;
+    session.append(result(
+        "task-1",
+        "peek is called from advance_while only, which never moves at",
+        Some(&child),
+    ))?;
+    session.append(assistant(
+        vec![text(
+            "`peek` reads without advancing, so `--` never terminates.",
+        )],
+        "end_turn",
+    ))?;
     drop(session);
 
-    let payload = payload(&store, &id)?;
+    let mut delegate = store.create(meta(&child, Some(&parent), "explore"))?;
+    delegate.append(SessionEvent::SubagentInvocation {
+        id: new_id(),
+        parent_tool_call_id: "task-1".into(),
+        ts: chrono::Utc::now(),
+    })?;
+    delegate.append(user("find every caller of peek in src/lex.rs"))?;
+    delegate.append(assistant(
+        vec![
+            text("Searching."),
+            ContentBlock::ToolCall {
+                id: "grep-1".into(),
+                name: "grep".into(),
+                input: serde_json::json!({"pattern": "peek", "path": "src/lex.rs"}),
+                item_id: None,
+            },
+        ],
+        "tool_use",
+    ))?;
+    // Long enough that the projection cuts it: the full text is what a
+    // shared child row has to carry along.
+    let matches = (0..2_000)
+        .map(|line| format!("src/lex.rs:{line}: self.peek()\n"))
+        .collect::<String>();
+    delegate.append(result("grep-1", &matches, None))?;
+    delegate.append(assistant(
+        vec![text(
+            "Only advance_while calls peek, and it never moves `at` — the delegate's finding.",
+        )],
+        "end_turn",
+    ))?;
+    drop(delegate);
+    Ok((parent, child))
+}
+
+/// Write a share file from a seeded session, for a human or a browser
+/// to look at. Not a test: a fixture the verification uses.
+#[cfg(test)]
+pub(crate) fn fixture(path: &std::path::Path) -> std::io::Result<()> {
+    let dir = path.parent().unwrap().join("store");
+    let store = ilar::session::SessionStore::new(dir);
+    let (parent, _) = seed(&store)?;
+    let payload = payload(&store, &parent)?;
     std::fs::write(path, page("why does the lexer loop", &payload))
+}
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+
+    fn seeded() -> (
+        tempfile::TempDir,
+        ilar::session::SessionStore,
+        String,
+        String,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ilar::session::SessionStore::new(dir.path().to_path_buf());
+        let (parent, child) = seed(&store).unwrap();
+        (dir, store, parent, child)
+    }
+
+    /// The issue's own acceptance criterion: a delegation opens in a
+    /// shared file. The page asks for the child by the call, then for
+    /// the child's slice for that call; both answers are in the file,
+    /// and the slice holds the child's words.
+    #[test]
+    fn a_delegation_travels_with_the_share() {
+        let (_dir, store, parent, child) = seeded();
+        let payload = payload(&store, &parent).unwrap();
+        let extra = payload["extra"].as_object().unwrap();
+
+        let found = &extra[&format!("/api/sessions/{parent}/invocations/task-1")];
+        assert_eq!(found["child_session_id"], child, "{found}");
+
+        let slice = &extra[&format!("/api/sessions/{child}?invocation=task-1")];
+        let words = slice.to_string();
+        assert!(
+            words.contains("the delegate's finding"),
+            "the child's reply is in its slice: {words}"
+        );
+        assert!(
+            !words.contains("why does the lexer loop"),
+            "and the parent's words are not: {words}"
+        );
+        assert_eq!(slice["has_more"], false, "one page, whole");
+        assert_eq!(slice["cursor"], 0);
+
+        // And it all reaches the written file.
+        let html = page("t", &payload);
+        assert!(html.contains("the delegate's finding"), "{}", html.len());
+    }
+
+    /// A child's results are cut and carried like the parent's: the
+    /// full text behind a truncated row sits under the child's own
+    /// results route, redacted through the same call.
+    #[test]
+    fn a_childs_cut_result_travels_under_its_own_route() {
+        let (_dir, store, parent, child) = seeded();
+        let payload = payload(&store, &parent).unwrap();
+        let extra = payload["extra"].as_object().unwrap();
+        let full = extra[&format!("/api/sessions/{child}/results/grep-1")]
+            .as_str()
+            .expect("the full text");
+        assert!(full.contains("src/lex.rs:1999:"), "whole, not the cut copy");
+        // The parent's own cut results are still where they were — and
+        // its short one is not carried twice.
+        assert!(!extra.contains_key(&format!("/api/sessions/{parent}/results/read-1")));
+    }
+
+    /// The listing the sidebar reads still names the child.
+    #[test]
+    fn the_children_listing_names_the_delegate() {
+        let (_dir, store, parent, child) = seeded();
+        let payload = payload(&store, &parent).unwrap();
+        let children = payload["children"].as_array().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0]["id"], child);
+        assert_eq!(children[0]["agent"], "explore");
+    }
 }
 
 #[cfg(test)]
@@ -605,6 +814,10 @@ mod fixture_tests {
             "the question is in it"
         );
         assert!(html.contains("src/lex.rs"), "so is the tool call");
+        assert!(
+            html.contains("the delegate"),
+            "and the child's timeline travelled"
+        );
         assert!(
             html.len() > 100_000,
             "the renderer travelled: {}",

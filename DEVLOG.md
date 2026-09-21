@@ -1,5 +1,31 @@
 # DEVLOG
 
+## 2026-09-21 — A share carries its delegations
+
+The share file's first review said the file was less than the issue
+promised: a task row in it read "this delegation's own transcript is
+not in this file". On the server that row fetches two more routes,
+and the file's route table carried neither.
+
+It carries them now. The payload walks the session's children, reads
+each child whole, and for every invocation the child names it answers
+the two paths the row will ask for — the child a call is writing, and
+that child's slice for the call. The child's cut results ride along
+under the child's own results route, through the same redaction and
+bulk cut as the parent's; that loop was extracted so it runs once per
+timeline rather than being copied.
+
+The verification was in a real browser again, because the last one
+found what Deno could not. tenco has a Playwright chromium shell, and
+node 26 has a WebSocket, so a fifty-line script drives it over the
+debugging protocol: open the file, click the task row, read the DOM.
+The delegate's words are there. Opening the child's grep row pulls its
+full result from the file — the cut copy keeps only the head, so the
+tail line appearing is the proof the route answered.
+
+Two dead links went with it: a shared sidebar's subagent rows and the
+"open the child session" link both set a hash the share mode ignores.
+
 ## 2026-09-21 — A session in one file
 
 The ask was opencode's share links. The answer here is a file rather

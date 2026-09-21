@@ -904,7 +904,8 @@ function TaskRow({ call, result, sessionId, cwd, live }) {
                 </div>
               `}
               ${pageRows(page.events, page.cursor, child, cwd, sessionLive(page.session))}
-              <a class="link" href=${"#/s/" + encodeURIComponent(child)}>open the child session</a>
+              ${!SHARE &&
+              html`<a class="link" href=${"#/s/" + encodeURIComponent(child)}>open the child session</a>`}
             </div>
           `}
         </div>
@@ -1912,12 +1913,12 @@ function DetailPanel({ id, view }) {
         ${!children.length && html`<p class="note">none</p>`}
         ${children.map(
           (child) => html`
-            <a class="subagent" key=${child.id} href=${"#/s/" + encodeURIComponent(child.id)}>
+            <${SHARE ? "div" : "a"} class="subagent" key=${child.id} href=${SHARE ? undefined : "#/s/" + encodeURIComponent(child.id)}>
               <span class="subagent-name">${preview(child.title || child.agent || child.id, 44)}</span>
               <span class=${"subagent-state " + (child.state || "idle")}>
                 ${child.state === "working" ? "is working" : child.state === "stalled" ? "stalled" : "done"}
               </span>
-            </a>
+            <//>
           `,
         )}
       <//>
