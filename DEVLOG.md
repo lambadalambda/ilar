@@ -1,5 +1,49 @@
 # DEVLOG
 
+## 2026-09-21 — Export stopped at the compaction
+
+The user found it: exporting a session that had been compacted and then
+reopened wrote only the second half. No error, no gap — the file simply
+began in the middle.
+
+`app.lines` is the *display* window, and a restored session's window
+starts at the newest compaction. Export handed those lines straight to
+the markdown renderer. Right for the screen, right for the model, wrong
+for a file whose whole point is the conversation the person had.
+
+My first fix was to render the log instead of the screen. A review
+caught that it was worse than the bug. The on-screen rows are the only
+place a delegation's child timeline lives — `child_lines` is filled by
+the with-store restore and by nothing else — so a compacted session
+would have exported with *every subagent's work missing*, just as
+silently. And they are the only copy of a turn still running, or of a
+message typed since the last commit.
+
+So it splices: the folded half from the log, the rest from the screen.
+Both halves come from where they actually exist.
+
+Getting the folded half right needed a third reading of a log, which
+turned out to be missing. `load` rebases onto the active window — what
+the model carries. `audit_events` keeps every committed line including
+the tails a rewind abandoned — what the file holds. Neither is what an
+export wants, and the difference is not academic: my first attempt read
+`audit_events` and would have resurrected turns the person had
+explicitly withdrawn, presented as real history. `whole_events` folds
+rewinds and applies no window: what happened.
+
+Two smaller things the review was right about. The boundary index I
+first used was the compaction `cut`, which is almost always 1 — the
+reader is already rebased, so the cut only steps over the `Meta`. It
+worked as a boolean and would have been a trap for anyone who read it
+as a count; it is `SessionReader::event_base` now, which is the real
+number. And the mid-turn warning I had added disappeared on its own:
+with the splice there is nothing to warn about, because the live rows
+come from the screen.
+
+The seam marks itself. The window's folded "transcript compacted" note
+sits exactly at the join, and the half in front of it folded nothing,
+so it renders no note of its own.
+
 ## 2026-09-20 — The flaky test was right
 
 `adoption_requeues_outbox_completions_as_follow_up_turns` had been
