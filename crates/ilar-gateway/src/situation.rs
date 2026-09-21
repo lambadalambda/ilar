@@ -16,11 +16,21 @@ use chrono::{DateTime, FixedOffset};
 /// room's does not, and telling it where the files are is telling it
 /// where to go looking: the seat's tools refuse the directory, but a
 /// refusal is a worse answer than never having been pointed there.
-pub fn block(home: &Path, workspace: &Path, memory: bool, now: DateTime<FixedOffset>) -> String {
+///
+/// `room` is whether several people are in the chat: then each message
+/// arrives as `Name: text`, and the model is told so, or it answers
+/// "Alice: …" back.
+pub fn block(
+    home: &Path,
+    workspace: &Path,
+    memory: bool,
+    room: bool,
+    now: DateTime<FixedOffset>,
+) -> String {
     format!(
         "# Where you are\n\n\
          You are reached over a chat channel, run by ilar-gateway; the message tool is how \
-         you answer, and nothing you write outside it reaches a scheduled turn's chat. Your \
+         you answer, and nothing you write outside it reaches a scheduled turn's chat.{room} Your \
          home is {home}: your SOUL.md, skills/{memory} live there, and \
          your sessions work in {workspace}. A script can wake you with \
          `ilar-gateway notify \"text\"` (or `--to <channel:chat>` for a particular chat), \
@@ -33,6 +43,13 @@ pub fn block(home: &Path, workspace: &Path, memory: bool, now: DateTime<FixedOff
          latest stamp, not from this one, and write a cron expression, or a time without \
          an offset, in UTC.",
         home = home.display(),
+        room = if room {
+            " This chat is a group: several people are in it, each message reaches you as \
+             `Name: text` so you know who is talking, and you reach the chat only when \
+             someone speaks to you. Answer in your own voice, without a name in front."
+        } else {
+            ""
+        },
         memory = if memory {
             ", memory/ and the daily notes"
         } else {
@@ -75,6 +92,7 @@ mod tests {
             Path::new("/state/gateway"),
             Path::new("/state/gateway/workspace"),
             true,
+            false,
             opened,
         );
         assert!(block.contains("<now> tag"), "{block}");
@@ -88,6 +106,7 @@ mod tests {
             Path::new("/state/gateway"),
             Path::new("/state/gateway/workspace"),
             true,
+            false,
             now,
         );
         assert!(text.contains("/state/gateway/workspace"), "{text}");
@@ -107,17 +126,22 @@ mod tests {
             Path::new("/state/gateway"),
             Path::new("/state/gateway/workspace"),
             false,
+            true,
             now,
         );
         assert!(!room.contains("memory/"), "{room}");
+        assert!(room.contains("`Name: text`"), "{room}");
+        assert!(room.contains("without a name in front"), "{room}");
         assert!(room.contains("/state/gateway"), "{room}");
 
         let private = block(
             Path::new("/state/gateway"),
             Path::new("/state/gateway/workspace"),
             true,
+            false,
             now,
         );
         assert!(private.contains("memory/"), "{private}");
+        assert!(!private.contains("group"), "{private}");
     }
 }

@@ -949,6 +949,7 @@ pub fn plan(
         // seat, not of `withheld`, which holds the session store for
         // every room whether or not there is a memory to hide.
         private || !gateway.memory.enabled,
+        !private,
         chrono::Local::now().fixed_offset(),
     ));
     // The policy reaches the subagents too: an agent definition's
