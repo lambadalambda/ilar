@@ -344,13 +344,18 @@ impl Extend<TranscriptRow> for EntryRows {
     }
 }
 
-/// Rendered child timelines, kept per cached entry so an agent row that
-/// only *animates* does not re-render the subagent transcript hanging
-/// off it. An entry re-rendered by the animation pass is, by the cache's
-/// own invariant, unchanged in the model — every change is marked, and a
-/// mark rebuilds the entry outright — so the only thing that moved is
-/// the clock. Rebuilding a live child's whole transcript at 20 fps is
-/// precisely what made watching a subagent expensive.
+/// What one cached entry keeps between renders of itself.
+///
+/// Child timelines, so an agent row that only *animates* does not
+/// re-render the subagent transcript hanging off it. An entry
+/// re-rendered by the animation pass is, by the cache's own invariant,
+/// unchanged in the model — every change is marked, and a mark rebuilds
+/// the entry outright — so the only thing that moved is the clock.
+/// Rebuilding a live child's whole transcript at 20 fps is precisely
+/// what made watching a subagent expensive.
+///
+/// And the settled blocks of a streaming reply, so a delta renders the
+/// open paragraph rather than the message so far.
 #[derive(Default)]
 struct EntryMemo {
     rows: std::collections::HashMap<String, std::sync::Arc<[TranscriptRow]>>,
@@ -373,18 +378,29 @@ struct EntryMemo {
 /// separator is flushed before the block that follows it, so a split
 /// there renders the same in two halves as in one. Pinned by
 /// `a_reply_rendered_in_deltas_matches_one_rendered_whole`.
+///
+/// The rows are for one width. The cache drops every entry when the
+/// width changes, and this goes with them; nothing else may reuse it.
 struct ReplyMemo {
-    /// The text the rows are for; the next text must extend it.
+    /// The text the blocks are for; the next text must extend it.
     prefix: String,
-    rows: std::sync::Arc<[TranscriptRow]>,
+    /// One run per settle, so a new block settling costs that block
+    /// and not a copy of every row before it.
+    blocks: Vec<std::sync::Arc<[TranscriptRow]>>,
+}
+
+impl ReplyMemo {
+    fn drew_rows(&self) -> bool {
+        self.blocks.iter().any(|block| !block.is_empty())
+    }
 }
 
 /// The byte length of `text` up to the start of its last blank line
 /// outside a code fence — the longest prefix whose rendering the
-/// remainder cannot change. Scanned from `from`, which must itself be
-/// such a point (or zero): fence state there is known to be closed, so
-/// a delta pays for its tail and not for the reply so far. `from` when
-/// there is no later such line.
+/// remainder cannot change. Scanned from `from`, which must be the
+/// start of a line outside a fence (zero, or a value this returned for
+/// a prefix of `text`), so a delta pays for its tail and not for the
+/// reply so far. `from` when there is no later such line.
 fn settled_prefix_len(text: &str, from: usize) -> usize {
     let mut code_fence: Option<(char, usize)> = None;
     let mut at = from;
@@ -440,25 +456,24 @@ fn reply_rows(text: &str, width: u16, memo: &mut Option<ReplyMemo>) -> EntryRows
             .flat_map(|line| wrap_entry_line(line, width as usize))
             .map(|line| TranscriptRow { line, target: None })
     };
-    let settled: std::sync::Arc<[TranscriptRow]> = match kept {
-        Some(memo) if split == done => memo.rows,
-        kept => {
-            let mut rows: Vec<TranscriptRow> = kept
-                .map(|memo| memo.rows.iter().cloned().collect())
-                .unwrap_or_default();
-            let continued = !rows.is_empty();
-            rows.extend(part(done, split, continued));
-            rows.into()
-        }
-    };
+    let mut settled = kept.unwrap_or(ReplyMemo {
+        prefix: String::new(),
+        blocks: Vec::new(),
+    });
+    if split > done {
+        let continued = settled.drew_rows();
+        settled
+            .blocks
+            .push(part(done, split, continued).collect::<Vec<_>>().into());
+        settled.prefix = text[..split].to_string();
+    }
     let mut rows = EntryRows::default();
-    rows.share(std::sync::Arc::clone(&settled));
-    rows.extend(part(split, text.len(), !settled.is_empty()));
+    for block in &settled.blocks {
+        rows.share(std::sync::Arc::clone(block));
+    }
+    rows.extend(part(split, text.len(), settled.drew_rows()));
     if split > 0 {
-        *memo = Some(ReplyMemo {
-            prefix: text[..split].to_string(),
-            rows: settled,
-        });
+        *memo = Some(settled);
     }
     rows
 }
@@ -574,11 +589,14 @@ impl TranscriptRenderCache {
             .min(lines.len());
         // The first entry rebuilt is usually the one that streamed: its
         // settled rows carry over, so a delta renders the open paragraph
-        // and not the reply so far.
+        // and not the reply so far. Only to a reply at the same line —
+        // a memo parked on any other entry would sit there unread.
         let mut carried = self
             .entries
             .get_mut(resume)
-            .filter(|entry| entry.range.start == line)
+            .filter(|entry| {
+                entry.range.start == line && matches!(lines.get(line), Some(Line_::Assistant(_)))
+            })
             .and_then(|entry| entry.children.reply.take());
         self.entries.truncate(resume);
         while line < lines.len() {
@@ -597,6 +615,13 @@ impl TranscriptRenderCache {
                 activity_started,
                 &mut children,
             );
+            // Only the last line streams. A reply with anything after it
+            // is finished, and its memo would be a second copy of its
+            // text kept for nothing — for every reply of a restored
+            // session.
+            if next < lines.len() {
+                children.reply = None;
+            }
             self.entries.push(CachedTranscriptEntry {
                 range: line..next,
                 group: match &entry {
@@ -3789,20 +3814,34 @@ mod tests {
         reply_rows("one\n\ntwo\n\nthr", 40, &mut memo);
         let first = memo.as_ref().expect("settled");
         assert_eq!(first.prefix, "one\n\ntwo\n");
-        let held = std::sync::Arc::clone(&first.rows);
+        let held = first
+            .blocks
+            .iter()
+            .map(std::sync::Arc::clone)
+            .collect::<Vec<_>>();
 
         reply_rows("one\n\ntwo\n\nthree", 40, &mut memo);
         let same = memo.as_ref().unwrap();
         assert_eq!(same.prefix, "one\n\ntwo\n");
+        assert_eq!(same.blocks.len(), held.len());
         assert!(
-            std::sync::Arc::ptr_eq(&same.rows, &held),
+            same.blocks
+                .iter()
+                .zip(&held)
+                .all(|(a, b)| std::sync::Arc::ptr_eq(a, b)),
             "no block settled: nothing copied"
         );
 
         reply_rows("one\n\ntwo\n\nthree\n\nfour", 40, &mut memo);
         let grown = memo.as_ref().unwrap();
         assert_eq!(grown.prefix, "one\n\ntwo\n\nthree\n");
-        assert_eq!(grown.rows.len(), 5, "one, sep, two, sep, three");
+        // The settle is one new block; the earlier ones are untouched.
+        assert!(std::sync::Arc::ptr_eq(&grown.blocks[0], &held[0]));
+        assert_eq!(
+            grown.blocks.iter().map(|block| block.len()).sum::<usize>(),
+            5,
+            "one, sep, two, sep, three"
+        );
 
         // A text that does not extend the prefix starts over.
         reply_rows("something else\n\nentirely", 40, &mut memo);
@@ -3835,6 +3874,21 @@ mod tests {
         cache.update(&lines, &groups, 2, 80, now, now);
         let memo = cache.entries[1].children.reply.as_ref().expect("carried");
         assert_eq!(memo.prefix, "a\n\nb\n");
+        // A reply that is no longer the last line is finished: its memo
+        // goes, so a restored session does not hold every reply twice.
+        lines.push(Line_::User("more".into()));
+        cache.mark_dirty_from(2, 3);
+        cache.update(&lines, &groups, 3, 80, now, now);
+        assert!(
+            cache.entries[1].children.reply.is_some(),
+            "not rebuilt, still held"
+        );
+        cache.mark_dirty_from(1, 4);
+        cache.update(&lines, &groups, 4, 80, now, now);
+        assert!(
+            cache.entries[1].children.reply.is_none(),
+            "rebuilt behind another line: dropped"
+        );
         let mut fresh = TranscriptRenderCache::default();
         fresh.update(&lines, &groups, 1, 80, now, now);
         let text = |cache: &TranscriptRenderCache| {
