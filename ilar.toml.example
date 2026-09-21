@@ -104,3 +104,28 @@ background_tool_timeout_ms = 600000
 
 # Custom agents live in ~/.config/ilar/agents/*.md or .ilar/agents/*.md.
 # See examples/agents/explorer.md for supported frontmatter.
+
+# ilar-gateway: ilar as an always-on assistant on a chat channel. Both
+# sections are user-scoped — a project file cannot set them. Every key
+# and its default is in docs/gateway.md.
+# [gateway]
+# home = "~/.local/state/ilar/gateway"   # SOUL.md, memory, skills, routes
+# model = "zai/glm-4.7"                   # what a fresh chat starts on
+# tools.safe_mode = false                 # true: no bash, write, edit, service, image_gen, sudo
+# tools.deny = []                         # tools no chat may use
+# heartbeat.every_secs = 0                # 0 is off
+# review.approval = false                 # true: memory writes wait for /approve
+# announce = true                         # a line to the last active chat on start and stop
+
+# One channel or several; each has its own allowlist, and an empty one
+# refuses to start unless allow_anyone = true.
+# [channels.telegram]
+# token = "123456:ABC…"                   # from BotFather
+# allow_from = ["@yourname", "123456789"] # usernames or numeric ids
+# ack_reaction = "👀"
+
+# [channels.deltachat]
+# setup_qr = "DCACCOUNT:https://nine.testrun.org/new"   # a fresh chatmail identity …
+# # addr = "bot@example.org"; password = "…"           # … or an existing account
+# display_name = "ilar"
+# allow_from = ["you@example.org"]

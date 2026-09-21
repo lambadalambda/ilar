@@ -61,7 +61,7 @@ restriction on what it may be.
   stdout and everything else on stderr; `--json` streams NDJSON events.
   Same sessions, same runtime as the TUI.
 - **An assistant on your messenger.** `ilar-gateway` runs the same
-  runtime as a library behind messaging channels — Delta Chat first —
+  runtime as a library behind messaging channels — Delta Chat and Telegram —
   one session per chat, replying through a `message` tool, with memory
   that outlives a session, cron and heartbeat turns, and a tool policy
   built into the registries. [Details](docs/gateway.md).
@@ -130,7 +130,7 @@ ilar-gateway                     # the assistant, on the channels in ilar.toml
 | --- | --- |
 | [The interface](docs/interface.md) | Status line, steering, `/btw`, `/sessions`, goal mode, topics, themes. |
 | [Sessions](docs/sessions.md) | The on-disk model, compaction as handover, rewind and fork, `ilar exec`. |
-| [ilar-gateway](docs/gateway.md) | The assistant: channels, routing, the message tool, memory, cron and heartbeat, the tool policy, Delta Chat. |
+| [ilar-gateway](docs/gateway.md) | The assistant: channels, routing, the message tool, memory, cron and heartbeat, the tool policy, Telegram and Delta Chat. |
 | [ilar serve](docs/serve.md) | The web view — *stood down, behind `--features serve`*: routes, the SSE envelope, tokens and what they are not. |
 | [Configuration](docs/configuration.md) | `ilar.toml`, environment, web search, ChatGPT OAuth, project instructions. |
 | [Secrets](docs/secrets.md) | The store, `ilar secret`, how a command gets a value and who says yes. |

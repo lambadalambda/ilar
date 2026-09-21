@@ -80,6 +80,35 @@ declares them is warned about and ignored.
 | `gateway.send_retry_secs` | `2` | Between two tries at a send the channel refused; four tries, then the chat and the model are told. |
 | `gateway.announce` | `true` | A line to the last active chat when the gateway starts and stops. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
+| `channels.telegram.*` | — | The Telegram adapter; see below. |
+
+### Telegram
+
+The adapter talks to the Bot API directly and polls it: no bridge, no
+webhook, no port open, so a bot behind NAT works the same as one on a
+public box. Make the bot with BotFather and put its token here.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `token` | — | The bot token from BotFather. |
+| `allow_from` | `[]` | Who may talk: numeric user ids, or usernames with or without the `@`. A stranger gets no turn and no reply. |
+| `allow_anyone` | `false` | Talk to whoever writes. Without it an empty `allow_from` refuses to start. |
+| `ack_reaction` | — | An emoji to react with on receipt; Telegram takes only the ones on its own list. |
+| `media_dir` | `<home>/telegram` | Where attachments are fetched to. |
+
+The gateway registers its commands with Telegram at every start, so
+typing `/` offers them with a line each and the Menu button lists
+them. A grant ask carries its four answers as buttons under it, and a
+staged memory carries *Remember* and *Drop*; a tap is handled exactly
+as the typed command from the person who tapped, the allowlist
+included, and the keyboard comes off the message once it has been
+answered. Replies are plain text under Telegram's 4096-character cap,
+split at line breaks; pictures go as photos, other files as documents,
+with a short text as the first one's caption. A photo, document, voice
+note, audio or video the person sends is fetched and handed to the
+turn as a file. In a group, the bot sees only commands and mentions
+unless privacy mode is turned off in BotFather; `/new@yourbot` and
+`@yourbot hello` are read as `/new` and `hello`.
 
 ### Delta Chat
 
@@ -177,7 +206,10 @@ A message that is a slash command is answered by the gateway itself:
 The name is matched case-blind, so a phone that capitalises the first
 word still gets `/Help`. Only what a person types is read as a
 command: text arriving through `ilar-gateway notify` reaches the model
-as it is, so a script reporting "/new" does not reset a chat.
+as it is, so a script reporting "/new" does not reset a chat. On a
+channel with buttons (Telegram), the asks that take a command as an
+answer carry the answers as buttons; a tap is the command, from the
+person who tapped.
 
 ## The home
 
