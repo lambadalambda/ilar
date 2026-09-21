@@ -28,4 +28,5 @@ pub mod routes;
 pub mod situation;
 pub mod skills;
 pub mod status;
+pub mod telegram;
 pub mod weekly;

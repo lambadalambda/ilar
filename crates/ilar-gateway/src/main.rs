@@ -126,6 +126,15 @@ fn channels_from(
                     .context("parsing [channels.deltachat] in ilar.toml")?;
                 channels.push(DeltaChat::new(settings, &gateway.home(config)));
             }
+            "telegram" => {
+                let settings: ilar_gateway::telegram::TelegramConfig = table
+                    .try_into()
+                    .context("parsing [channels.telegram] in ilar.toml")?;
+                channels.push(ilar_gateway::telegram::Telegram::new(
+                    settings,
+                    &gateway.home(config),
+                )?);
+            }
             other => anyhow::bail!("channel {other:?} is not supported"),
         }
     }

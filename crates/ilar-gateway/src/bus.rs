@@ -27,12 +27,34 @@ impl Inbound {
 }
 
 /// A message the agent sends through a channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Outbound {
     pub channel: String,
     pub chat_id: String,
     pub text: String,
     pub media: Vec<PathBuf>,
+    /// Answers the person can tap, where the channel has buttons: each
+    /// is a command, handled as if the tapping person had typed it.
+    /// The text names the commands too, for a channel that has none.
+    pub buttons: Vec<Button>,
+}
+
+/// One tappable answer under a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Button {
+    /// What the button says.
+    pub label: String,
+    /// The command a tap sends, slash and all: `/grant session`.
+    pub command: String,
+}
+
+impl Button {
+    pub fn new(label: &str, command: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            command: command.to_string(),
+        }
+    }
 }
 
 /// `<channel>:<chat>` names a session. picoclaw's convention, kept so

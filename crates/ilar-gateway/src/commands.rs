@@ -211,6 +211,40 @@ pub const UNLOCK_USAGE: &str =
 pub const PASSWORD_USAGE: &str = "/password <pw> — the sudo password goes after the command, in \
                                   the same message; it is deleted afterwards.";
 
+/// Every command a person can type, with a one-line description: what
+/// a channel with a command menu (Telegram's `setMyCommands`) shows
+/// when the person types `/`. One name per command — the aliases and
+/// the arguments are in [`HELP`], which is the same list in prose.
+pub const MENU: &[(&str, &str)] = &[
+    ("new", "start a fresh chat; memory stays"),
+    (
+        "model",
+        "list the models, or switch: /model <provider/model> [--save]",
+    ),
+    ("abort", "cancel the turn running now"),
+    (
+        "grant",
+        "allow a tool's ask for a secret or root: [session|always]",
+    ),
+    ("deny", "refuse it"),
+    ("password", "the sudo password, after a yes: /password <pw>"),
+    (
+        "unlock",
+        "open a sealed secret store: /unlock <master password>",
+    ),
+    (
+        "compact",
+        "replace the conversation with one handover summary",
+    ),
+    (
+        "pending",
+        "what the review wants to remember, when approval is on",
+    ),
+    ("approve", "keep a staged memory: [id|all]"),
+    ("reject", "drop a staged memory: [id|all]"),
+    ("help", "the commands"),
+];
+
 pub const HELP: &str = "/new — start a fresh chat (memory stays); a turn running here is cancelled\n\
 /model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
 /abort (or /stop) — cancel the turn running now; messages that were waiting run after it\n\
@@ -422,5 +456,35 @@ mod tests {
     fn the_help_names_the_aliases_too() {
         assert!(HELP.contains("/abort (or /stop)"), "{HELP}");
         assert!(HELP.contains("/password <pw>"), "{HELP}");
+    }
+
+    /// The menu and the help are one list: a command in either is in
+    /// the other, every menu entry parses, and every entry fits what
+    /// Telegram takes (lowercase names, descriptions under 256).
+    #[test]
+    fn the_menu_and_the_help_agree() {
+        let in_help: std::collections::BTreeSet<&str> = HELP
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '/')
+            .filter_map(|word| word.strip_prefix('/'))
+            .filter(|name| !name.is_empty())
+            .collect();
+        let in_menu: std::collections::BTreeSet<&str> =
+            MENU.iter().map(|(name, _)| *name).collect();
+        // `/stop` is an alias of `/abort`; the menu carries one name.
+        let mut help_names = in_help.clone();
+        help_names.remove("stop");
+        assert_eq!(help_names, in_menu, "help {in_help:?} vs menu {in_menu:?}");
+        for (name, description) in MENU {
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase()),
+                "{name}: Telegram wants lowercase"
+            );
+            assert!(description.len() < 256, "{name}");
+            let parsed = parse(&format!("/{name}")).expect("parses");
+            assert!(
+                !matches!(parsed, Command::Unknown(_)),
+                "/{name} is unknown to the parser"
+            );
+        }
     }
 }

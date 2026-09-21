@@ -222,6 +222,18 @@ fn shown_command(detail: &str) -> String {
 }
 
 /// The message the chat gets for a grant ask.
+/// The four answers to a grant ask, for a channel with buttons. The
+/// text names them too; these are the same commands, one tap each.
+pub fn grant_buttons() -> Vec<crate::bus::Button> {
+    use crate::bus::Button;
+    vec![
+        Button::new("Once", "/grant"),
+        Button::new("This session", "/grant session"),
+        Button::new("Always", "/grant always"),
+        Button::new("Deny", "/deny"),
+    ]
+}
+
 pub fn ask_text(prompt: &GrantPrompt, asker: &Asker) -> String {
     let purpose = if prompt.description.is_empty() {
         String::new()
@@ -349,7 +361,7 @@ pub async fn watch(
             },
             _ = cancel.cancelled() => return,
         };
-        let post = |text: String| {
+        let post = |text: String, buttons: Vec<crate::bus::Button>| {
             let outbound = outbound.clone();
             let channel = channel.clone();
             let chat_id = chat_id.clone();
@@ -360,27 +372,31 @@ pub async fn watch(
                         chat_id,
                         text,
                         media: Vec::new(),
+                        buttons,
                     })
                     .await;
             }
         };
         // Each ask, told apart once: the chat's text, what the slot
         // says it takes, and where the answer goes.
-        let (text, pending_secret, password, asker, mut reply) = match ask {
+        let (text, buttons, pending_secret, password, asker, mut reply) = match ask {
             Ask::Grant(prompt) => {
                 let asker = Asker::of(&prompt, &session_id);
                 (
                     ask_text(&prompt, &asker),
+                    grant_buttons(),
                     prompt.secret,
                     false,
                     asker,
                     Reply::Grant(prompt.reply),
                 )
             }
+            // A password is typed, never tapped: no buttons.
             Ask::Password(prompt) => {
                 let asker = Asker::of_password(&prompt, &session_id);
                 (
                     password_ask_text(&prompt, &asker),
+                    Vec::new(),
                     ilar::secrets::SUDO_PASSWORD.to_string(),
                     true,
                     asker,
@@ -392,11 +408,11 @@ pub async fn watch(
             // the ask is dropped, which leaves the store shut.
             Ask::Unlock(prompt) => {
                 let asker = Asker::of_unlock(&prompt, &session_id);
-                post(unlock_ask_text(&prompt, &asker)).await;
+                post(unlock_ask_text(&prompt, &asker), Vec::new()).await;
                 continue;
             }
         };
-        post(text).await;
+        post(text, buttons).await;
         let (answer_tx, answer_rx) = oneshot::channel();
         *slot.lock().unwrap() = Some(PendingGrant {
             secret: pending_secret.clone(),
@@ -419,12 +435,12 @@ pub async fn watch(
                 // while the ask stood: the slot is stale, not the
                 // person's to answer any more.
                 slot.lock().unwrap().take();
-                post("That ask is over: the tool stopped waiting.".into()).await;
+                post("That ask is over: the tool stopped waiting.".into(), Vec::new()).await;
             }
             _ = tokio::time::sleep(timeout) => {
                 slot.lock().unwrap().take();
                 reply.deny();
-                post(no_answer(&pending_secret, &asker)).await;
+                post(no_answer(&pending_secret, &asker), Vec::new()).await;
             }
             _ = cancel.cancelled() => {
                 slot.lock().unwrap().take();
@@ -545,6 +561,7 @@ mod tests {
         assert!(posted.text.contains("gh pr list"), "{}", posted.text);
         assert!(posted.text.contains("/unlock"), "{}", posted.text);
         assert!(!posted.text.contains("/grant"), "{}", posted.text);
+        assert!(posted.buttons.is_empty(), "nothing here is a tap away");
         assert!(receive.await.is_err(), "the chat answered an unlock ask");
         assert!(h.slot.lock().unwrap().is_none(), "it took the ask slot");
         // And the next ask is served as usual: nothing was left behind.
@@ -563,6 +580,15 @@ mod tests {
         assert_eq!(
             (posted.channel.as_str(), posted.chat_id.as_str()),
             ("deltachat", "12")
+        );
+        // The four answers ride as buttons for a channel that has them.
+        assert_eq!(posted.buttons, grant_buttons());
+        assert!(
+            posted
+                .buttons
+                .iter()
+                .all(|b| crate::commands::parse(&b.command).is_some()),
+            "every button is a command"
         );
         // The command stands apart: a blank line and an indent, so its
         // last line is never read as part of the instructions.

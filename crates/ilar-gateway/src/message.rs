@@ -249,6 +249,7 @@ impl Tool for MessageTool {
                 chat_id,
                 text: input.text,
                 media,
+                buttons: Vec::new(),
             };
             // This chat's status line was waiting for exactly this, so
             // it comes down before the reply does — and only this

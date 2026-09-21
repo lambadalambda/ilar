@@ -723,6 +723,7 @@ mod tests {
                 chat_id: "5".into(),
                 text: "plain".into(),
                 media: vec![],
+                buttons: Vec::new(),
             })
             .await
             .unwrap();
@@ -736,6 +737,7 @@ mod tests {
                     "/tmp/b.bin".into(),
                     "/tmp/c.xdc".into(),
                 ],
+                buttons: Vec::new(),
             })
             .await
             .unwrap();
@@ -747,6 +749,7 @@ mod tests {
                 chat_id: "5".into(),
                 text: long,
                 media: vec![],
+                buttons: Vec::new(),
             })
             .await
             .unwrap();
@@ -758,6 +761,7 @@ mod tests {
                 chat_id: "5".into(),
                 text: format!("{}\n\n{}\n", "c".repeat(2_000), "d".repeat(2_000)),
                 media: vec!["/tmp/a.png".into()],
+                buttons: Vec::new(),
             })
             .await
             .unwrap();

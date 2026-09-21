@@ -1295,13 +1295,17 @@ impl Gateway {
             match self.pending.stage(&seat.key, plan.clone()) {
                 Ok(staged) => {
                     let lines = plan.describe().join("; ");
-                    self.deliver(
+                    self.deliver_with_buttons(
                         &seat.channel,
                         &seat.chat_id,
                         &format!(
                             "📝 I would remember: {lines} — /approve {} or /reject {}",
                             staged.id, staged.id
                         ),
+                        vec![
+                            crate::bus::Button::new("Remember", &format!("/approve {}", staged.id)),
+                            crate::bus::Button::new("Drop", &format!("/reject {}", staged.id)),
+                        ],
                     )
                     .await;
                 }
@@ -1424,6 +1428,7 @@ impl Gateway {
             chat_id: message.chat_id.clone(),
             text: format!("⚠ {what}\nWhat it said: {}", message.text),
             media: Vec::new(),
+            buttons: Vec::new(),
         };
         if let Err(error) = target.send(notice).await {
             log(&format!(
@@ -1460,6 +1465,7 @@ impl Gateway {
                 chat_id: chat_id.clone(),
                 text: text.clone(),
                 media: Vec::new(),
+                buttons: Vec::new(),
             };
             match target.send(message).await {
                 Ok(()) => {
@@ -1495,6 +1501,7 @@ impl Gateway {
             chat_id: chat_id.clone(),
             text: "⏹ ilar-gateway stopping".into(),
             media: Vec::new(),
+            buttons: Vec::new(),
         };
         match target.send(message).await {
             Ok(()) => {
@@ -1512,6 +1519,19 @@ impl Gateway {
     /// Something the gateway says on the model's behalf, through the
     /// same queue as the model's own sends, so it never overtakes them.
     async fn deliver(&self, channel: &str, chat_id: &str, text: &str) {
+        self.deliver_with_buttons(channel, chat_id, text, Vec::new())
+            .await;
+    }
+
+    /// The same, with answers the person can tap where the channel
+    /// shows buttons.
+    async fn deliver_with_buttons(
+        &self,
+        channel: &str,
+        chat_id: &str,
+        text: &str,
+        buttons: Vec<crate::bus::Button>,
+    ) {
         if text.trim().is_empty() {
             return;
         }
@@ -1521,6 +1541,7 @@ impl Gateway {
             chat_id: chat_id.to_string(),
             text: text.to_string(),
             media: Vec::new(),
+            buttons,
         };
         if self.outbound_tx.send(message).await.is_err() {
             log(&format!(
