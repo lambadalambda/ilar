@@ -102,6 +102,11 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [The assistant — index](issues/the-assistant-index.md) — index
 
+## Milestone 24 — More doors for the assistant
+
+- [ ] [A Telegram channel](issues/a-telegram-channel.md)
+- [ ] [Console commands for the chat](issues/console-commands-for-the-chat.md)
+
 ## Milestone 22 — Memory in every directory
 
 (all complete — see issues_archive.md)
