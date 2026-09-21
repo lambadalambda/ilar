@@ -75,3 +75,38 @@ stance and needs only an outbound HTTPS client the core already has.
   7.0; a bot in a group only sees commands and mentions unless privacy
   mode is off in BotFather — which is documented, not worked around.
 - Size: M. Source: user request, 2026-09-21.
+
+## Done, except the live run (2026-09-21)
+
+`[channels.telegram]` is a channel: long polling over the Bot API
+through a thin `reqwest` client behind a `BotApi` trait, with a fake
+for the tests. Text and captions in; photos, documents, voice notes,
+audio and video fetched to `<home>/telegram/`; mentions stripped by
+characters, never bytes — the review caught a byte slice that would
+have crash-looped the channel on the first Cyrillic message. Out:
+plain text under the cap (36 lines of 100), photos as photos, gifs as
+animations, the rest as documents, a short text as the first file's
+caption. The status line is a message edited in place and deleted
+after, sent quietly so it never buzzes the phone.
+
+The menu is `commands::MENU`, registered with `setMyCommands` at
+every start, with a test that it and `HELP` are one list. Buttons
+travel on `Outbound.buttons`: a grant ask carries its four answers, a
+staged memory carries *Remember* and *Drop*; a tap answers the
+callback, is checked against the allowlist, drops the keyboard off
+the message, and is handled as the typed command from that person.
+Delta Chat ignores them.
+
+What piled up while the gateway was down is read once without
+waiting, and the commands and taps in it are dropped: a `/grant
+always` from hours ago must not answer the ask standing now, and an
+`/unlock` the adapter deleted from the chat is still in Telegram's
+backlog. Messages in the backlog are answered. A poll that keeps
+failing backs off to one line a minute. A file that will not fetch
+leaves a note in the text rather than dropping the message.
+
+**Not done: the live run.** Every call shape was checked against the
+Bot API by review, and the fake answers as the API does, but no real
+bot has been talked to. That needs a token from BotFather in
+`[channels.telegram]` on a box with the gateway; the first message
+through it closes this.

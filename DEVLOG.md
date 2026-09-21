@@ -1,5 +1,45 @@
 # DEVLOG
 
+## 2026-09-21 — A second door, and a console
+
+The comparison with picoclaw and hermes put a second channel first,
+and it is Telegram: the Bot API over long polling, no bridge and no
+port, behind a trait with a fake so the adapter is tested the way the
+Delta Chat one is. What Telegram has that Delta Chat lacks is used
+where the gateway already had the shape for it. The command menu is
+the same list `/help` prints, registered with `setMyCommands` at every
+start. Buttons are commands: a grant ask carries *Once / This session
+/ Always / Deny*, a staged memory carries *Remember / Drop*, and a tap
+is handled as if that person had typed the command — the allowlist
+applies, the keyboard comes off the message, the phone's spinner
+stops. Delta Chat ignores the buttons and the text still names the
+commands.
+
+The review earned its keep. The mention stripper sliced by bytes at
+the mention's length, which panics inside a Cyrillic or emoji message
+of the wrong byte length; the panic would have escaped `run`, and
+since the poll offset lives in memory the restart would have replayed
+the same update and panicked again. It walks characters now, with the
+test in the scripts that would have found it. Two more from the same
+pass: Telegram keeps a day of updates for a bot that was down, and
+replaying them meant a `/grant always` tapped hours ago answering
+whatever ask stands now — the backlog is read once without waiting
+and its commands and taps are dropped, its messages answered. And a
+poll that keeps failing backs off to a line a minute instead of
+seventeen thousand identical lines a day.
+
+Then the console: `/status`, `/cost`, `/cron`, `/tasks`, `/whoami`,
+`/restart`. Each is a read of state the gateway already held and
+never showed. `/cost` reads the whole log, not the window since the
+last compaction, and prices each model's half separately. `/restart`
+exits 75 — `EX_TEMPFAIL` — which `Restart=on-failure` restarts on, so
+the unit file needed a comment and nothing else.
+
+Not done: the live run against a real bot. Every call was checked by
+review against the API and the fake answers as it does, but nobody
+has typed at it yet; that wants a BotFather token on a box with the
+gateway.
+
 ## 2026-09-21 — What the autonomous run leaves
 
 The screenshot in the interface doc is regenerated from the demo
