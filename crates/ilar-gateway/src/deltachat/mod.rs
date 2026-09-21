@@ -277,6 +277,11 @@ impl DeltaChat {
                 channel: self.name().to_string(),
                 chat_id: chat_id.to_string(),
                 sender_id: address,
+                sender_name: message
+                    .pointer("/sender/displayName")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .map(str::to_string),
                 message_id: Some(msg_id.to_string()),
                 text,
                 media,

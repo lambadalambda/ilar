@@ -24,7 +24,7 @@ use crate::driver::log;
 use api::BotApi;
 
 /// `[channels.telegram]`.
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramConfig {
     /// The bot token from BotFather.
@@ -42,6 +42,28 @@ pub struct TelegramConfig {
     pub ack_reaction: Option<String>,
     /// Where fetched attachments go; `<gateway dir>/telegram` when unset.
     pub media_dir: Option<PathBuf>,
+    /// In a group, answer only what is addressed to the bot: a
+    /// mention, a reply to one of its messages, or a command. On by
+    /// default; off, the bot answers everything a group says.
+    #[serde(default = "yes")]
+    pub group_mention_only: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            token: None,
+            allow_from: Vec::new(),
+            allow_anyone: false,
+            ack_reaction: None,
+            media_dir: None,
+            group_mention_only: true,
+        }
+    }
 }
 
 /// How long one `getUpdates` waits on the server. The API allows 50.
@@ -66,6 +88,8 @@ pub struct Telegram {
     media_dir: PathBuf,
     /// The bot's own username from `getMe`, for stripping mentions.
     username: std::sync::Mutex<Option<String>>,
+    /// The bot's own id, for telling a reply to one of its messages.
+    bot_id: std::sync::atomic::AtomicI64,
 }
 
 impl Telegram {
@@ -90,6 +114,7 @@ impl Telegram {
             api,
             media_dir,
             username: std::sync::Mutex::new(None),
+            bot_id: std::sync::atomic::AtomicI64::new(0),
         })
     }
 
@@ -123,6 +148,10 @@ impl Telegram {
             .unwrap_or("")
             .to_string();
         *self.username.lock().unwrap() = Some(username.clone());
+        self.bot_id.store(
+            me.get("id").and_then(Value::as_i64).unwrap_or(0),
+            std::sync::atomic::Ordering::Release,
+        );
         // The menu: what typing `/` offers. Best effort — a menu that
         // would not set is a bot without one, not a bot that is down.
         let commands: Vec<Value> = crate::commands::MENU
@@ -197,6 +226,20 @@ impl Telegram {
             .unwrap_or("");
         let username = self.username.lock().unwrap().clone().unwrap_or_default();
         let mut text = strip_mention(raw, &username);
+        // A group talks among itself; the bot answers what is said to
+        // it — a mention, a reply to its own message, a command — and
+        // lets the rest go by without a word.
+        if is_group && self.config.group_mention_only {
+            let mentioned = text != raw.trim();
+            let command = raw.trim_start().starts_with('/');
+            let replied_to = message
+                .pointer("/reply_to_message/from/id")
+                .and_then(Value::as_i64)
+                .is_some_and(|id| id == self.bot_id.load(std::sync::atomic::Ordering::Acquire));
+            if !(mentioned || command || replied_to) {
+                return Ok(());
+            }
+        }
         // A file that cannot be fetched — too big for the API, a
         // network blip — does not take the person's words with it: the
         // text goes on, with a note where the file would have been.
@@ -234,6 +277,7 @@ impl Telegram {
                 channel: self.name().to_string(),
                 chat_id,
                 sender_id,
+                sender_name: display_name(from),
                 message_id: message_id.map(|id| id.to_string()),
                 text,
                 media,
@@ -294,6 +338,7 @@ impl Telegram {
                     .and_then(Value::as_i64)
                     .map(|id| id.to_string())
                     .unwrap_or_default(),
+                sender_name: display_name(from),
                 // The ask's own message, not a new one: nothing to
                 // take back.
                 message_id: None,
@@ -406,9 +451,10 @@ fn safe_name(name: &str) -> String {
     }
 }
 
-/// `/new@ilar_bot` is `/new`; `@ilar_bot hello` is `hello`. Telegram
-/// addresses a bot in a group both ways. The mention has to be the
-/// whole first word — `@ilar_botty` is somebody else — and the text
+/// `/new@ilar_bot` is `/new`; `hey @ilar_bot, what's up` is `hey,
+/// what's up`. Telegram addresses a bot in a group both ways, and a
+/// person mentions it wherever the sentence puts it. The mention has
+/// to be a whole word — `@ilar_botty` is somebody else — and the text
 /// is walked by characters, never sliced by bytes: a message in
 /// Cyrillic or emoji has byte lengths that are nobody's business.
 fn strip_mention(text: &str, username: &str) -> String {
@@ -416,29 +462,74 @@ fn strip_mention(text: &str, username: &str) -> String {
     if username.is_empty() {
         return text.to_string();
     }
-    let mention = format!("@{username}");
     let (first, rest) = match text.split_once(char::is_whitespace) {
         Some((first, rest)) => (first, rest.trim_start()),
         None => (text, ""),
     };
-    if let Some(command) = first.strip_prefix('/') {
+    let body = match first.strip_prefix('/') {
         // `/new@ilar_bot` — the mention is glued to the command.
-        if let Some((name, at)) = command.rsplit_once('@')
-            && !name.is_empty()
-            && at.eq_ignore_ascii_case(username)
-        {
-            return if rest.is_empty() {
-                format!("/{name}")
+        Some(command) => match command.rsplit_once('@') {
+            Some((name, at)) if !name.is_empty() && at.eq_ignore_ascii_case(username) => {
+                if rest.is_empty() {
+                    format!("/{name}")
+                } else {
+                    format!("/{name} {rest}")
+                }
+            }
+            _ => text.to_string(),
+        },
+        None => text.to_string(),
+    };
+    // Then the mention as a word of its own, anywhere. ASCII lowering
+    // keeps every byte offset where it was, so the offsets found in
+    // the lowered copy index the original.
+    let needle = format!("@{}", username.to_ascii_lowercase());
+    let lowered = body.to_ascii_lowercase();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(body.len());
+    let mut at = 0;
+    while let Some(found) = lowered[at..].find(&needle) {
+        let start = at + found;
+        let end = start + needle.len();
+        let bounded_before = lowered[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_word(c));
+        let bounded_after = lowered[end..].chars().next().is_none_or(|c| !is_word(c));
+        if bounded_before && bounded_after {
+            out.push_str(&body[at..start]);
+            // One space goes with the mention, so "hey @bot what" is
+            // "hey what": the one after it, or, before a comma or the
+            // end, the one before it.
+            if body[end..].starts_with(' ') && !out.is_empty() {
+                at = end + 1;
             } else {
-                format!("/{name} {rest}")
-            };
+                if out.ends_with(' ') {
+                    out.pop();
+                }
+                at = end;
+            }
+        } else {
+            out.push_str(&body[at..end]);
+            at = end;
         }
-        return text.to_string();
     }
-    if first.eq_ignore_ascii_case(&mention) {
-        return rest.to_string();
+    out.push_str(&body[at..]);
+    out.trim().to_string()
+}
+
+/// What a person is called: first and last name as Telegram has them,
+/// else the username, else nothing.
+fn display_name(user: &Value) -> Option<String> {
+    let first = user.get("first_name").and_then(Value::as_str).unwrap_or("");
+    let last = user.get("last_name").and_then(Value::as_str).unwrap_or("");
+    let name = format!("{first} {last}").trim().to_string();
+    if !name.is_empty() {
+        return Some(name);
     }
-    text.to_string()
+    user.get("username")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Whether an update from before this start would act on the present:
@@ -1072,6 +1163,7 @@ mod tests {
         assert_eq!(first.text, "hello bot");
         assert!(!first.is_group);
         assert_eq!(first.message_id.as_deref(), Some("10"));
+        assert_eq!(first.sender_name.as_deref(), Some("Someone"));
 
         let group = next(&mut run.inbound).await;
         assert_eq!(group.chat_id, "-100");
@@ -1283,6 +1375,76 @@ mod tests {
         assert_eq!(keyboard[0][1]["callback_data"], "/deny");
     }
 
+    /// A group talks among itself. What is said to the bot — a
+    /// mention anywhere, a reply to its message, a command — arrives;
+    /// the rest does not. Off, everything arrives.
+    #[tokio::test]
+    async fn in_a_group_only_what_is_said_to_the_bot_arrives() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = |update_id: i64, text: &str, reply_to_bot: bool| {
+            let mut message = json!({
+                "message_id": update_id * 10,
+                "from": user(777, Some("carol")),
+                "chat": {"id": -100, "type": "supergroup"},
+                "text": text,
+            });
+            if reply_to_bot {
+                message["reply_to_message"] = json!({
+                    "message_id": 5,
+                    "from": {"id": 99, "is_bot": true, "username": "ilar_bot"},
+                    "text": "earlier answer",
+                });
+            }
+            json!({"update_id": update_id, "message": message})
+        };
+        let mut run = started(
+            TelegramConfig {
+                allow_from: vec!["777".into()],
+                ..TelegramConfig::default()
+            },
+            dir.path(),
+        );
+        run.updates.send(json!([])).await.unwrap();
+        run.updates
+            .send(json!([
+                group(1, "morning everyone", false),
+                group(2, "hey @ilar_bot, what's up", false),
+                group(3, "and this?", true),
+                group(4, "/status@ilar_bot", false),
+                group(5, "/status", false),
+                group(6, "nobody asked you", false),
+            ]))
+            .await
+            .unwrap();
+        let mentioned = next(&mut run.inbound).await;
+        assert_eq!(mentioned.text, "hey, what's up");
+        assert!(mentioned.is_group);
+        assert_eq!(mentioned.sender_name.as_deref(), Some("Someone"));
+        assert_eq!(next(&mut run.inbound).await.text, "and this?");
+        assert_eq!(next(&mut run.inbound).await.text, "/status");
+        assert_eq!(next(&mut run.inbound).await.text, "/status");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(run.inbound.try_recv().is_err(), "the chatter went by");
+        run.stop().await;
+
+        // A group that is the bot's own: everything is for it.
+        let mut run = started(
+            TelegramConfig {
+                allow_from: vec!["777".into()],
+                group_mention_only: false,
+                ..TelegramConfig::default()
+            },
+            dir.path(),
+        );
+        run.updates.send(json!([])).await.unwrap();
+        run.updates
+            .send(json!([group(7, "morning everyone", false)]))
+            .await
+            .unwrap();
+        assert_eq!(next(&mut run.inbound).await.text, "morning everyone");
+        run.stop().await;
+    }
+
     #[tokio::test]
     async fn an_open_allow_list_refuses_to_start() {
         let dir = tempfile::tempdir().unwrap();
@@ -1305,9 +1467,19 @@ mod tests {
         );
         assert_eq!(strip_mention("@ilar_bot hello", "ilar_bot"), "hello");
         assert_eq!(strip_mention("@Ilar_Bot hello", "ilar_bot"), "hello");
+        assert_eq!(strip_mention("hello @ilar_bot", "ilar_bot"), "hello");
+        // Anywhere in the sentence, as a whole word.
         assert_eq!(
-            strip_mention("hello @ilar_bot", "ilar_bot"),
-            "hello @ilar_bot"
+            strip_mention("hey @ilar_bot, what's up", "ilar_bot"),
+            "hey, what's up"
+        );
+        assert_eq!(
+            strip_mention("hey @Ilar_Bot what's up @ilar_bot", "ilar_bot"),
+            "hey what's up"
+        );
+        assert_eq!(
+            strip_mention("mail me at me@ilar_bot.example", "ilar_bot"),
+            "mail me at me@ilar_bot.example"
         );
         assert_eq!(
             strip_mention("/new@other_bot", "ilar_bot"),

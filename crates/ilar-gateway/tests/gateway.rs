@@ -264,6 +264,38 @@ async fn cron_jobs_are_listed_and_removed_from_the_chat() {
     gateway.cancel();
 }
 
+/// In a room the model is told who spoke, since several people do;
+/// in a private chat the one person needs no name.
+#[tokio::test]
+async fn a_room_message_names_its_sender_and_a_private_one_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let (gateway, fake) = gateway(dir.path(), vec![says("hello all"), says("hello you")]);
+    fake.inject_in_group("hi everyone", "room-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(2, WAIT).await;
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    let first_prompt = |key: &str| {
+        store
+            .load(&session_of(dir.path(), key))
+            .unwrap()
+            .events()
+            .iter()
+            .find_map(|event| match event {
+                ilar::session::SessionEvent::UserMessage { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("a prompt")
+    };
+    // The prompt carries the `<now>` stamp ahead of the words.
+    let room = first_prompt("fake:room-1");
+    assert!(room.ends_with("\n\nalice: hi everyone"), "{room}");
+    let private = first_prompt("fake:chat-1");
+    assert!(private.ends_with("\n\nhi"), "{private}");
+    assert!(!private.contains("alice:"), "{private}");
+    gateway.cancel();
+}
+
 /// `/restart` answers, then stops the gateway the way a signal would,
 /// and marks the stop as one the process should exit non-zero from.
 #[tokio::test]

@@ -95,6 +95,17 @@ public box. Make the bot with BotFather and put its token here.
 | `allow_anyone` | `false` | Talk to whoever writes. Without it an empty `allow_from` refuses to start. |
 | `ack_reaction` | — | An emoji to react with on receipt; Telegram takes only the ones on its own list. |
 | `media_dir` | `<home>/telegram` | Where attachments are fetched to. |
+| `group_mention_only` | `true` | In a group, answer only what is said to the bot: a mention anywhere in the message, a reply to one of its messages, or a command. `false` answers everything a group says. |
+
+**In a group.** Add the bot to the group and, in BotFather, turn
+privacy mode off for it (`/setprivacy` → Disable) so it sees the
+conversation and not just commands; the rule above is what keeps it
+from answering all of it. A message reaches the model as `Name: text`
+so it can tell who is asking, and the mention is taken out of the
+text wherever it sat. Allowlisting still applies per sender: a group
+member who is not in `allow_from` is ignored even when they mention
+the bot. A group is a room to the gateway — it gets no core memory
+and cannot reach the memory files or the session store.
 
 The gateway registers its commands with Telegram at every start, so
 typing `/` offers them with a line each and the Menu button lists

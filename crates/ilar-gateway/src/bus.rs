@@ -8,6 +8,10 @@ pub struct Inbound {
     pub channel: String,
     pub chat_id: String,
     pub sender_id: String,
+    /// What the sender is called, as the channel shows it. In a room
+    /// the model is told who spoke; in a private chat it is not
+    /// needed, and a message the gateway made up has none.
+    pub sender_name: Option<String>,
     /// The channel's own id for this message, when it has one: what
     /// deleting it again needs. `None` for a message the gateway made
     /// up, from the inbox.

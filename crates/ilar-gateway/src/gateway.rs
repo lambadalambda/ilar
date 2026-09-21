@@ -613,7 +613,14 @@ impl Gateway {
             log(&format!("{key}: routes not saved: {error:#}"));
         }
         let (images, notes) = attachments(&message.media);
-        let prompt = format!("{}{notes}", message.text);
+        // In a room the model is told who is talking: several people
+        // are, and "you" is not one of them. A private chat is one
+        // person, and the name would be noise.
+        let spoken = match (&message.sender_name, message.is_group) {
+            (Some(name), true) => format!("{name}: {}", message.text),
+            _ => message.text.clone(),
+        };
+        let prompt = format!("{spoken}{notes}");
         // A turn already running here reads the message at its next
         // step, as the TUI's steering does; its reply covers both.
         if self.driver.steer(&seat, &prompt, &images) {
@@ -1897,6 +1904,7 @@ impl Gateway {
                     channel: channel.to_string(),
                     chat_id: chat_id.to_string(),
                     sender_id: inbox::sender(&message.source),
+                    sender_name: None,
                     // Nothing in a chat to delete: the gateway wrote it.
                     message_id: None,
                     text: message.text,
