@@ -97,6 +97,9 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [Wrapped rows keep their gutter](issues/wrapped-rows-keep-their-gutter.md)
 - [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
+- [ ] [A share carries its delegations](issues/a-share-carries-its-delegations.md)
+- [ ] [A share says where it came from](issues/a-share-says-where-it-came-from.md)
+- [ ] [A share taken mid-turn says it is idle](issues/a-share-taken-mid-turn-says-it-is-idle.md)
 
 ## Milestone 21 — The assistant
 

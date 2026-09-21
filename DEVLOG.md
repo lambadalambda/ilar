@@ -1,5 +1,70 @@
 # DEVLOG
 
+## 2026-09-21 — A session in one file
+
+The ask was opencode's share links. The answer here is a file rather
+than a URL: Palette → "Share transcript (one HTML file)" writes one
+~120 KB `.html` with the data, the styles, the renderer and its
+vendored modules all inline. It opens offline, and it has not left the
+machine until you send it. A hosted link stays possible; this is its
+prerequisite either way, because the rendering is the same work.
+
+It reuses `ilar serve`'s renderer rather than growing a third way to
+draw a transcript — the two that exist have drifted apart more than
+once. `serve/view.rs` and the assets are `web/` now, compiled always,
+with only the server behind the feature flag. `serve` fetches
+`/api/sessions/{id}`; a share answers the same paths from a table in
+the page.
+
+**The hard part was the module graph, and the browser found the bug.**
+`app.js` imports bare specifiers, and `hooks` imports `preact`; inline
+modules cannot be imported by specifier and `file://` modules hit
+opaque-origin rules. So a classic bootstrap turns each source into a
+`blob:` URL, rewriting bare specifiers as it goes. I proved that in
+Deno, felt good about it, and the first render in Firefox said:
+
+    the specifier "preact" was a bare specifier, but was not remapped
+
+Two orderings had collapsed into one list. Replacement wants the
+longest specifier first, so `"preact"` cannot eat half of
+`"preact/hooks"`. Building wants dependencies first. I had written the
+list for the former and used it for the latter, so `hooks` was blobbed
+before `preact` existed. Deno could not catch it because I had fed it
+the modules in the right order by hand.
+
+**Then the review found what the browser could not.** A file you send
+to other people is a different thing from a file you open yourself,
+and it was not safe to send:
+
+`</ScRiPt>` in a transcript closed the JSON block, and everything
+after it became live markup in the *reader's* browser. My escape was
+`replace("</script", …)` — case-sensitive, where the HTML tokenizer is
+not. I reproduced it before fixing it, and watched an `<img>` element
+climb out of a JSON string into the DOM.
+
+Worse in a quieter way: I had escaped `<!--` as `<\!--`, which is not
+valid JSON. Any conversation mentioning an HTML comment — a web
+session, say — rendered a blank page, with the reason in a console
+nobody opens.
+
+Both die to the same one-line fix. `\u003C` is valid JSON, parses back
+to `<`, and cannot begin a tag. The lesson is the shape of the first
+attempt: I had been patching the *sequences* I could think of, and
+there is always another sequence. Escaping the character the parser
+actually looks for is the whole class.
+
+And the one that would have been worst: the full text behind a
+truncated result shipped **un-redacted**. Every bounded display
+redacts, and serve's own full-text route redacts with a comment saying
+it must — and the single copy that leaves the machine was the one that
+forgot. It also shipped every result rather than the cut ones, undoing
+the bulk-cutting on the one surface where bulk costs someone else's
+bandwidth.
+
+Three things it still does not do, each filed: a delegation's own
+timeline, the author's absolute paths, and what a share taken mid-turn
+should claim about a session that is still running.
+
 ## 2026-09-21 — Export stopped at the compaction
 
 The user found it: exporting a session that had been compacted and then
