@@ -2801,8 +2801,39 @@ impl schedule::Runtime for LoopRuntime<'_> {
         if !crossterm::event::poll(timeout)? {
             return Ok(None);
         }
-        Ok(Some(crossterm::event::read()?))
+        let (event, stashed) = coalesce_resizes(crossterm::event::read()?, || {
+            if crossterm::event::poll(std::time::Duration::ZERO)? {
+                Ok(Some(crossterm::event::read()?))
+            } else {
+                Ok(None)
+            }
+        })?;
+        *self.pending_terminal_event = stashed;
+        Ok(Some(event))
     }
+}
+
+/// A drag of the window edge arrives as a run of resize events, and
+/// every one that reaches a frame re-wraps the whole transcript at a
+/// width nobody will look at. Only the last of a run is handed on. The
+/// first event of another kind behind it is returned to be stashed,
+/// not read and lost.
+fn coalesce_resizes(
+    first: Event,
+    mut next: impl FnMut() -> Result<Option<Event>>,
+) -> Result<(Event, Option<Event>)> {
+    let mut event = first;
+    if !matches!(event, Event::Resize(..)) {
+        return Ok((event, None));
+    }
+    while let Some(following) = next()? {
+        if matches!(following, Event::Resize(..)) {
+            event = following;
+        } else {
+            return Ok((event, Some(following)));
+        }
+    }
+    Ok((event, None))
 }
 
 fn ring_terminal_bell_if_idle(
@@ -5629,6 +5660,42 @@ async fn run_app(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A run of resizes collapses to its last; whatever follows the run
+    /// is handed back rather than swallowed, and a non-resize first
+    /// event reads nothing further.
+    #[test]
+    fn a_run_of_resizes_keeps_only_the_last_and_stashes_what_follows() {
+        use crossterm::event::{Event, KeyCode, KeyEvent};
+        let key = Event::Key(KeyEvent::from(KeyCode::Char('x')));
+        let mut queue = std::collections::VecDeque::from(vec![
+            Event::Resize(81, 24),
+            Event::Resize(90, 30),
+            key.clone(),
+            Event::Resize(1, 1),
+        ]);
+        let (event, stashed) =
+            super::coalesce_resizes(Event::Resize(80, 24), || Ok(queue.pop_front())).unwrap();
+        assert_eq!(event, Event::Resize(90, 30));
+        assert_eq!(stashed, Some(key.clone()));
+        assert_eq!(queue.len(), 1, "the resize behind the key is not read");
+
+        // A run that ends the queue keeps its last and stashes nothing.
+        let mut queue = std::collections::VecDeque::from(vec![Event::Resize(5, 5)]);
+        let (event, stashed) =
+            super::coalesce_resizes(Event::Resize(4, 4), || Ok(queue.pop_front())).unwrap();
+        assert_eq!((event, stashed), (Event::Resize(5, 5), None));
+
+        // Not a resize: nothing is read at all.
+        let mut reads = 0;
+        let (event, stashed) = super::coalesce_resizes(key.clone(), || {
+            reads += 1;
+            Ok(None)
+        })
+        .unwrap();
+        assert_eq!((event, stashed), (key, None));
+        assert_eq!(reads, 0);
+    }
 
     /// Both background replays stop when nobody wants them any more,
     /// and the stopping is the drop itself — the arrow keys start a
