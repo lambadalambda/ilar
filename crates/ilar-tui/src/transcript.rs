@@ -152,7 +152,7 @@ struct CachedTranscriptEntry {
     group: Option<CachedGroup>,
     /// Spinners and elapsed times move without the model changing.
     animated: bool,
-    rows: Vec<TranscriptRow>,
+    rows: EntryRows,
     /// Row offsets within `rows` matching the cache's query; `None`
     /// until scanned, which is what keeps search off untouched rows.
     matches: Option<Vec<usize>>,
@@ -216,6 +216,129 @@ pub(crate) struct TranscriptRow {
     pub(crate) target: Option<TranscriptHitTarget>,
 }
 
+/// One entry's rendered rows, as runs. A run is either the entry's own
+/// rows or a child timeline shared with the [`ChildRowMemo`] that
+/// rendered it: the animation pass rebuilds an agent row's header every
+/// frame, and the timeline under it — the largest thing in the
+/// transcript — is put back by reference rather than copied row by row.
+#[derive(Default)]
+pub(crate) struct EntryRows {
+    runs: Vec<RowRun>,
+    len: usize,
+}
+
+enum RowRun {
+    Own(Vec<TranscriptRow>),
+    Shared(std::sync::Arc<[TranscriptRow]>),
+}
+
+impl RowRun {
+    fn as_slice(&self) -> &[TranscriptRow] {
+        match self {
+            RowRun::Own(rows) => rows,
+            RowRun::Shared(rows) => rows,
+        }
+    }
+}
+
+impl EntryRows {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn runs(&self) -> impl Iterator<Item = &[TranscriptRow]> {
+        self.runs.iter().map(RowRun::as_slice)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &TranscriptRow> {
+        self.runs().flatten()
+    }
+
+    fn get(&self, index: usize) -> Option<&TranscriptRow> {
+        let mut skip = index;
+        for run in self.runs() {
+            if skip < run.len() {
+                return Some(&run[skip]);
+            }
+            skip -= run.len();
+        }
+        None
+    }
+
+    fn push(&mut self, row: TranscriptRow) {
+        self.len += 1;
+        if let Some(RowRun::Own(rows)) = self.runs.last_mut() {
+            rows.push(row);
+        } else {
+            self.runs.push(RowRun::Own(vec![row]));
+        }
+    }
+
+    fn insert_front(&mut self, row: TranscriptRow) {
+        self.len += 1;
+        self.runs.insert(0, RowRun::Own(vec![row]));
+    }
+
+    /// Put a rendered child timeline in place, by reference.
+    fn share(&mut self, rows: std::sync::Arc<[TranscriptRow]>) {
+        self.len += rows.len();
+        self.runs.push(RowRun::Shared(rows));
+    }
+
+    fn append(&mut self, mut other: EntryRows) {
+        self.len += other.len;
+        self.runs.append(&mut other.runs);
+    }
+
+    /// One flat vector, for a nested timeline or a test. A shared run
+    /// is copied here — which is what the runs exist to avoid on the
+    /// frame path, and is fine off it.
+    fn into_vec(self) -> Vec<TranscriptRow> {
+        let mut rows = Vec::with_capacity(self.len);
+        for run in self.runs {
+            match run {
+                RowRun::Own(own) => rows.extend(own),
+                RowRun::Shared(shared) => rows.extend(shared.iter().cloned()),
+            }
+        }
+        rows
+    }
+
+    /// Child timelines held by reference, for the test that pins the
+    /// animation pass to sharing rather than copying.
+    #[cfg(test)]
+    fn shared_runs(&self) -> Vec<&std::sync::Arc<[TranscriptRow]>> {
+        self.runs
+            .iter()
+            .filter_map(|run| match run {
+                RowRun::Shared(rows) => Some(rows),
+                RowRun::Own(_) => None,
+            })
+            .collect()
+    }
+}
+
+impl From<Vec<TranscriptRow>> for EntryRows {
+    fn from(rows: Vec<TranscriptRow>) -> Self {
+        EntryRows {
+            len: rows.len(),
+            runs: vec![RowRun::Own(rows)],
+        }
+    }
+}
+
+impl Extend<TranscriptRow> for EntryRows {
+    fn extend<I: IntoIterator<Item = TranscriptRow>>(&mut self, rows: I) {
+        for row in rows {
+            self.push(row);
+        }
+    }
+}
+
 /// Rendered child timelines, kept per cached entry so an agent row that
 /// only *animates* does not re-render the subagent transcript hanging
 /// off it. An entry re-rendered by the animation pass is, by the cache's
@@ -225,7 +348,7 @@ pub(crate) struct TranscriptRow {
 /// precisely what made watching a subagent expensive.
 #[derive(Default)]
 struct ChildRowMemo {
-    rows: std::collections::HashMap<String, Vec<TranscriptRow>>,
+    rows: std::collections::HashMap<String, std::sync::Arc<[TranscriptRow]>>,
     /// Set on the animation pass: reuse what is stored instead of
     /// rendering it again.
     reuse: bool,
@@ -240,24 +363,29 @@ impl ChildRowMemo {
     /// a row that cannot must drop what it stored, or a group animated
     /// by one live sibling would redraw its finished siblings from a
     /// stale copy.
+    ///
+    /// Shared, not cloned: the memo and the entry hold the same rows,
+    /// and a reuse is a reference count rather than a copy of every
+    /// span of a subagent's transcript, twenty times a second.
     fn child_rows(
         &mut self,
         id: &str,
         keep: bool,
         render: impl FnOnce() -> Vec<TranscriptRow>,
-    ) -> Vec<TranscriptRow> {
+    ) -> std::sync::Arc<[TranscriptRow]> {
         if self.reuse
             && let Some(rows) = self.rows.get(id)
         {
-            return rows.clone();
+            return std::sync::Arc::clone(rows);
         }
-        let rows = render();
+        let rows: std::sync::Arc<[TranscriptRow]> = render().into();
         #[cfg(test)]
         {
             self.renders += 1;
         }
         if keep {
-            self.rows.insert(id.to_string(), rows.clone());
+            self.rows
+                .insert(id.to_string(), std::sync::Arc::clone(&rows));
         } else {
             self.rows.remove(id);
         }
@@ -463,7 +591,12 @@ impl TranscriptRenderCache {
             for entry in &mut self.entries {
                 match (&mut entry.matches, extends) {
                     (Some(kept), true) => {
-                        kept.retain(|&offset| row_contains(&entry.rows[offset], &needle));
+                        kept.retain(|&offset| {
+                            entry
+                                .rows
+                                .get(offset)
+                                .is_some_and(|row| row_contains(row, &needle))
+                        });
                     }
                     (slot, _) => *slot = None,
                 }
@@ -477,7 +610,7 @@ impl TranscriptRenderCache {
                 {
                     self.searched_rows += entry.rows.len();
                 }
-                entry.matches = Some(matching_row_offsets(&entry.rows, &needle));
+                entry.matches = Some(matching_row_offsets(entry.rows.iter(), &needle));
             }
             matches.extend(entry.matches.iter().flatten().map(|offset| base + *offset));
             base += entry.rows.len();
@@ -509,7 +642,7 @@ impl TranscriptRenderCache {
         for rows in self
             .entries
             .iter()
-            .map(|entry| entry.rows.as_slice())
+            .flat_map(|entry| entry.rows.runs())
             .chain(std::iter::once(trailing.as_slice()))
             .chain(std::iter::once(padding.as_slice()))
         {
@@ -565,9 +698,11 @@ fn row_contains(row: &TranscriptRow, needle: &str) -> bool {
 }
 
 /// Row offsets whose text contains an already-lowercased `needle`.
-fn matching_row_offsets(rows: &[TranscriptRow], needle: &str) -> Vec<usize> {
-    rows.iter()
-        .enumerate()
+fn matching_row_offsets<'a>(
+    rows: impl Iterator<Item = &'a TranscriptRow>,
+    needle: &str,
+) -> Vec<usize> {
+    rows.enumerate()
         .filter(|(_, row)| row_contains(row, needle))
         .map(|(offset, _)| offset)
         .collect()
@@ -584,7 +719,7 @@ fn spaced_entry_rows(
     now: std::time::Instant,
     activity_started: std::time::Instant,
     children: &mut ChildRowMemo,
-) -> Vec<TranscriptRow> {
+) -> EntryRows {
     let mut rows = entry_rows(
         entry,
         expanded_groups,
@@ -595,13 +730,10 @@ fn spaced_entry_rows(
         children,
     );
     if index > 0 && !entry.is_child() {
-        rows.insert(
-            0,
-            TranscriptRow {
-                line: Line::default(),
-                target: None,
-            },
-        );
+        rows.insert_front(TranscriptRow {
+            line: Line::default(),
+            target: None,
+        });
     }
     rows
 }
@@ -1567,6 +1699,7 @@ pub(crate) fn transcript_entry_rows(
         nested,
         &mut ChildRowMemo::default(),
     )
+    .into_vec()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1578,7 +1711,7 @@ fn entry_rows(
     activity_started: std::time::Instant,
     nested: bool,
     children: &mut ChildRowMemo,
-) -> Vec<TranscriptRow> {
+) -> EntryRows {
     match entry {
         TranscriptEntry::Item(item) => match *item {
             tool @ Line_::Tool { .. } => tool_entry_rows(
@@ -1632,7 +1765,8 @@ fn entry_rows(
                         };
                         TranscriptRow { line, target }
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
+                    .into()
             }
         },
         TranscriptEntry::ToolGroup {
@@ -1672,10 +1806,10 @@ fn entry_rows(
                 spans.append(&mut header.spans);
                 header = Line::from(spans);
             }
-            let mut rows = vec![TranscriptRow {
+            let mut rows = EntryRows::from(vec![TranscriptRow {
                 line: header,
                 target: Some(TranscriptHitTarget::ToolGroup(id.clone())),
-            }];
+            }]);
             let visible = calls
                 .iter()
                 .filter(|call| *expanded || tool_survives_collapse(call))
@@ -1700,7 +1834,7 @@ fn entry_rows(
                     "├─"
                 });
                 let call_indent = if show_hierarchy { group_indent + 2 } else { 0 };
-                rows.extend(tool_entry_rows(
+                rows.append(tool_entry_rows(
                     call,
                     expanded_groups,
                     width,
@@ -1799,7 +1933,7 @@ fn tool_entry_rows(
     branch: Option<&str>,
     name_column: usize,
     children: &mut ChildRowMemo,
-) -> Vec<TranscriptRow> {
+) -> EntryRows {
     let indent = indent.min(width as usize);
     let Line_::Tool {
         id,
@@ -1819,7 +1953,7 @@ fn tool_entry_rows(
         ..
     } = entry
     else {
-        return Vec::new();
+        return EntryRows::default();
     };
     let display_state = if *child_running {
         ToolState::Running
@@ -1856,10 +1990,10 @@ fn tool_entry_rows(
         })
         .unwrap_or_default();
     spans.extend(line.spans);
-    let mut rows = vec![TranscriptRow {
+    let mut rows = EntryRows::from(vec![TranscriptRow {
         line: Line::from(spans),
         target: Some(TranscriptHitTarget::Tool(id.clone())),
-    }];
+    }]);
     if *expanded {
         // A truncated block's "… more" row advances the expansion,
         // exactly like clicking the header again.
@@ -1923,7 +2057,7 @@ fn tool_entry_rows(
         } else {
             0
         };
-        rows.extend(children.child_rows(id, tool_is_active(entry), || {
+        rows.share(children.child_rows(id, tool_is_active(entry), || {
             // The expanded case renders the child lines where they are:
             // an expanded agent's timeline is the largest thing in the
             // transcript, and cloning it per frame was pure waste.
@@ -3343,6 +3477,92 @@ mod tests {
                 .iter()
                 .any(|row| rendered_text(&row.line).contains("the last word"))
         );
+    }
+
+    /// Not rendering the child again was half of it: the memo then
+    /// handed its rows back by deep clone — every span's String of a
+    /// subagent's whole transcript, per frame. The entry and the memo
+    /// hold the same allocation now, and an animation frame moves a
+    /// reference count.
+    #[test]
+    fn an_animating_agent_row_shares_its_child_rows_rather_than_copying_them() {
+        let child: Vec<Line_> = (0..60)
+            .map(|index| Line_::Assistant(format!("step {index}")))
+            .collect();
+        let lines = vec![agent_row("task-1", child, true)];
+        let groups = std::collections::HashSet::new();
+        let start = std::time::Instant::now();
+        let mut cache = TranscriptRenderCache::default();
+        cache.update(&lines, &groups, 1, 80, start, start);
+        for frame in 1..=3 {
+            cache.update(
+                &lines,
+                &groups,
+                1,
+                80,
+                start + std::time::Duration::from_millis(50 * frame),
+                start,
+            );
+        }
+        let entry = &cache.entries[0];
+        let shared = entry.rows.shared_runs();
+        assert_eq!(shared.len(), 1, "the child timeline is one shared run");
+        let memo = entry
+            .children
+            .rows
+            .get("task-1")
+            .expect("the memo holds it");
+        assert!(
+            std::sync::Arc::ptr_eq(shared[0], memo),
+            "and it is the memo's own allocation, not a copy of it"
+        );
+        assert_eq!(
+            std::sync::Arc::strong_count(memo),
+            2,
+            "held twice: entry and memo"
+        );
+        // The rows still read as one sequence across the runs.
+        assert_eq!(entry.rows.len(), entry.rows.iter().count());
+        assert!(
+            shared[0]
+                .iter()
+                .any(|row| rendered_text(&row.line).contains("step 0")),
+            "and the shared run is the child's timeline"
+        );
+        assert!(entry.rows.get(entry.rows.len()).is_none());
+    }
+
+    /// Runs are an implementation detail of the cache; read out flat,
+    /// they are the rows in order, whichever run each came from.
+    #[test]
+    fn entry_rows_read_flat_across_their_runs() {
+        let row = |text: &str| TranscriptRow {
+            line: Line::from(text.to_string()),
+            target: None,
+        };
+        let mut rows = EntryRows::from(vec![row("a")]);
+        rows.share(vec![row("b"), row("c")].into());
+        rows.push(row("d"));
+        rows.insert_front(row("z"));
+        let mut tail = EntryRows::default();
+        tail.extend([row("e")]);
+        rows.append(tail);
+        let text = |rows: &[TranscriptRow]| {
+            rows.iter()
+                .map(|r| rendered_text(&r.line))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows.len(), 6);
+        assert_eq!(
+            rows.get(2).map(|r| rendered_text(&r.line)).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            rows.get(5).map(|r| rendered_text(&r.line)).as_deref(),
+            Some("e")
+        );
+        assert!(rows.get(6).is_none());
+        assert_eq!(text(&rows.into_vec()), ["z", "a", "b", "c", "d", "e"]);
     }
 
     /// The whole point of the cut-before-wrap: a collapsed row keeps
