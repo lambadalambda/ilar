@@ -36,6 +36,20 @@ fn highlight_color(class: crate::highlight::Class) -> ratatui::style::Color {
 /// lines while constraining tables to `width` cells. Incomplete delimiters
 /// remain literal, which keeps streaming output readable.
 pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
+    render_with(source, width, false)
+}
+
+/// The rest of a source whose earlier blocks were already rendered:
+/// the same as [`render`] except that a blank line at the start still
+/// separates, because there is content above it — in the rows already
+/// rendered, which this call cannot see. Rendering a source in two
+/// halves split at a blank line outside a code fence, `render` then
+/// `render_continuation`, gives exactly `render` of the whole.
+pub fn render_continuation(source: &str, width: usize) -> Vec<Line<'static>> {
+    render_with(source, width, true)
+}
+
+fn render_with(source: &str, width: usize, preceded: bool) -> Vec<Line<'static>> {
     let source = sanitize(source);
     let source_lines = source.lines().collect::<Vec<_>>();
     let mut lines = Vec::new();
@@ -61,7 +75,7 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
                 code_fence = Some((fence, length));
                 code_language = crate::highlight::language_for(suffix.trim());
                 code_state = crate::highlight::BlockState::default();
-                flush_separator(&mut lines, &mut pending_separator);
+                flush_separator(&mut lines, &mut pending_separator, preceded);
                 let language = suffix.trim();
                 if !language.is_empty() {
                     lines.push(Line::from(Span::styled(
@@ -102,13 +116,13 @@ pub fn render(source: &str, width: usize) -> Vec<Line<'static>> {
         }
 
         if let Some((table, consumed)) = parse_table(&source_lines, current_index) {
-            flush_separator(&mut lines, &mut pending_separator);
+            flush_separator(&mut lines, &mut pending_separator, preceded);
             lines.extend(render_table(table, width));
             index = current_index + consumed;
             continue;
         }
 
-        flush_separator(&mut lines, &mut pending_separator);
+        flush_separator(&mut lines, &mut pending_separator, preceded);
 
         if let Some((level, text)) = heading(trimmed) {
             let (prefix, color) = match level {
@@ -517,21 +531,28 @@ fn bounded_wrap(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn flush_separator(lines: &mut Vec<Line<'static>>, pending: &mut bool) {
-    if *pending && !lines.is_empty() {
+fn flush_separator(lines: &mut Vec<Line<'static>>, pending: &mut bool, preceded: bool) {
+    if *pending && (preceded || !lines.is_empty()) {
         lines.push(Line::default());
     }
     *pending = false;
 }
 
-fn sanitize(source: &str) -> String {
+/// What the renderer reads: control characters dropped, newlines and
+/// tabs kept. Character-local, so a source sanitized in pieces reads
+/// the same as one sanitized whole.
+pub(crate) fn sanitize(source: &str) -> String {
     source
         .chars()
         .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
         .collect()
 }
 
-fn fence(line: &str) -> Option<(char, usize, &str)> {
+/// A fence line: its character, its length, and what follows it. The
+/// one piece of block state that crosses lines, which is why the
+/// transcript's streaming memo asks for the same rule rather than
+/// guessing at it.
+pub(crate) fn fence(line: &str) -> Option<(char, usize, &str)> {
     let fence = line.chars().next()?;
     if !matches!(fence, '`' | '~') {
         return None;

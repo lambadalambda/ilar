@@ -158,7 +158,7 @@ struct CachedTranscriptEntry {
     matches: Option<Vec<usize>>,
     /// Child timelines rendered for this entry's agent rows, so the
     /// animation pass can put them back rather than build them again.
-    children: ChildRowMemo,
+    children: EntryMemo,
 }
 
 struct CachedGroup {
@@ -217,7 +217,7 @@ pub(crate) struct TranscriptRow {
 }
 
 /// One entry's rendered rows, as runs. A run is either the entry's own
-/// rows or a child timeline shared with the [`ChildRowMemo`] that
+/// rows or a child timeline shared with the [`EntryMemo`] that
 /// rendered it: the animation pass rebuilds an agent row's header every
 /// frame, and the timeline under it — the largest thing in the
 /// transcript — is put back by reference rather than copied row by row.
@@ -347,17 +347,118 @@ impl Extend<TranscriptRow> for EntryRows {
 /// the clock. Rebuilding a live child's whole transcript at 20 fps is
 /// precisely what made watching a subagent expensive.
 #[derive(Default)]
-struct ChildRowMemo {
+struct EntryMemo {
     rows: std::collections::HashMap<String, std::sync::Arc<[TranscriptRow]>>,
     /// Set on the animation pass: reuse what is stored instead of
     /// rendering it again.
     reuse: bool,
+    /// The settled part of a streaming reply, rendered once.
+    reply: Option<ReplyMemo>,
     /// Child timelines actually rendered, ever.
     #[cfg(test)]
     renders: usize,
 }
 
-impl ChildRowMemo {
+/// A streaming reply's rows up to its last settled block, so each delta
+/// renders the open paragraph rather than the whole message again —
+/// which was quadratic over one long reply.
+///
+/// "Settled" is a blank line outside a code fence: the renderer is
+/// line-by-line with only fence state carried across lines, and a
+/// separator is flushed before the block that follows it, so a split
+/// there renders the same in two halves as in one. Pinned by
+/// `a_reply_rendered_in_deltas_matches_one_rendered_whole`.
+struct ReplyMemo {
+    /// The text the rows are for; the next text must extend it.
+    prefix: String,
+    rows: std::sync::Arc<[TranscriptRow]>,
+}
+
+/// The byte length of `text` up to the start of its last blank line
+/// outside a code fence — the longest prefix whose rendering the
+/// remainder cannot change. Scanned from `from`, which must itself be
+/// such a point (or zero): fence state there is known to be closed, so
+/// a delta pays for its tail and not for the reply so far. `from` when
+/// there is no later such line.
+fn settled_prefix_len(text: &str, from: usize) -> usize {
+    let mut code_fence: Option<(char, usize)> = None;
+    let mut at = from;
+    let mut settled = from;
+    for raw in text[from..].split_inclusive('\n') {
+        // An unterminated last line is still arriving: a lone space
+        // reads as blank now and as the indent of a paragraph a delta
+        // later, and a split taken on it would leave the separator on
+        // the wrong side. Only a finished line can settle anything.
+        if !raw.ends_with('\n') {
+            break;
+        }
+        // The renderer's own reading of the line — sanitized, then its
+        // fence rule — so the two agree on what is inside a block.
+        let line = markdown::sanitize(raw);
+        let line = line.trim_end_matches('\n');
+        if let Some((fence, length, suffix)) = markdown::fence(line.trim_start()) {
+            match code_fence {
+                Some((open, open_length))
+                    if fence == open && length >= open_length && suffix.trim().is_empty() =>
+                {
+                    code_fence = None;
+                }
+                Some(_) => {}
+                None => code_fence = Some((fence, length)),
+            }
+        } else if code_fence.is_none() && line.trim().is_empty() && at > 0 {
+            settled = at;
+        }
+        at += raw.len();
+    }
+    settled
+}
+
+/// An assistant reply's rows, through the memo: the settled prefix is
+/// put back by reference, and only what streamed since it is rendered.
+fn reply_rows(text: &str, width: u16, memo: &mut Option<ReplyMemo>) -> EntryRows {
+    let kept = memo
+        .take()
+        .filter(|memo| !memo.prefix.is_empty() && text.starts_with(&memo.prefix));
+    let done = kept.as_ref().map_or(0, |memo| memo.prefix.len());
+    // Monotone: a blank line outside a fence stays one however the text
+    // grows, since fence state at a point depends only on what precedes
+    // it — which is what lets the scan start where the last one ended.
+    let split = settled_prefix_len(text, done);
+    // `continued` is whether rows were *drawn* above, not whether text
+    // was consumed: leading blank lines settle and render nothing, and
+    // a separator flushed over nothing would be a row the whole render
+    // does not have.
+    let part = |from: usize, to: usize, continued: bool| {
+        assistant_lines(&text[from..to], width, continued)
+            .into_iter()
+            .flat_map(|line| wrap_entry_line(line, width as usize))
+            .map(|line| TranscriptRow { line, target: None })
+    };
+    let settled: std::sync::Arc<[TranscriptRow]> = match kept {
+        Some(memo) if split == done => memo.rows,
+        kept => {
+            let mut rows: Vec<TranscriptRow> = kept
+                .map(|memo| memo.rows.iter().cloned().collect())
+                .unwrap_or_default();
+            let continued = !rows.is_empty();
+            rows.extend(part(done, split, continued));
+            rows.into()
+        }
+    };
+    let mut rows = EntryRows::default();
+    rows.share(std::sync::Arc::clone(&settled));
+    rows.extend(part(split, text.len(), !settled.is_empty()));
+    if split > 0 {
+        *memo = Some(ReplyMemo {
+            prefix: text[..split].to_string(),
+            rows: settled,
+        });
+    }
+    rows
+}
+
+impl EntryMemo {
     /// The child rows for tool `id`, rendered or remembered. `keep` says
     /// whether this row can come back through the animation pass at all;
     /// a row that cannot must drop what it stored, or a group animated
@@ -466,11 +567,22 @@ impl TranscriptRenderCache {
             .map(|entry| entry.range.start)
             .unwrap_or_else(|| self.entries.last().map_or(0, |entry| entry.range.end))
             .min(lines.len());
+        // The first entry rebuilt is usually the one that streamed: its
+        // settled rows carry over, so a delta renders the open paragraph
+        // and not the reply so far.
+        let mut carried = self
+            .entries
+            .get_mut(resume)
+            .filter(|entry| entry.range.start == line)
+            .and_then(|entry| entry.children.reply.take());
         self.entries.truncate(resume);
         while line < lines.len() {
             let (entry, next) = transcript_entry_at(lines, expanded_groups, line);
             let index = self.entries.len();
-            let mut children = ChildRowMemo::default();
+            let mut children = EntryMemo {
+                reply: carried.take(),
+                ..EntryMemo::default()
+            };
             let rows = spaced_entry_rows(
                 &entry,
                 index,
@@ -718,7 +830,7 @@ fn spaced_entry_rows(
     width: u16,
     now: std::time::Instant,
     activity_started: std::time::Instant,
-    children: &mut ChildRowMemo,
+    children: &mut EntryMemo,
 ) -> EntryRows {
     let mut rows = entry_rows(
         entry,
@@ -1697,7 +1809,7 @@ pub(crate) fn transcript_entry_rows(
         now,
         activity_started,
         nested,
-        &mut ChildRowMemo::default(),
+        &mut EntryMemo::default(),
     )
     .into_vec()
 }
@@ -1710,10 +1822,11 @@ fn entry_rows(
     now: std::time::Instant,
     activity_started: std::time::Instant,
     nested: bool,
-    children: &mut ChildRowMemo,
+    children: &mut EntryMemo,
 ) -> EntryRows {
     match entry {
         TranscriptEntry::Item(item) => match *item {
+            Line_::Assistant(text) => reply_rows(text, width, &mut children.reply),
             tool @ Line_::Tool { .. } => tool_entry_rows(
                 tool,
                 expanded_groups,
@@ -1932,7 +2045,7 @@ fn tool_entry_rows(
     indent: usize,
     branch: Option<&str>,
     name_column: usize,
-    children: &mut ChildRowMemo,
+    children: &mut EntryMemo,
 ) -> EntryRows {
     let indent = indent.min(width as usize);
     let Line_::Tool {
@@ -2445,6 +2558,44 @@ fn tool_diff_rows(
     labeled_rows(label, content, &layout, limit, cut, false, more_target)
 }
 
+/// A reply's markdown, labelled and wrapped. `continued` says rows
+/// were already drawn for the text before this one, so the label goes
+/// on none of these and a leading blank line still separates.
+fn assistant_lines(text: &str, width: u16, continued: bool) -> Vec<Line<'static>> {
+    let mut output = Vec::new();
+    let mut first = !continued;
+    let label_width = 5usize.min(width.saturating_sub(2) as usize);
+    let content_width = (width as usize).saturating_sub(label_width);
+    let rendered = if continued {
+        markdown::render_continuation(text, content_width)
+    } else {
+        markdown::render(text, content_width)
+    };
+    for line in rendered {
+        if line.spans.is_empty() {
+            output.push(Line::default());
+            continue;
+        }
+        for mut line in wrap_markdown_line(line, content_width) {
+            for span in &mut line.spans {
+                if span.style.fg.is_none() {
+                    span.style = span.style.fg(theme::PRIMARY);
+                }
+            }
+            let label = if first {
+                truncate_display("ilar ", label_width, Truncation::Right)
+            } else {
+                " ".repeat(label_width)
+            };
+            first = false;
+            let mut spans = vec![Span::styled(label, theme::title(theme::ASSISTANT))];
+            spans.append(&mut line.spans);
+            output.push(Line::from(spans));
+        }
+    }
+    output
+}
+
 pub(crate) fn transcript_entry_lines(
     entry: &Line_,
     width: u16,
@@ -2452,35 +2603,7 @@ pub(crate) fn transcript_entry_lines(
     activity_started: std::time::Instant,
 ) -> Vec<Line<'static>> {
     match entry {
-        Line_::Assistant(text) => {
-            let mut output = Vec::new();
-            let mut first = true;
-            let label_width = 5usize.min(width.saturating_sub(2) as usize);
-            let content_width = (width as usize).saturating_sub(label_width);
-            for line in markdown::render(text, content_width) {
-                if line.spans.is_empty() {
-                    output.push(Line::default());
-                    continue;
-                }
-                for mut line in wrap_markdown_line(line, content_width) {
-                    for span in &mut line.spans {
-                        if span.style.fg.is_none() {
-                            span.style = span.style.fg(theme::PRIMARY);
-                        }
-                    }
-                    let label = if first {
-                        truncate_display("ilar ", label_width, Truncation::Right)
-                    } else {
-                        " ".repeat(label_width)
-                    };
-                    first = false;
-                    let mut spans = vec![Span::styled(label, theme::title(theme::ASSISTANT))];
-                    spans.append(&mut line.spans);
-                    output.push(Line::from(spans));
-                }
-            }
-            output
-        }
+        Line_::Assistant(text) => assistant_lines(text, width, false),
         Line_::Thought {
             id,
             text,
@@ -3530,6 +3653,126 @@ mod tests {
             "and the shared run is the child's timeline"
         );
         assert!(entry.rows.get(entry.rows.len()).is_none());
+    }
+
+    /// The memo's whole claim: a reply rendered delta by delta through
+    /// it is, row for row and span for span, the reply rendered whole.
+    /// The corpus is every block kind the renderer knows, split at
+    /// every awkward place a delta can land.
+    #[test]
+    fn a_reply_rendered_in_deltas_matches_one_rendered_whole() {
+        let long = "a very long paragraph that wraps ".repeat(8)
+            + "\n\nand another "
+            + &"word ".repeat(40);
+        let corpus: Vec<String> = [
+            "plain paragraph only",
+            "one\n\ntwo\n\nthree",
+            "intro\n\n```rust\nfn a() {}\n\nfn b() {}\n```\n\nafter",
+            "```\nunclosed fence\n\nstill code",
+            "| a | b |\n|---|---|\n| 1 | 2 |\n\ntext\n\n| c |\n|---|\n| 3 |",
+            "- one\n- two\n\n  continued\n\n1. x\n2. y",
+            "# Heading\n\n> quote\n\n---\n\ntail",
+            "\n\nleading blanks\n\n\n\nthree blanks\n\n",
+            "tabs\there\n\n~~~\ncode with ``` inside\n~~~\n\nend",
+            "**bold across\n\nparagraphs**",
+            "line\r\nwith\r\n\r\ncrlf",
+            "bell \u{7} here\n\n\u{7}```\nfenced after a control char\n\nblank inside\n```\n\nout",
+            "````\n```\ninner fence\n\n```\n````\n\ndone",
+            &long,
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        for text in &corpus {
+            let width = 40;
+            let whole = reply_rows(text, width, &mut None).into_vec();
+            for step in [1usize, 3, 7, 50] {
+                let mut memo = None;
+                let mut rows = Vec::new();
+                let mut end = 0;
+                while end < text.len() {
+                    end = (end + step).min(text.len());
+                    while !text.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    rows = reply_rows(&text[..end], width, &mut memo).into_vec();
+                }
+                assert_eq!(rows.len(), whole.len(), "{text:?} in steps of {step}");
+                for (index, (streamed, direct)) in rows.iter().zip(&whole).enumerate() {
+                    assert_eq!(
+                        streamed.line, direct.line,
+                        "{text:?} in steps of {step}, row {index}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And it is a memo, not a re-render with extra steps: the settled
+    /// rows are the same allocation from one delta to the next, and the
+    /// prefix moves only when a new blank line settles a block.
+    #[test]
+    fn a_reply_memo_settles_at_the_last_blank_line_and_shares_its_rows() {
+        let mut memo = None;
+        reply_rows("one\n\ntwo\n\nthr", 40, &mut memo);
+        let first = memo.as_ref().expect("settled");
+        assert_eq!(first.prefix, "one\n\ntwo\n");
+        let held = std::sync::Arc::clone(&first.rows);
+
+        reply_rows("one\n\ntwo\n\nthree", 40, &mut memo);
+        let same = memo.as_ref().unwrap();
+        assert_eq!(same.prefix, "one\n\ntwo\n");
+        assert!(
+            std::sync::Arc::ptr_eq(&same.rows, &held),
+            "no block settled: nothing copied"
+        );
+
+        reply_rows("one\n\ntwo\n\nthree\n\nfour", 40, &mut memo);
+        let grown = memo.as_ref().unwrap();
+        assert_eq!(grown.prefix, "one\n\ntwo\n\nthree\n");
+        assert_eq!(grown.rows.len(), 5, "one, sep, two, sep, three");
+
+        // A text that does not extend the prefix starts over.
+        reply_rows("something else\n\nentirely", 40, &mut memo);
+        assert_eq!(memo.as_ref().unwrap().prefix, "something else\n");
+        // No blank line yet: nothing to keep.
+        reply_rows("still going", 40, &mut memo);
+        assert!(memo.is_none());
+    }
+
+    /// The cache carries the memo across the rebuild a delta marks:
+    /// the entry is torn down and built again at the same line, and its
+    /// settled rows come with it.
+    #[test]
+    fn a_streaming_entry_keeps_its_settled_rows_across_rebuilds() {
+        let groups = std::collections::HashSet::new();
+        let now = std::time::Instant::now();
+        let mut cache = TranscriptRenderCache::default();
+        let mut lines = vec![Line_::User("go".into()), Line_::Assistant("a\n\nb".into())];
+        cache.update(&lines, &groups, 1, 80, now, now);
+        assert_eq!(
+            cache.entries[1]
+                .children
+                .reply
+                .as_ref()
+                .map(|m| m.prefix.as_str()),
+            Some("a\n")
+        );
+        let at = append_text_delta(&mut lines, "\n\nc");
+        cache.mark_dirty_from(at, 2);
+        cache.update(&lines, &groups, 2, 80, now, now);
+        let memo = cache.entries[1].children.reply.as_ref().expect("carried");
+        assert_eq!(memo.prefix, "a\n\nb\n");
+        let mut fresh = TranscriptRenderCache::default();
+        fresh.update(&lines, &groups, 1, 80, now, now);
+        let text = |cache: &TranscriptRenderCache| {
+            cache
+                .visible_rows(0, 50, &[])
+                .iter()
+                .map(|row| rendered_text(&row.line))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text(&cache), text(&fresh));
     }
 
     /// Runs are an implementation detail of the cache; read out flat,
