@@ -138,9 +138,16 @@ was a guess; measured (13 MB in 21 ms), it is 32 MiB now, with the
 number in the comment. **webfetch offset/range** is struck as the
 item itself says: the page spills to a file, and `read` has offsets.
 
-Left: `docs/assets/sessions.svg` still shows `↵ resume` — a driven
-screenshot to regenerate, which needs fixture sessions and the pty
-driver; not a code change.
+Also 2026-09-21: `docs/assets/sessions.svg` is regenerated — the demo
+state from `examples/demo_session`, the TUI in a 132×28 tmux pane with
+an empty config directory and a placeholder key, `/sessions` then
+`timeout`, `capture-pane -e` through `scripts/ansi2svg.py`. The footer
+reads `Enter resume` now. (tmux hands the pane to the login shell,
+which is fish on tenco, so the command goes through `bash -c`.)
+
+What is left in this omnibus is parked with serve: the driver's
+generic unlock hint, and `serve/drive.rs` hand-rolling the delivery
+disposition.
 
 Struck rather than done: the TUI grant line saying "(always)" when the
 store write failed. The modal writes that line from the answer, and

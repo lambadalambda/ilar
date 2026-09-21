@@ -1,5 +1,20 @@
 # DEVLOG
 
+## 2026-09-21 — What the autonomous run leaves
+
+The screenshot in the interface doc is regenerated from the demo
+state, at the geometry the old one had, and reads `Enter resume` like
+the footer does. The recipe is in the sweep issue; the one surprise
+was tmux handing the pane to fish and eating a bash `$?`.
+
+Three things are left deliberately. Focus seeding the step in flight
+needs a sequence number on the wire or an accepted duplicate window,
+and that is a decision, written up in its issue with the three
+options. The two structural refactors — the loop top joining the
+spine, and the big files finding their seams — are mechanical but
+large, and a split of a four-thousand-line file is a diff to review
+awake, not one to find in the morning.
+
 ## 2026-09-21 — The flake, second half
 
 The gate went red on the outbox test I had written this morning to

@@ -60,7 +60,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 14 — Agents are places
 
-- [ ] [Focus seeds the step in flight](issues/focus-seeds-the-step-in-flight.md)
+- [ ] [Focus seeds the step in flight](issues/focus-seeds-the-step-in-flight.md) — *needs a decision on sequencing the wire*
 
 ## Milestone 15 — Sweep: correctness
 
@@ -94,7 +94,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 20 — Sweep: the user's eye
 
 - [ ] [Wrapped rows keep their gutter](issues/wrapped-rows-keep-their-gutter.md)
-- [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md)
+- [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md) — *rest parked with serve*
 - [ ] [A share says where it came from](issues/a-share-says-where-it-came-from.md)
 - [ ] [A share taken mid-turn says it is idle](issues/a-share-taken-mid-turn-says-it-is-idle.md)
 

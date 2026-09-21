@@ -53,3 +53,33 @@ missing step N). Build it once there; serve wants it too.
 Related: [[the-focus-view-settles-what-it-saw-running]] must land
 with this or before it.
 
+## Where it stands (2026-09-21)
+
+Read for, not taken: the dedupe requirement has no mechanism behind
+it, and choosing one is a wire decision.
+
+The seed is committed events plus a seam line, built on a worker;
+`replace_lines` lands it over whatever streamed in meanwhile. The
+scratch would supply the in-flight step, and `LiveDelta` maps onto
+`LoopEvent` closely enough to fold through `apply_child_loop_event`.
+The trouble is the overlap. The scratch flushes on a deadline (~150
+ms) or 4 KiB, so at the moment the seed reads it, it is a *prefix* of
+what the broadcast has already delivered; the events folded since the
+focus opened are a *suffix* of the same stream. The overlap between
+them is exactly what would render twice, and nothing carried today
+can locate it: `LoopEvent`s have no sequence number, and the scratch's
+generation (`turn`, `step`) says which step, not how far into it.
+
+Three ways out, each a decision rather than a fix:
+
+- A per-step sequence number on `LoopEvent` and on each scratch line —
+  the honest one, and a change to the core wire every surface reads.
+- Fold the scratch and accept a bounded duplicate window (up to one
+  flush interval of text) — visibly wrong sometimes, by design.
+- Keep the seam and drop the requirement — what is on screen today,
+  which at least never lies.
+
+Also worth knowing before choosing: events that arrive between the
+focus opening and the seed landing are discarded by the replace, not
+just the ones before the open. The seam line covers that gap too.
+
