@@ -68,3 +68,14 @@ drawn, not text consumed.
 viewport and the animation pass skips animated entries outside it.
 The cost is one stale spinner frame when such a row scrolls into
 view, at which point it is rebuilt like any other.
+
+From the review: the memo settles by block — one shared run per
+settle, so a new paragraph costs that paragraph and not a copy of
+every row before it; the carried memo goes only to a reply at the same
+line, where before it could be parked unread on whatever entry was
+rebuilt first; and a reply with anything after it drops its memo, so a
+restored session does not hold every reply's text twice.
+
+Left with [[small-frictions-of-a-long-session]], where it was already
+listed: the per-frame bookkeeping scans (`row_count`, `is_empty` and
+the like are O(entries) per clean frame).
