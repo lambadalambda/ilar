@@ -38,3 +38,19 @@ text, as if one person were talking.
 ## Notes
 
 - Source: user request, 2026-09-21. Size: S.
+
+## Done (2026-09-21)
+
+`group_mention_only` (on by default) keeps a Telegram bot to what is
+said to it in a group: a `@botname` anywhere in the message, a reply
+to one of its own messages, or a command. The rest goes by without a
+word. The mention is taken out of the text wherever it sat, with one
+neighbouring space, so "hey @bot, what's up" is "hey, what's up".
+
+Every message now carries the sender's name across the bus, from
+Telegram's first and last name (or username) and Delta Chat's display
+name, and in a room the prompt is `Name: text`. The room's situation
+block says so, and says to answer in the bot's own voice without a
+name in front, or a model would write "Alice: …" back. A private chat
+is unchanged. Docs say to turn privacy mode off in BotFather for the
+group, and that a group member outside `allow_from` is still ignored.

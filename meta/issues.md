@@ -105,7 +105,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 24 — More doors for the assistant
 
 - [ ] [A Telegram channel](issues/a-telegram-channel.md) — *built and tested; awaiting a live run with a bot token*
-- [ ] [A bot in a group answers when spoken to](issues/a-bot-in-a-group-answers-when-spoken-to.md)
 
 ## Milestone 22 — Memory in every directory
 

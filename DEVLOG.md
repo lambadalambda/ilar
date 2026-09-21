@@ -1,5 +1,19 @@
 # DEVLOG
 
+## 2026-09-21 — In a group, only when spoken to
+
+A bot in a Telegram group with privacy mode off sees everything, and
+until now would have answered everything. It answers what is said to
+it: a mention anywhere in the message, a reply to one of its own
+messages, or a command. The mention comes out of the text with one
+neighbouring space — the comma case needed the space *before* it.
+
+The other half of a group is knowing who spoke. Every message carries
+the sender's name across the bus now, and in a room the prompt is
+`Name: text`; the room's situation block says so and tells the model
+to answer without a name in front, which it would otherwise mimic. A
+private chat is unchanged: one person, no name needed.
+
 ## 2026-09-21 — A second door, and a console
 
 The comparison with picoclaw and hermes put a second channel first,

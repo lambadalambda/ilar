@@ -462,3 +462,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Slow actions freeze without a frame](issues/slow-actions-freeze-without-a-frame.md) — the rest measured in milliseconds and struck
 - [x] [Small frictions of a long session](issues/small-frictions-of-a-long-session.md)
 - [x] [Console commands for the chat](issues/console-commands-for-the-chat.md)
+- [x] [A bot in a group answers when spoken to](issues/a-bot-in-a-group-answers-when-spoken-to.md)
