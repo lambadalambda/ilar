@@ -320,7 +320,13 @@ const GHOST_TAIL_EVENTS: usize = 60;
 /// with nothing — a last record bigger than the window, or a window
 /// that was all rewind. Above it the offer is dropped instead: no offer
 /// is better than a pause on startup.
-const GHOST_WHOLE_READ_BYTES: u64 = 4 * 1024 * 1024;
+///
+/// Measured, release build, 2026-09-21: a 13 MB log of ten thousand
+/// events loads cold in 21 ms. This ceiling is a few times that — the
+/// biggest logs a session ever grows — and still not a pause. It was
+/// 4 MiB, which dropped the offer on exactly the long sessions whose
+/// last act was a rewind.
+const GHOST_WHOLE_READ_BYTES: u64 = 32 * 1024 * 1024;
 /// Transcript lines the ghost keeps, from the end: a couple of
 /// screenfuls, so a chatty tail cannot push the prompt off the screen.
 const GHOST_LINES: usize = 40;
