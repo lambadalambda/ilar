@@ -86,7 +86,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 18 — Sweep: responsiveness & memory
 
 - [ ] [Slow actions freeze without a frame](issues/slow-actions-freeze-without-a-frame.md)
-- [ ] [Live rows rerender every frame](issues/live-rows-rerender-every-frame.md)
 - [ ] [Small frictions of a long session](issues/small-frictions-of-a-long-session.md)
 
 ## Milestone 19 — More doors

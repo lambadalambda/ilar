@@ -1,5 +1,39 @@
 # DEVLOG
 
+## 2026-09-21 — The frames that did nothing
+
+Three costs the transcript cache paid at 20 fps for rows that had not
+changed, from an issue filed three weeks ago.
+
+The first was a copy. An agent row that is still running re-renders
+every frame — that is what "animated" means — and its child timeline
+was memoised so it would not be *rendered* again. It was cloned again
+instead: every span of every row of a subagent's transcript, per
+frame, because the entry's rows were one flat vector and the memo had
+to hand its rows back into it. Rows are runs now, and a memoised
+timeline is an `Arc` held by both. The test asserts the pointer.
+
+The second was quadratic. A streaming reply re-ran markdown and
+wrapping over the whole message on every delta batch. The fix is a
+memo of the settled prefix, and the interesting question was where a
+reply is settled. The renderer is line-oriented; the only state that
+crosses lines is the open code fence, and a paragraph separator is
+flushed before the block *after* a blank line. So the start of a
+newline-terminated blank line outside a fence is a point where the
+two halves render as the whole — provided the second half knows rows
+exist above it, which is one flag on the renderer. I wrote the
+exactness test before trusting any of that, over every block kind at
+four delta sizes, and it failed twice. A line that has so far
+received only spaces reads as blank and becomes the indent of a
+paragraph a delta later; only a finished line can settle. And leading
+blank lines settle while drawing nothing, so the second half must ask
+whether rows were drawn, not whether text was consumed.
+
+The third was invisible work: animated rows off screen were rebuilt
+at the busy rate. The cache now remembers the viewport it was last
+asked for and skips what is outside it. A spinner that scrolls into
+view is one frame behind, once.
+
 ## 2026-09-21 — A share carries its delegations
 
 The share file's first review said the file was less than the issue

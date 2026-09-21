@@ -37,3 +37,34 @@ Partly stale on arrival, partly done since, remainder scoped:
   whole message per delta batch (split at the last completed block);
   (3) offscreen animated entries re-render at the busy rate —
   `update()` has no viewport knowledge today.
+
+## Done (2026-09-21)
+
+All three, one commit each.
+
+**The memo shares instead of copying.** An entry's rows are runs now —
+its own rows, or a child timeline held by `Arc` together with the memo
+that rendered it. An animation frame on an agent row rebuilds the
+header and puts the timeline back by reference count. The test pins
+pointer equality between the memo and the entry, not just "rendered
+once".
+
+**A streaming reply renders its open block.** The renderer is
+line-by-line with one piece of state crossing lines — the code fence
+— and a separator is flushed *before* the block that follows a blank
+line. So a split at the start of a newline-terminated blank line
+outside a fence renders identically in two halves, given a
+continuation mode that knows rows exist above it. The memo keeps the
+settled prefix's rows (shared, as above) and each delta renders the
+tail; the scan for the next split starts at the last one, so a delta
+pays for what streamed since it. Exactness is a test over every block
+kind at four delta sizes — and it caught two things on the way: a
+partially arrived line of spaces reads as blank and then as an indent,
+so only a finished line can settle a block; and leading blank lines
+settle while drawing nothing, so "continued" has to mean rows were
+drawn, not text consumed.
+
+**Offscreen animated entries wait.** `visible_rows` records the
+viewport and the animation pass skips animated entries outside it.
+The cost is one stale spinner frame when such a row scrolls into
+view, at which point it is rebuilt like any other.
