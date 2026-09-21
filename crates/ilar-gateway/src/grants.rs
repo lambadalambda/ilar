@@ -222,6 +222,24 @@ fn shown_command(detail: &str) -> String {
 }
 
 /// The message the chat gets for a grant ask.
+/// What the seat is waiting on, for `/status`: the ask standing in the
+/// slot, in a phrase, or nothing.
+pub fn waiting(slot: &PendingSlot) -> Option<String> {
+    let slot = slot.lock().unwrap();
+    let pending = slot.as_ref()?;
+    Some(if pending.password {
+        format!(
+            "the sudo password for {} — /password <pw>",
+            pending.asker.shown
+        )
+    } else {
+        format!(
+            "{} for {} — /grant [session|always] or /deny",
+            pending.secret, pending.asker.shown
+        )
+    })
+}
+
 /// The four answers to a grant ask, for a channel with buttons. The
 /// text names them too; these are the same commands, one tap each.
 pub fn grant_buttons() -> Vec<crate::bus::Button> {

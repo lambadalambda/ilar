@@ -113,6 +113,162 @@ fn gateway_with(
 
 const WAIT: Duration = Duration::from_secs(10);
 
+/// A reply with usage on it, for what `/cost` and `/status` read.
+fn says_costing(text: &str, input_tokens: u64, output_tokens: u64) -> Vec<ProviderEvent> {
+    vec![
+        ProviderEvent::TextDelta(text.into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens,
+                output_tokens,
+                ..Usage::default()
+            },
+        },
+    ]
+}
+
+/// The console: what the chat can ask about its own seat. Each is a
+/// read of state that exists — the model, the turn, the spend, the
+/// tasks — answered by the gateway with no model involved.
+#[tokio::test]
+async fn the_console_commands_read_the_seat() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        announce: false,
+        model: Some("zai/glm-4.7".into()),
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            says_costing("hello there", 1000, 500),
+            calls("bash", serde_json::json!({"command": "sleep 3"})),
+            says("done"),
+        ],
+        settings,
+    );
+    // Before anything was said: the ids are known, the seat is not.
+    fake.inject("/whoami", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert!(
+        sent[0].text.contains("Sender alice in chat chat-1 on fake"),
+        "{}",
+        sent[0].text
+    );
+    fake.inject("/status", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert!(sent[1].text.contains("No session open"), "{}", sent[1].text);
+
+    fake.inject("hi", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(3, WAIT).await;
+    assert_eq!(sent[2].text, "hello there");
+    fake.inject("/cost", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(4, WAIT).await;
+    let cost = &sent[3].text;
+    assert!(cost.contains("Tokens: 1,000 in"), "{cost}");
+    assert!(cost.contains("500 out"), "{cost}");
+    assert!(
+        cost.contains("Cost: $"),
+        "a priced model shows a price: {cost}"
+    );
+    assert!(cost.contains("zai/glm-4.7"), "{cost}");
+    fake.inject("/status", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(5, WAIT).await;
+    let status = &sent[4].text;
+    assert!(status.contains("Model: zai/glm-4.7"), "{status}");
+    assert!(status.contains("Turn: idle"), "{status}");
+    assert!(status.contains("Subagents: none"), "{status}");
+    assert!(status.contains("Context: about 1,500 tokens"), "{status}");
+
+    // Mid-turn, the status says so and how long.
+    fake.inject("run something slow", "chat-1", "alice").await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    fake.inject("/status", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(6, WAIT).await;
+    assert!(
+        sent[5].text.contains("Turn: running for"),
+        "{}",
+        sent[5].text
+    );
+    let sent = fake.wait_for_sent(7, Duration::from_secs(15)).await;
+    assert_eq!(sent[6].text, "done", "{sent:?}");
+    fake.inject("/tasks", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(8, WAIT).await;
+    assert!(
+        sent[7].text.contains("No subagents running"),
+        "{}",
+        sent[7].text
+    );
+    gateway.cancel();
+}
+
+/// `/cron` shows the jobs the model scheduled for this chat, and takes
+/// one away by name; adding stays with the model.
+#[tokio::test]
+async fn cron_jobs_are_listed_and_removed_from_the_chat() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        announce: false,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(
+        dir.path(),
+        vec![
+            calls(
+                "cron",
+                serde_json::json!({"action": "add", "name": "ping", "prompt": "say hi", "every_secs": 3600}),
+            ),
+            says("scheduled"),
+        ],
+        settings,
+    );
+    // The gateway's own weekly review is on by default and goes to the
+    // last active chat, so it is on the list from the start.
+    fake.inject("/cron", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert!(sent[0].text.contains("weekly review"), "{}", sent[0].text);
+    assert!(!sent[0].text.contains("ping"), "{}", sent[0].text);
+    fake.inject("ping me hourly", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert_eq!(sent[1].text, "scheduled");
+    fake.inject("/cron", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(3, WAIT).await;
+    let listing = &sent[2].text;
+    assert!(listing.contains("ping"), "{listing}");
+    assert!(listing.contains("every 1h 0m"), "{listing}");
+    assert!(listing.contains("next "), "{listing}");
+    fake.inject("/cron remove ping", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(4, WAIT).await;
+    assert!(sent[3].text.starts_with("Removed ping"), "{}", sent[3].text);
+    fake.inject("/cron", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(5, WAIT).await;
+    assert!(!sent[4].text.contains("ping"), "{}", sent[4].text);
+    assert!(sent[4].text.contains("weekly review"), "{}", sent[4].text);
+    fake.inject("/cron remove ping", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(6, WAIT).await;
+    assert!(sent[5].text.starts_with("No job ping"), "{}", sent[5].text);
+    gateway.cancel();
+}
+
+/// `/restart` answers, then stops the gateway the way a signal would,
+/// and marks the stop as one the process should exit non-zero from.
+#[tokio::test]
+async fn restart_from_the_chat_is_a_stop_the_service_restarts_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        announce: false,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(dir.path(), vec![], settings);
+    assert!(!gateway.restart_requested());
+    fake.inject("/restart", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(1, WAIT).await;
+    assert!(sent[0].text.starts_with("Restarting"), "{}", sent[0].text);
+    assert!(gateway.restart_requested());
+    assert_eq!(ilar_gateway::gateway::RESTART_EXIT, 75);
+}
+
 #[tokio::test]
 async fn a_message_round_trips_through_a_channel() {
     let dir = tempfile::tempdir().unwrap();

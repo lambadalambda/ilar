@@ -48,7 +48,16 @@ pub struct Gateway {
     /// The status line each chat is watching, while a turn runs there.
     status: Arc<crate::status::StatusBoard>,
     cancel: CancellationToken,
+    /// `/restart` was asked for: the stop under way should end the
+    /// process with [`RESTART_EXIT`], which the service unit restarts
+    /// on, rather than cleanly.
+    restart: std::sync::atomic::AtomicBool,
 }
+
+/// The exit code `/restart` ends the process with. Not zero, so a
+/// service unit with `Restart=on-failure` starts the gateway again;
+/// `EX_TEMPFAIL` in sysexits, which is what it means.
+pub const RESTART_EXIT: i32 = 75;
 
 /// Something whose time has come: a cron job, or a heartbeat.
 struct Due {
@@ -218,6 +227,32 @@ const ANNOUNCE_GRACE: Duration = Duration::from_secs(5);
 const ANNOUNCE_SETTLE: Duration = Duration::from_millis(1500);
 
 /// What the start line says about this build.
+/// How long `/restart`'s reply gets to leave before the stop begins.
+const RESTART_GRACE: Duration = Duration::from_secs(1);
+
+/// `3m 20s`, `1h 5m`, `12s`: a duration as a chat reads one.
+fn human_duration(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    match (secs / 3600, (secs % 3600) / 60, secs % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s}s"),
+        (h, m, _) => format!("{h}h {m}m"),
+    }
+}
+
+/// `1,234,567`.
+fn with_commas(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub fn build_line() -> String {
     let commit = env!("ILAR_GATEWAY_COMMIT");
     if commit.is_empty() {
@@ -306,7 +341,14 @@ impl Gateway {
             status,
             me: me.clone(),
             cancel,
+            restart: std::sync::atomic::AtomicBool::new(false),
         }))
+    }
+
+    /// Whether the stop under way was a `/restart`: the process should
+    /// exit with [`RESTART_EXIT`].
+    pub fn restart_requested(&self) -> bool {
+        self.restart.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// An owning handle to this gateway, for a task it spawns.
@@ -736,6 +778,236 @@ impl Gateway {
         }
     }
 
+    /// `/status`: what this chat's seat is and is doing. Nothing is
+    /// opened for it — a chat that has not spoken has nothing to show.
+    fn status_reply(&self, key: &str) -> String {
+        use crate::driver::Activity;
+        let Some(seat) = self.driver.seat_by_key(key) else {
+            return "No session open for this chat yet — say something first.".to_string();
+        };
+        let model = self
+            .driver
+            .current_model(&seat)
+            .unwrap_or_else(|_| "unknown".to_string());
+        let turn = match self.driver.activity(&seat) {
+            Activity::Idle => "idle".to_string(),
+            Activity::Turn(elapsed) => format!("running for {}", human_duration(elapsed)),
+            Activity::Compacting => "compacting".to_string(),
+        };
+        let running = seat.runtime.spawner.running_tasks().len();
+        let held = seat
+            .runtime
+            .spawner
+            .undelivered_results(&seat.runtime.session_id)
+            .len();
+        let mut lines = vec![format!("Model: {model}"), format!("Turn: {turn}")];
+        lines.push(match (running, held) {
+            (0, 0) => "Subagents: none".to_string(),
+            (n, 0) => format!("Subagents: {n} running"),
+            (n, h) => format!("Subagents: {n} running, {h} result(s) held for delivery"),
+        });
+        if let Some(ask) = self.driver.waiting_on(&seat) {
+            lines.push(format!("Waiting on: {ask}"));
+        }
+        // The committed log, read without a stamp check: a turn may be
+        // writing it this moment, and the last turn's usage is there
+        // either way.
+        let context = seat
+            .runtime
+            .store
+            .audit_events(&seat.runtime.session_id)
+            .ok()
+            .and_then(|events| {
+                events.iter().rev().find_map(|event| match event {
+                    ilar::session::SessionEvent::AssistantMessage { usage, .. } => {
+                        Some(usage.context_tokens())
+                    }
+                    _ => None,
+                })
+            });
+        lines.push(match context {
+            Some(tokens) => format!(
+                "Context: about {} tokens after the last turn",
+                with_commas(tokens)
+            ),
+            None => "Context: no turn yet".to_string(),
+        });
+        lines.join("\n")
+    }
+
+    /// `/cost`: the session's spend over its whole log, priced where
+    /// the model is priced.
+    fn cost_reply(&self, key: &str) -> String {
+        use ilar::session::{SessionEvent, Usage};
+        let Some(seat) = self.driver.seat_by_key(key) else {
+            return "No session open for this chat yet — nothing spent.".to_string();
+        };
+        let events = match seat.runtime.store.whole_events(&seat.runtime.session_id) {
+            Ok(events) => events,
+            Err(error) => return failed_reply("/cost", &anyhow::anyhow!(error)),
+        };
+        let mut by_model: std::collections::BTreeMap<String, Usage> =
+            std::collections::BTreeMap::new();
+        for event in &events {
+            if let SessionEvent::AssistantMessage { model, usage, .. } = event {
+                let total = by_model.entry(model.clone()).or_default();
+                total.input_tokens += usage.input_tokens;
+                total.output_tokens += usage.output_tokens;
+                total.cache_read_input_tokens += usage.cache_read_input_tokens;
+                total.cache_creation_input_tokens += usage.cache_creation_input_tokens;
+            }
+        }
+        if by_model.is_empty() {
+            return "Nothing spent yet.".to_string();
+        }
+        let (mut input, mut cached, mut output) = (0, 0, 0);
+        let mut dollars = 0.0;
+        let mut unpriced = Vec::new();
+        for (model, usage) in &by_model {
+            input += usage.input_tokens;
+            cached += usage.cache_read_input_tokens;
+            output += usage.output_tokens;
+            match ilar::model::pricing_for(model) {
+                Some(pricing) => dollars += pricing.cost(usage),
+                None => unpriced.push(model.as_str()),
+            }
+        }
+        let models = by_model.keys().cloned().collect::<Vec<_>>().join(", ");
+        let cost = if unpriced.len() == by_model.len() {
+            format!("Cost: not priced ({models})")
+        } else if unpriced.is_empty() {
+            format!("Cost: ${dollars:.2} ({models})")
+        } else {
+            format!(
+                "Cost: ${dollars:.2}, not counting {} which is not priced",
+                unpriced.join(", ")
+            )
+        };
+        format!(
+            "Tokens: {} in ({} of them cached) · {} out\n{cost}",
+            with_commas(input),
+            with_commas(cached),
+            with_commas(output)
+        )
+    }
+
+    /// `/cron`: the jobs addressed to this chat — and the gateway's
+    /// own, which go to whichever chat was last heard from — or one of
+    /// them removed by id or unique name. Adding stays with the model's
+    /// tool: a person adds by asking.
+    fn cron_reply(&self, key: &str, remove: Option<&str>) -> String {
+        use crate::cron::{LAST_ACTIVE, Schedule};
+        let jobs: Vec<crate::cron::Job> = self
+            .cron
+            .list()
+            .into_iter()
+            .filter(|job| job.target == key || job.target == LAST_ACTIVE)
+            .collect();
+        let describe = |job: &crate::cron::Job| {
+            let when = match &job.schedule {
+                Schedule::Cron { expr } => format!("cron {expr} (UTC)"),
+                Schedule::Every { secs } => format!(
+                    "every {}",
+                    human_duration(std::time::Duration::from_secs(*secs))
+                ),
+                Schedule::At { at } => format!("once at {}", at.to_rfc3339()),
+            };
+            let next = job
+                .next_run
+                .map(|at| at.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_else(|| "never".to_string());
+            format!("{} · {} — {when}, next {next}", job.id, job.name)
+        };
+        let Some(which) = remove else {
+            if jobs.is_empty() {
+                return "No jobs scheduled for this chat. Ask for one — \"remind me at nine\" — and the model schedules it."
+                    .to_string();
+            }
+            return jobs.iter().map(describe).collect::<Vec<_>>().join("\n");
+        };
+        let matching: Vec<&crate::cron::Job> = jobs
+            .iter()
+            .filter(|job| job.id == which || job.name.eq_ignore_ascii_case(which))
+            .collect();
+        match matching.as_slice() {
+            [] => format!(
+                "No job {which} here.{}",
+                if jobs.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " Scheduled: {}",
+                        jobs.iter().map(describe).collect::<Vec<_>>().join("; ")
+                    )
+                }
+            ),
+            [job] => match self.cron.remove(&job.id) {
+                Ok(true) => {
+                    log(&format!(
+                        "{key}: job {} ({}) removed from the chat",
+                        job.name, job.id
+                    ));
+                    format!("Removed {} ({}).", job.name, job.id)
+                }
+                Ok(false) => format!("{} was already gone.", job.name),
+                Err(error) => failed_reply("/cron remove", &error),
+            },
+            several => format!(
+                "{which} names {} jobs; remove by id: {}",
+                several.len(),
+                several
+                    .iter()
+                    .map(|job| job.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    /// `/tasks`: the subagents working for this chat, and the results
+    /// waiting to be delivered to it.
+    fn tasks_reply(&self, key: &str) -> String {
+        let Some(seat) = self.driver.seat_by_key(key) else {
+            return "No session open for this chat yet.".to_string();
+        };
+        let running = seat.runtime.spawner.running_tasks();
+        let held = seat
+            .runtime
+            .spawner
+            .undelivered_results(&seat.runtime.session_id);
+        if running.is_empty() && held.is_empty() {
+            return "No subagents running for this chat, and nothing held for delivery."
+                .to_string();
+        }
+        let mut lines = Vec::new();
+        for task in &running {
+            lines.push(format!(
+                "{} {}: {} — {}{}",
+                if task.delivering {
+                    "delivering to"
+                } else {
+                    "running"
+                },
+                task.agent,
+                task.description,
+                human_duration(task.started.elapsed()),
+                if task.background {
+                    ", in the background"
+                } else {
+                    ""
+                }
+            ));
+        }
+        for result in &held {
+            lines.push(format!(
+                "held for delivery: {}{}",
+                result.description,
+                if result.is_error { " (failed)" } else { "" }
+            ));
+        }
+        lines.join("\n")
+    }
+
     /// `/approve` or `/reject` for an id that is not staged: say what
     /// is, since the ids are short and easy to mistype.
     fn nothing_pending_as(&self, id: &str) -> String {
@@ -854,6 +1126,28 @@ impl Gateway {
                 format!("{verdict} {}", password_advice(taken_back))
             }
             Command::Usage(usage) => usage.to_string(),
+            Command::Status => self.status_reply(key),
+            Command::Cost => self.cost_reply(key),
+            Command::Cron { remove } => self.cron_reply(key, remove.as_deref()),
+            Command::Tasks => self.tasks_reply(key),
+            Command::Whoami => format!(
+                "Sender {} in chat {} on {} — allow_from takes the sender; the session key is {key}.",
+                message.sender_id, message.chat_id, message.channel
+            ),
+            Command::Restart => {
+                log(&format!("{key}: restart asked from the chat"));
+                self.restart
+                    .store(true, std::sync::atomic::Ordering::Release);
+                // After this reply has left: the stop closes the
+                // outbound queue behind whatever is in it.
+                let me = self.clone_handle();
+                tokio::spawn(async move {
+                    tokio::time::sleep(RESTART_GRACE).await;
+                    me.cancel();
+                });
+                "Restarting: turns in flight are stopped, and the service starts the gateway again."
+                    .to_string()
+            }
             Command::Unlock(password) => {
                 // Right password or wrong, it is in the chat's history
                 // now: taken back out above, and said either way.

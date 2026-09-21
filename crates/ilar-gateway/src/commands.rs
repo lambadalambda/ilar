@@ -43,6 +43,20 @@ pub enum Command {
     /// A known command whose argument does not read as one: the text is
     /// the whole reply, since "No command /grant" would be a lie.
     Misread(String),
+    /// The chat's model, whether a turn runs, subagents, asks, context.
+    Status,
+    /// What this session has cost, over its whole log.
+    Cost,
+    /// The scheduled jobs; `remove` takes one away by id or unique name.
+    Cron {
+        remove: Option<String>,
+    },
+    /// Subagents running for this chat, and results held for delivery.
+    Tasks,
+    /// The sender and chat ids as the channel reports them.
+    Whoami,
+    /// Drain and exit with the code the service unit restarts on.
+    Restart,
 }
 
 impl Command {
@@ -104,6 +118,22 @@ pub fn parse(text: &str) -> Option<Command> {
         ("pending", _) => Command::Pending,
         ("approve", argument) => Command::Approve(argument.unwrap_or("all").to_string()),
         ("reject", argument) => Command::Reject(argument.unwrap_or("all").to_string()),
+        ("status", _) => Command::Status,
+        ("cost" | "usage", _) => Command::Cost,
+        ("cron", None) => Command::Cron { remove: None },
+        ("cron", Some(argument)) => match argument.split_once(char::is_whitespace) {
+            Some((verb, which))
+                if verb.eq_ignore_ascii_case("remove") && !which.trim().is_empty() =>
+            {
+                Command::Cron {
+                    remove: Some(which.trim().to_string()),
+                }
+            }
+            _ => Command::Misread(CRON_USAGE.to_string()),
+        },
+        ("tasks", _) => Command::Tasks,
+        ("whoami", _) => Command::Whoami,
+        ("restart", _) => Command::Restart,
         // A near-miss of a command that takes a password, with
         // something after it: that something is the password, and no
         // command ran to take it back out. Echoed as it was typed
@@ -211,6 +241,10 @@ pub const UNLOCK_USAGE: &str =
 pub const PASSWORD_USAGE: &str = "/password <pw> — the sudo password goes after the command, in \
                                   the same message; it is deleted afterwards.";
 
+/// `/cron` with an argument that is not `remove <id|name>`.
+pub const CRON_USAGE: &str =
+    "/cron lists the jobs; /cron remove <id|name> takes one away. Adding is done by asking.";
+
 /// Every command a person can type, with a one-line description: what
 /// a channel with a command menu (Telegram's `setMyCommands`) shows
 /// when the person types `/`. One name per command — the aliases and
@@ -242,6 +276,15 @@ pub const MENU: &[(&str, &str)] = &[
     ),
     ("approve", "keep a staged memory: [id|all]"),
     ("reject", "drop a staged memory: [id|all]"),
+    ("status", "the model, the turn, subagents, asks, context"),
+    ("cost", "what this session has cost"),
+    ("cron", "the scheduled jobs; /cron remove <id|name>"),
+    ("tasks", "subagents running here, and results held"),
+    (
+        "whoami",
+        "your ids as the channel reports them, for allow_from",
+    ),
+    ("restart", "drain and restart the gateway"),
     ("help", "the commands"),
 ];
 
@@ -254,6 +297,12 @@ pub const HELP: &str = "/new — start a fresh chat (memory stays); a turn runni
 /compact — replace the conversation with one handover summary; memory stays\n\
 /pending — what the review wants to remember, when approval is on\n\
 /approve [id|all], /reject [id|all] — decide on it\n\
+/status — this chat's model, whether a turn is running, subagents, asks waiting, context size\n\
+/cost (or /usage) — what this session has cost, over its whole log\n\
+/cron — the scheduled jobs; /cron remove <id|name> takes one away\n\
+/tasks — subagents running for this chat, and results held for delivery\n\
+/whoami — your sender and chat ids as the channel reports them, for allow_from\n\
+/restart — drain and restart the gateway (the service unit starts it again)\n\
 /help — this";
 
 #[cfg(test)]
@@ -456,6 +505,38 @@ mod tests {
     fn the_help_names_the_aliases_too() {
         assert!(HELP.contains("/abort (or /stop)"), "{HELP}");
         assert!(HELP.contains("/password <pw>"), "{HELP}");
+        assert!(HELP.contains("/cost (or /usage)"), "{HELP}");
+    }
+
+    #[test]
+    fn the_console_commands_parse() {
+        assert_eq!(parse("/status"), Some(Command::Status));
+        assert_eq!(parse("/cost"), Some(Command::Cost));
+        assert_eq!(parse("/Usage"), Some(Command::Cost));
+        assert_eq!(parse("/cron"), Some(Command::Cron { remove: None }));
+        assert_eq!(
+            parse("/cron remove ab12cd34"),
+            Some(Command::Cron {
+                remove: Some("ab12cd34".into())
+            })
+        );
+        assert_eq!(
+            parse("/cron Remove morning briefing"),
+            Some(Command::Cron {
+                remove: Some("morning briefing".into())
+            })
+        );
+        assert_eq!(
+            parse("/cron list"),
+            Some(Command::Misread(CRON_USAGE.into()))
+        );
+        assert_eq!(
+            parse("/cron remove"),
+            Some(Command::Misread(CRON_USAGE.into()))
+        );
+        assert_eq!(parse("/tasks"), Some(Command::Tasks));
+        assert_eq!(parse("/whoami"), Some(Command::Whoami));
+        assert_eq!(parse("/restart"), Some(Command::Restart));
     }
 
     /// The menu and the help are one list: a command in either is in
@@ -470,9 +551,10 @@ mod tests {
             .collect();
         let in_menu: std::collections::BTreeSet<&str> =
             MENU.iter().map(|(name, _)| *name).collect();
-        // `/stop` is an alias of `/abort`; the menu carries one name.
+        // `/stop` and `/usage` are aliases; the menu carries one name each.
         let mut help_names = in_help.clone();
         help_names.remove("stop");
+        help_names.remove("usage");
         assert_eq!(help_names, in_menu, "help {in_help:?} vs menu {in_menu:?}");
         for (name, description) in MENU {
             assert!(

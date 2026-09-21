@@ -159,5 +159,12 @@ async fn run(config: ilar::config::Config, gateway: GatewayConfig) -> Result<()>
         stopper.cancel();
     });
     log(&format!("{} starting", ilar_gateway::gateway::build_line()));
-    gateway.run().await
+    gateway.clone().run().await?;
+    if gateway.restart_requested() {
+        // Not a clean exit on purpose: the service unit restarts on
+        // failure, and this is the failure that asks for it.
+        log("restarting: exiting for the service to start us again");
+        std::process::exit(ilar_gateway::gateway::RESTART_EXIT);
+    }
+    Ok(())
 }

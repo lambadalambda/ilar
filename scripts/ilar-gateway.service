@@ -13,6 +13,8 @@ Wants=network-online.target
 [Service]
 ExecStart=%h/.local/bin/ilar-gateway run
 WorkingDirectory=%h
+# A crash, and /restart from a chat: that one exits 75 on purpose so
+# this rule starts the gateway again.
 Restart=on-failure
 RestartSec=5
 # SIGTERM to the gateway only: it says goodbye through the rpc server

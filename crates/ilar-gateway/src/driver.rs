@@ -115,6 +115,9 @@ pub struct Seat {
     /// The running turn's own cancellation, for `/abort`; `None` while
     /// the seat is idle.
     turn_cancel: Mutex<Option<CancellationToken>>,
+    /// When the running turn began, for `/status`; `None` while idle
+    /// or while a compaction, not a turn, holds the seat.
+    turn_started: Mutex<Option<std::time::Instant>>,
     /// Whether the cancellation now in flight was asked for from this
     /// chat. The reply used to decide by reading the gateway's own
     /// shutdown flag at delivery time, so an `/abort` that landed a
@@ -135,6 +138,17 @@ pub struct Seat {
     /// Messages to this chat the channel would not take. The tool said
     /// "sent to …" when it queued them, so the next turn is told.
     failed_sends: Mutex<Vec<String>>,
+}
+
+/// What a seat is doing right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    Idle,
+    /// A turn, running this long.
+    Turn(std::time::Duration),
+    /// A `/compact` or the context filling: the seat is held, but not
+    /// by a turn.
+    Compacting,
 }
 
 /// The chat a seat's own tools are built for: where it answers.
@@ -326,6 +340,7 @@ impl Driver {
             turn: tokio::sync::Mutex::new(()),
             steer: Mutex::new(None),
             turn_cancel: Mutex::new(None),
+            turn_started: Mutex::new(None),
             aborted_from_chat: std::sync::atomic::AtomicBool::new(false),
             undelivered: Mutex::new(Vec::new()),
             grants,
@@ -531,6 +546,7 @@ impl Driver {
         seat.aborted_from_chat
             .store(false, std::sync::atomic::Ordering::Release);
         *seat.turn_cancel.lock().unwrap() = Some(cancel.clone());
+        *seat.turn_started.lock().unwrap() = Some(std::time::Instant::now());
         let outcome = turn(
             &seat.runtime,
             prompt,
@@ -541,6 +557,7 @@ impl Driver {
         )
         .await;
         *seat.turn_cancel.lock().unwrap() = None;
+        *seat.turn_started.lock().unwrap() = None;
         *seat.steer.lock().unwrap() = None;
         // Before the caller says anything: the line comes down first,
         // however the turn ended.
@@ -615,6 +632,22 @@ impl Driver {
             }
             None => false,
         }
+    }
+
+    /// What the seat is doing, for `/status`.
+    pub fn activity(&self, seat: &Seat) -> Activity {
+        let started = *seat.turn_started.lock().unwrap();
+        let busy = seat.turn_cancel.lock().unwrap().is_some();
+        match (started, busy) {
+            (Some(started), _) => Activity::Turn(started.elapsed()),
+            (None, true) => Activity::Compacting,
+            (None, false) => Activity::Idle,
+        }
+    }
+
+    /// The ask standing on the seat, in a phrase, for `/status`.
+    pub fn waiting_on(&self, seat: &Seat) -> Option<String> {
+        crate::grants::waiting(&seat.grants)
     }
 
     /// Whether the abort that just ended a turn came from the chat,
