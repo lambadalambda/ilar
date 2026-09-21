@@ -137,8 +137,7 @@ fn retired_texts(dir: &Path, parent_session_id: &str) -> Vec<String> {
         .collect()
 }
 
-/// What one failed attempt to read a parent's log means for the entry
-/// named after it.
+/// What a look at a parent's log means for the entry named after it.
 enum Readable {
     Yes,
     /// The session will never be there: the file is noise for every
@@ -148,48 +147,34 @@ enum Readable {
     No(std::io::Error),
 }
 
-/// How many times a log that could not be read is tried again.
+/// Whether the parent's log is there, by its head record and nothing
+/// more.
 ///
-/// The failure this covers is a turn appending to the very log being
-/// replayed — "session path changed during canonical replay" — which
-/// the store raises rather than hand back a half-written window. It
-/// lasts one append.
-///
-/// A short retry matters more than it looks. The comment this replaced
-/// said to leave the entry "for the next open", which is true for a
-/// surface that opens a session and scans once. Serve's adoption scans
-/// once per *engine*, at the moment a message starts a turn on the very
-/// session the entry belongs to — so the scan and the write are
-/// concurrent by construction, and a skipped entry is a finished
-/// child's result lost for the life of the process. Measured at 4 runs
-/// in 25 under load before this.
-const READ_ATTEMPTS: usize = 5;
-const READ_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
-
+/// Not a replay. The scan runs beside a turn that is appending to the
+/// very log it asks about — for `ilar serve` that is the rule, since
+/// its adoption fires as a message starts a turn on that session — and
+/// the store refuses a replay whose file moved under it, rightly,
+/// rather than hand back a torn window. Every refusal here was a
+/// finished child's result lost for the life of the process. A retry
+/// loop made that rare; under load a writer appending every
+/// millisecond outran five tries. The head is the first record, which
+/// no append touches, so the question is answered the same whatever
+/// the writer is doing.
 fn readable(store: &SessionStore, id: &str) -> Readable {
-    let mut last = None;
-    for attempt in 0..READ_ATTEMPTS {
-        match store.load(id) {
-            Ok(_) => return Readable::Yes,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    // NotFound: the session is gone. InvalidInput: the
-                    // stem could never name one.
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
-                ) =>
-            {
-                return Readable::Gone;
-            }
-            Err(error) => {
-                last = Some(error);
-                if attempt + 1 < READ_ATTEMPTS {
-                    std::thread::sleep(READ_RETRY);
-                }
-            }
+    match store.head(id) {
+        Ok(_) => Readable::Yes,
+        Err(error)
+            if matches!(
+                error.kind(),
+                // NotFound: the session is gone. InvalidInput: the
+                // stem could never name one.
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Readable::Gone
         }
+        Err(error) => Readable::No(error),
     }
-    Readable::No(last.expect("a loop that fell through failed at least once"))
 }
 
 /// Everything published but never delivered, for the session tree rooted
@@ -332,16 +317,21 @@ fn still_undelivered(
 /// Whether `session_id`'s parent chain reaches `root_session_id` —
 /// including the trivial chain, a notification published for the root
 /// itself.
+///
+/// By head records, for the reason [`readable`] gives: this used to
+/// replay each log on the chain, and a replay refused beside a writer
+/// read as "another process's tree" — the entry left where it was,
+/// with no message, by a scan that never comes back.
 fn reaches_root(store: &SessionStore, session_id: &str, root_session_id: &str) -> bool {
     let mut current = session_id.to_string();
     for _ in 0..ANCESTRY_CAP {
         if current == root_session_id {
             return true;
         }
-        let Ok(session) = store.load(&current) else {
+        let Ok(head) = store.head(&current) else {
             return false;
         };
-        let Some(parent_id) = session.meta().and_then(|meta| meta.parent_id.clone()) else {
+        let Some(parent_id) = head.meta.parent_id else {
             return false;
         };
         current = parent_id;
