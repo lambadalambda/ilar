@@ -448,6 +448,24 @@ impl SessionStore {
         )
     }
 
+    /// Every event the log holds, rewinds folded out and no compaction
+    /// window applied: the conversation as it actually happened.
+    ///
+    /// The third of three readings, and the one an export wants.
+    /// [`load`](Self::load) rebases onto the active window — what the
+    /// model still carries, which is less. [`audit_events`](Self::audit_events)
+    /// keeps every line including the tails a rewind abandoned — what
+    /// the file literally holds, which is more, and includes turns the
+    /// person withdrew.
+    pub fn whole_events(&self, id: &str) -> std::io::Result<Vec<SessionEvent>> {
+        let id = SessionId::parse(id)?;
+        let path = self.session_path_for(&id);
+        let mut file = File::open(&path)?;
+        // `repair_tail` also skips the window, but it is the writer's
+        // repair and takes a lease; this is a read.
+        Ok(read_events(&mut file, &path, id.as_str(), false, &NEVER)?.events)
+    }
+
     pub fn acquire_writer(&self, id: &str) -> std::io::Result<SessionWriter> {
         self.acquire_writer_id(SessionId::parse(id)?)
     }
@@ -1067,6 +1085,7 @@ impl SessionStore {
         let pending_question = pending_question(&replay.events, &replay.unanswered_calls);
         Ok(SessionReader {
             events: replay.events,
+            event_base: replay.event_base,
             effective_model: replay.effective_model,
             effective_variant: replay.effective_variant,
             todo_list: replay.todo_list,
@@ -2183,6 +2202,9 @@ impl Session {
         let (effective_model, effective_variant, todo_list, topic) = replay_state(&events);
         SessionReader {
             events,
+            // A synthetic prefix view, not a window a compaction cut:
+            // it already starts at the beginning.
+            event_base: 0,
             effective_model,
             effective_variant,
             todo_list,
@@ -2195,6 +2217,9 @@ impl Session {
 /// Read-only session view (compaction input).
 pub struct SessionReader {
     events: Vec<SessionEvent>,
+    /// Where [`Self::events`] begins in the whole log. Non-zero when a
+    /// compaction rebased the load onto its active window.
+    event_base: usize,
     effective_model: String,
     effective_variant: Option<String>,
     todo_list: Option<crate::todo::TodoList>,
@@ -2207,6 +2232,15 @@ impl SessionReader {
     /// `SessionStore::audit_events` without being materialized on normal loads.
     pub fn events(&self) -> &[SessionEvent] {
         &self.events
+    }
+
+    /// How many events of the whole log sit before [`Self::events`] —
+    /// what the newest compaction folded away. Zero for a session that
+    /// has never been compacted, where the window is the whole log.
+    /// Indexes [`SessionStore::whole_events`], which is the same
+    /// rewind-folded list this window was cut from.
+    pub fn event_base(&self) -> usize {
+        self.event_base
     }
 
     pub fn meta(&self) -> Option<&SessionMeta> {

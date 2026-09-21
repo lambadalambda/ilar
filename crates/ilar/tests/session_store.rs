@@ -3188,3 +3188,79 @@ async fn titling_a_parked_session_spends_no_request() {
     assert!(provider.requests().is_empty(), "nothing was asked");
     assert_eq!(store.load(&meta.session_id).unwrap().topic(), None);
 }
+
+/// The three readings of one log, and what each is for. A rewound turn
+/// was withdrawn by the person, so it belongs to the file and not to
+/// the conversation: `whole_events` folds it out, `audit_events` keeps
+/// it. A compacted turn is the other way round — the model no longer
+/// carries it, but it happened, so `whole_events` has it where `load`
+/// does not.
+#[test]
+fn whole_events_folds_a_rewind_and_keeps_a_compaction() {
+    let (store, dir) = temp_store();
+    let meta = sample_meta();
+    let id = meta.session_id.clone();
+    let mut session = store.create(meta).unwrap();
+    for text in ["the first question", "the withdrawn question"] {
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: text.into(),
+                images: Vec::new(),
+                ts: Utc::now(),
+            })
+            .unwrap();
+    }
+    drop(session);
+
+    // The cut names the message being withdrawn: everything from the
+    // second question on is abandoned, the first stands.
+    rewind_at(&store, dir.path(), &id, 2).unwrap();
+
+    let mut session = store.acquire_writer(&id).unwrap().load().unwrap();
+    let kept_from = session.events().len();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "earlier: a question was asked".into(),
+            kept_from,
+            ts: Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: new_id(),
+            text: "the later question".into(),
+            images: Vec::new(),
+            ts: Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+
+    let said = |events: &[SessionEvent]| {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::UserMessage { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // The conversation that happened.
+    assert_eq!(
+        said(&store.whole_events(&id).unwrap()),
+        ["the first question", "the later question"],
+        "the withdrawn turn stays withdrawn; the compacted one comes back"
+    );
+    // What the model still carries.
+    assert_eq!(
+        said(store.load(&id).unwrap().events()),
+        ["the later question"]
+    );
+    // What the file holds, abandoned tail and all.
+    assert!(
+        said(&store.audit_events(&id).unwrap()).contains(&"the withdrawn question".to_string()),
+        "the audit view is the one that keeps it"
+    );
+}
