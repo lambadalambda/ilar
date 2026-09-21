@@ -146,8 +146,8 @@ pub enum Activity {
     Idle,
     /// A turn, running this long.
     Turn(std::time::Duration),
-    /// A `/compact` or the context filling: the seat is held, but not
-    /// by a turn.
+    /// A `/compact`: the seat is held, but not by a turn. (The context
+    /// filling compacts inside a turn, which reads as the turn.)
     Compacting,
 }
 

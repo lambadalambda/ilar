@@ -221,7 +221,6 @@ fn shown_command(detail: &str) -> String {
     shown
 }
 
-/// The message the chat gets for a grant ask.
 /// What the seat is waiting on, for `/status`: the ask standing in the
 /// slot, in a phrase, or nothing.
 pub fn waiting(slot: &PendingSlot) -> Option<String> {
@@ -252,6 +251,7 @@ pub fn grant_buttons() -> Vec<crate::bus::Button> {
     ]
 }
 
+/// The message the chat gets for a grant ask.
 pub fn ask_text(prompt: &GrantPrompt, asker: &Asker) -> String {
     let purpose = if prompt.description.is_empty() {
         String::new()

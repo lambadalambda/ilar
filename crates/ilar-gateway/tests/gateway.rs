@@ -181,25 +181,38 @@ async fn the_console_commands_read_the_seat() {
     assert!(status.contains("Subagents: none"), "{status}");
     assert!(status.contains("Context: about 1,500 tokens"), "{status}");
 
-    // Mid-turn, the status says so and how long.
+    // Mid-turn, the status says so and how long. Asked until the turn
+    // has actually started — the handler opens the seat and spawns the
+    // tool first, and a loaded box takes its time over that.
     fake.inject("run something slow", "chat-1", "alice").await;
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    fake.inject("/status", "chat-1", "alice").await;
-    let sent = fake.wait_for_sent(6, WAIT).await;
-    assert!(
-        sent[5].text.contains("Turn: running for"),
-        "{}",
-        sent[5].text
-    );
-    let sent = fake.wait_for_sent(7, Duration::from_secs(15)).await;
-    assert_eq!(sent[6].text, "done", "{sent:?}");
+    let mut count = 5;
+    let mut seen_running = false;
+    for _ in 0..20 {
+        fake.inject("/status", "chat-1", "alice").await;
+        count += 1;
+        let sent = fake.wait_for_sent(count, WAIT).await;
+        let status = &sent[count - 1].text;
+        assert!(status.starts_with("Model:"), "{status}");
+        if status.contains("Turn: running for") {
+            seen_running = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(seen_running, "the status never saw the turn running");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let sent = fake.wait_for_sent(count + 1, Duration::from_secs(15)).await;
+        if sent.iter().any(|m| m.text == "done") {
+            count = sent.len();
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{sent:?}");
+    }
     fake.inject("/tasks", "chat-1", "alice").await;
-    let sent = fake.wait_for_sent(8, WAIT).await;
-    assert!(
-        sent[7].text.contains("No subagents running"),
-        "{}",
-        sent[7].text
-    );
+    let sent = fake.wait_for_sent(count + 1, WAIT).await;
+    let tasks = &sent.last().unwrap().text;
+    assert!(tasks.contains("No subagents running"), "{tasks}");
     gateway.cancel();
 }
 
@@ -267,6 +280,7 @@ async fn restart_from_the_chat_is_a_stop_the_service_restarts_on() {
     assert!(sent[0].text.starts_with("Restarting"), "{}", sent[0].text);
     assert!(gateway.restart_requested());
     assert_eq!(ilar_gateway::gateway::RESTART_EXIT, 75);
+    gateway.cancel();
 }
 
 #[tokio::test]

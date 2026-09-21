@@ -226,11 +226,12 @@ const ANNOUNCE_TRIES: u32 = 30;
 const ANNOUNCE_GRACE: Duration = Duration::from_secs(5);
 const ANNOUNCE_SETTLE: Duration = Duration::from_millis(1500);
 
-/// What the start line says about this build.
 /// How long `/restart`'s reply gets to leave before the stop begins.
 const RESTART_GRACE: Duration = Duration::from_secs(1);
 
-/// `3m 20s`, `1h 5m`, `12s`: a duration as a chat reads one.
+/// `3m 20s`, `1h 5m`, `12s`: a duration as a chat reads one. Not the
+/// core's `text::format_duration`, which has no hours and would print
+/// a daily job as `1440m 0s`.
 fn human_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
     match (secs / 3600, (secs % 3600) / 60, secs % 60) {
@@ -253,6 +254,7 @@ fn with_commas(n: u64) -> String {
     out
 }
 
+/// What the start line says about this build.
 pub fn build_line() -> String {
     let commit = env!("ILAR_GATEWAY_COMMIT");
     if commit.is_empty() {
@@ -860,12 +862,18 @@ impl Gateway {
         if by_model.is_empty() {
             return "Nothing spent yet.".to_string();
         }
-        let (mut input, mut cached, mut output) = (0, 0, 0);
+        // `input_tokens` is the uncached part: the prompt as the model
+        // saw it is that plus what was read from the cache plus what
+        // was written to it, and each is billed at its own rate.
+        let (mut input, mut cached, mut written, mut output) = (0, 0, 0, 0);
         let mut dollars = 0.0;
         let mut unpriced = Vec::new();
         for (model, usage) in &by_model {
-            input += usage.input_tokens;
+            input += usage.input_tokens
+                + usage.cache_read_input_tokens
+                + usage.cache_creation_input_tokens;
             cached += usage.cache_read_input_tokens;
+            written += usage.cache_creation_input_tokens;
             output += usage.output_tokens;
             match ilar::model::pricing_for(model) {
                 Some(pricing) => dollars += pricing.cost(usage),
@@ -884,24 +892,25 @@ impl Gateway {
             )
         };
         format!(
-            "Tokens: {} in ({} of them cached) · {} out\n{cost}",
+            "Tokens: {} in ({} read from the cache, {} written to it) · {} out\n{cost}",
             with_commas(input),
             with_commas(cached),
+            with_commas(written),
             with_commas(output)
         )
     }
 
-    /// `/cron`: the jobs addressed to this chat — and the gateway's
-    /// own, which go to whichever chat was last heard from — or one of
-    /// them removed by id or unique name. Adding stays with the model's
-    /// tool: a person adds by asking.
-    fn cron_reply(&self, key: &str, remove: Option<&str>) -> String {
+    /// `/cron`: the jobs addressed to this chat — and, in a private
+    /// chat, the gateway's own, which go to the last private chat heard
+    /// from — or one of them removed by id or unique name. Adding stays
+    /// with the model's tool: a person adds by asking.
+    fn cron_reply(&self, key: &str, is_group: bool, remove: Option<&str>) -> String {
         use crate::cron::{LAST_ACTIVE, Schedule};
         let jobs: Vec<crate::cron::Job> = self
             .cron
             .list()
             .into_iter()
-            .filter(|job| job.target == key || job.target == LAST_ACTIVE)
+            .filter(|job| job.target == key || (!is_group && job.target == LAST_ACTIVE))
             .collect();
         let describe = |job: &crate::cron::Job| {
             let when = match &job.schedule {
@@ -940,6 +949,13 @@ impl Gateway {
                         jobs.iter().map(describe).collect::<Vec<_>>().join("; ")
                     )
                 }
+            ),
+            // The gateway's own job comes back at the next start while
+            // its setting is on; a removal that lasted until then
+            // would be a lie.
+            [job] if job.id == crate::weekly::JOB_ID => format!(
+                "{} is the gateway's own: [gateway.weekly] enabled = false turns it off.",
+                job.name
             ),
             [job] => match self.cron.remove(&job.id) {
                 Ok(true) => {
@@ -1128,7 +1144,7 @@ impl Gateway {
             Command::Usage(usage) => usage.to_string(),
             Command::Status => self.status_reply(key),
             Command::Cost => self.cost_reply(key),
-            Command::Cron { remove } => self.cron_reply(key, remove.as_deref()),
+            Command::Cron { remove } => self.cron_reply(key, message.is_group, remove.as_deref()),
             Command::Tasks => self.tasks_reply(key),
             Command::Whoami => format!(
                 "Sender {} in chat {} on {} — allow_from takes the sender; the session key is {key}.",
