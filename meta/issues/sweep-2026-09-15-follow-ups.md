@@ -125,6 +125,23 @@ later open can read, two consecutive user messages concatenated with
 no separator on the wire, and a late arrival that takes an interrupted
 turn's resume offer away.
 
+Done 2026-09-21: **the dispatcher's head-of-line block.** One queue
+served every channel, so a message a dead channel refused held every
+chat's replies for four tries at `send_retry_secs` apart. The
+dispatcher has one lane per channel now — order kept within a
+channel, no channel waiting on another's retries — and the shutdown
+drain closes every lane and waits for what they hold. The test has a
+live channel's reply land while a dead channel is still retrying, and
+fails with the lanes collapsed to one. **A log over 4 MiB whose last
+line is a rewind gets no offer:** the whole-read ceiling behind that
+was a guess; measured (13 MB in 21 ms), it is 32 MiB now, with the
+number in the comment. **webfetch offset/range** is struck as the
+item itself says: the page spills to a file, and `read` has offsets.
+
+Left: `docs/assets/sessions.svg` still shows `↵ resume` — a driven
+screenshot to regenerate, which needs fixture sessions and the pty
+driver; not a code change.
+
 Struck rather than done: the TUI grant line saying "(always)" when the
 store write failed. The modal writes that line from the answer, and
 the write happens in the broker on the far side of a one-way channel —

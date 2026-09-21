@@ -1,5 +1,33 @@
 # DEVLOG
 
+## 2026-09-21 — A dead channel keeps its retries to itself
+
+The gateway's dispatcher was one task reading one queue and calling
+`send` on each message in turn. `send` retries a refused message four
+times, `send_retry_secs` apart. So a channel whose server had died
+did not just lose its own messages slowly — it held every other
+channel's replies behind each of its six-second retries, one message
+at a time, for as long as it stayed down.
+
+It has a lane per channel now: an unbounded queue and a worker each,
+created on first use, fed in the order messages were queued. A
+channel keeps its order; no channel waits on another. The shutdown
+path that used to drain the queue inline now closes every lane and
+waits for the workers, under the same grace as before.
+
+The test runs two fake channels, refuses three sends on one, waits
+until the first refusal has actually happened, then talks to the
+other and expects its reply inside a second and a half. With the
+lanes collapsed to one it fails at exactly that line, with the live
+channel's sent list empty.
+
+Two smaller things from the same follow-up list. The resume offer's
+whole-read ceiling was a guess at what would count as a startup
+pause; the fork measurement from earlier today says 13 MB loads in
+21 ms, so it is 32 MiB now, and a long session that ended in a rewind
+gets its offer. And webfetch's missing offset is struck the way the
+item already suggested: the page spills to a file and `read` has one.
+
 ## 2026-09-21 — Two sweeps closed by measuring
 
 The responsiveness sweep from 2026-08-31 had two omnibus issues left
