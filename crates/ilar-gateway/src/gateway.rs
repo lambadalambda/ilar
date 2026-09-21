@@ -29,9 +29,10 @@ pub struct Gateway {
     inbox_dir: PathBuf,
     rate: Mutex<RateLimit>,
     follow_ups: Mutex<Option<mpsc::Receiver<FollowUp>>>,
-    /// One queue out, drained in order by one task: what the model
-    /// sends and what the gateway says on its behalf leave in the
-    /// order they were said.
+    /// One queue out, fanned into a lane per channel by the dispatcher:
+    /// what the model sends and what the gateway says on its behalf
+    /// leave each channel in the order they were said, and no channel
+    /// waits on another's retries.
     outbound_tx: mpsc::Sender<Outbound>,
     outbound: Mutex<Option<mpsc::Receiver<Outbound>>>,
     /// Raised at the end of a shutdown: the dispatcher drains what is
@@ -187,9 +188,18 @@ impl Lanes {
                 });
                 tx
             });
-        // A lane whose worker is gone can only mean the dispatcher is
-        // being torn down; there is nobody left to tell.
-        let _ = lane.send(message);
+        // A lane's worker ends only when its sender is dropped, which
+        // `finish` does — or when `send` panicked inside it. That lane
+        // would otherwise swallow every later message for the channel,
+        // silently, for the life of the process: say so, and let the
+        // next message start a fresh worker.
+        if let Err(mpsc::error::SendError(message)) = lane.send(message) {
+            log(&format!(
+                "{}: its sender lane died; dropping a message",
+                message.channel
+            ));
+            self.senders.remove(&message.channel);
+        }
     }
 
     /// Close every lane and wait for what they hold to go out.

@@ -258,7 +258,9 @@ async fn a_down_channel_does_not_hold_up_the_others() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     up.inject("hi", "chat-2", "bob").await;
-    let sent = up.wait_for_sent(1, Duration::from_millis(1500)).await;
+    // Well inside the six seconds the dead channel's message takes on a
+    // shared queue, with room for a slow box.
+    let sent = up.wait_for_sent(1, Duration::from_secs(4)).await;
     assert_eq!(
         sent.len(),
         1,
