@@ -137,6 +137,11 @@ pub(crate) struct TranscriptRenderCache {
     /// The query `entries[..].matches` were scanned for.
     query: Option<String>,
     entries: Vec<CachedTranscriptEntry>,
+    /// The rows the last frame asked for, as `(start, count)`: what the
+    /// animation pass considers on screen. An animated entry outside it
+    /// keeps last frame's rows — its spinner is a frame behind when it
+    /// scrolls into view, and it is re-rendered on that frame.
+    viewport: std::cell::Cell<Option<(usize, usize)>>,
     #[cfg(test)]
     pub(crate) rebuilds: usize,
     /// Rows `matching_rows` has lowercased and scanned, ever.
@@ -618,9 +623,21 @@ impl TranscriptRenderCache {
             }
             line = next;
         }
-        // Rows kept from before the first dirty line still animate.
+        // Rows kept from before the first dirty line still animate —
+        // the ones on screen. A spinner nobody can see is not worth a
+        // render at 20 fps, and an expanded agent row is the largest
+        // entry there is.
+        let viewport = self.viewport.get();
+        let mut base = 0;
         for index in 0..resume {
+            let top = base;
+            base += self.entries[index].rows.len();
             if !self.entries[index].animated {
+                continue;
+            }
+            if let Some((start, count)) = viewport
+                && (base <= start || top >= start.saturating_add(count))
+            {
                 continue;
             }
             let entry = self.entries[index].borrow(lines);
@@ -736,6 +753,7 @@ impl TranscriptRenderCache {
         count: usize,
         trailing: &[Line<'static>],
     ) -> Vec<TranscriptRow> {
+        self.viewport.set(Some((start, count)));
         let mut skip = start;
         let mut remaining = count;
         let mut output = Vec::with_capacity(count.min(128));
@@ -3653,6 +3671,60 @@ mod tests {
             "and the shared run is the child's timeline"
         );
         assert!(entry.rows.get(entry.rows.len()).is_none());
+    }
+
+    /// Two live agent rows, one screen: only the one on it is rebuilt
+    /// per frame. Scroll to the other and it is rebuilt on the next.
+    #[test]
+    fn an_animated_entry_off_screen_is_not_rebuilt_every_frame() {
+        let child = |tag: &str| -> Vec<Line_> {
+            (0..40)
+                .map(|index| Line_::System(format!("{tag} {index}")))
+                .collect()
+        };
+        let lines = vec![
+            agent_row("task-1", child("first"), true),
+            agent_row("task-2", child("second"), true),
+        ];
+        let groups = std::collections::HashSet::new();
+        let start = std::time::Instant::now();
+        let mut cache = TranscriptRenderCache::default();
+        cache.update(&lines, &groups, 1, 80, start, start);
+        let first_rows = cache.entries[0].rows.len();
+        assert!(
+            first_rows > 40,
+            "an expanded agent row is taller than a screen"
+        );
+        cache.visible_rows(0, 10, &[]);
+        let before = cache.rebuilds;
+        let frame = |cache: &mut TranscriptRenderCache, n: u64| {
+            cache.update(
+                &lines,
+                &groups,
+                1,
+                80,
+                // Past the spinner's 160 ms step, so a re-render shows.
+                start + std::time::Duration::from_millis(200 * n),
+                start,
+            );
+        };
+        frame(&mut cache, 1);
+        assert_eq!(cache.rebuilds - before, 1, "only the row on screen");
+        let stale = rendered_text(&cache.entries[1].rows.get(1).unwrap().line);
+
+        // Scroll down to the second: it animates, the first does not.
+        cache.visible_rows(first_rows + 2, 10, &[]);
+        let before = cache.rebuilds;
+        frame(&mut cache, 2);
+        assert_eq!(cache.rebuilds - before, 1);
+        let fresh = rendered_text(&cache.entries[1].rows.get(1).unwrap().line);
+        assert_ne!(stale, fresh, "its spinner caught up");
+
+        // Straddling both: both.
+        cache.visible_rows(first_rows - 2, 10, &[]);
+        let before = cache.rebuilds;
+        frame(&mut cache, 3);
+        assert_eq!(cache.rebuilds - before, 2);
     }
 
     /// The memo's whole claim: a reply rendered delta by delta through
