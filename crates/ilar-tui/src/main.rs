@@ -3984,7 +3984,7 @@ async fn run_app(
                     // History goes where the open stood: after the
                     // banner, ahead of startup notices and anything
                     // else pushed while the worker ran.
-                    app.land_restored_view(view, restore_at);
+                    app.land_restored_view(view, restore_at, Some(store));
                     if resume_offer && turn_handle.is_none() && !app.retry_available {
                         app.retry_available = true;
                         app.set_persistent_notice(

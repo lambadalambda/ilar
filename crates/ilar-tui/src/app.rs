@@ -484,6 +484,15 @@ pub(crate) fn queued_result_headline(message: &ilar::agent::Steer) -> Option<Str
 /// all.
 const ACTIVITY_RETRY_FRAMES: u16 = 240;
 
+/// The log behind a windowed transcript, and how much of it the window
+/// leaves out. See [`App::folded_history`].
+#[derive(Clone)]
+pub(crate) struct FoldedHistory {
+    pub(crate) store: ilar::session::SessionStore,
+    /// Events of the whole log before the first one on screen.
+    pub(crate) before: usize,
+}
+
 /// The words of every waiting message, for the tests that care about
 /// which message is where rather than what is attached to it.
 #[cfg(test)]
@@ -560,6 +569,20 @@ pub(crate) struct App {
     /// session history. Set by `TurnStarted`, cleared before each spawn.
     pub(crate) turn_committed: bool,
     pub(crate) retry_available: bool,
+    /// The log behind a transcript that is only a window onto it.
+    ///
+    /// A restored session's rows start at the newest compaction,
+    /// because that is what the model still carries and what the
+    /// handover note says is folded. An export is the conversation the
+    /// person had, so it needs the rest — read back at export time,
+    /// never at open: rendering a compacted session's whole history on
+    /// every open is exactly the cost compaction exists to avoid.
+    ///
+    /// `None` when nothing is folded — a session opened fresh, or a
+    /// restore with no compaction behind it. Then what is on screen
+    /// already *is* the whole conversation, and an export takes it as
+    /// it stands.
+    pub(crate) folded_history: Option<FoldedHistory>,
     /// Messages submitted during an active turn, auto-sent in order when
     /// the turn completes — each with whatever was attached when it was
     /// submitted, so waiting for the turn costs the user nothing.
@@ -809,6 +832,7 @@ impl App {
             stream_rate: None,
             turn_committed: false,
             retry_available: false,
+            folded_history: None,
             queued_messages: Vec::new(),
             input_stash: Vec::new(),
             quit_armed: false,
@@ -1289,7 +1313,20 @@ impl App {
         &mut self,
         restored: crate::session_view::RestoredSessionView,
         at: usize,
+        store: Option<&ilar::session::SessionStore>,
     ) {
+        // That the cut folded something, and where to read it back
+        // from. Not rendered here: a compacted session's folded
+        // history is exactly the weight compaction removed, and paying
+        // for it on every open to serve an export that may never come
+        // is the wrong trade.
+        self.folded_history = match (restored.history_before, store) {
+            (0, _) | (_, None) => None,
+            (before, Some(store)) => Some(FoldedHistory {
+                store: store.clone(),
+                before,
+            }),
+        };
         let at = at.min(self.lines.len());
         // The boundary marks live-turn territory by index. Landed
         // history is pre-turn by definition, so the boundary moves
@@ -1321,6 +1358,7 @@ impl App {
     pub(crate) fn replace_transcript(
         &mut self,
         restored: crate::session_view::RestoredSessionView,
+        store: Option<&ilar::session::SessionStore>,
     ) {
         let keep = self
             .lines
@@ -1334,7 +1372,7 @@ impl App {
         self.task_usage = ilar::session::Usage::default();
         self.task_cost = None;
         self.latest_usage = None;
-        self.land_restored_view(restored, keep);
+        self.land_restored_view(restored, keep, store);
         if self.follow_tail {
             self.scroll_to_tail();
         }
@@ -3112,6 +3150,44 @@ pub(crate) fn palette_command_blocked(command: PaletteCommand) -> Option<&'stati
     }
 }
 
+/// What an export carries: the whole conversation, not the window on
+/// screen.
+///
+/// A restored session's rows start at the newest compaction, so an
+/// export straight from them silently dropped everything before it —
+/// the file looked complete and the first half was not in it. Where
+/// something was folded, the log answers instead, read at the one
+/// moment it is wanted.
+///
+/// Only the folded half comes off disk; the rest is the screen as it
+/// stands. Re-rendering the whole log instead would have been simpler
+/// and wrong twice over: the on-screen rows carry each delegation's
+/// child timeline, which only the with-store restore fills in, and
+/// they are the only copy of a turn still running.
+///
+/// `whole_events`, not the reader's and not the audit view: a
+/// compacted session loads rebased onto its active window, so the
+/// reader has no more of the folded half than the screen does, and the
+/// audit view keeps the tails a rewind abandoned — turns the person
+/// withdrew, which an export must not resurrect.
+///
+/// Returns the lines and whether the folded half made it in. A log
+/// that will not read is not a reason to refuse the export — what is
+/// on screen still goes out, which is exactly what went out before —
+/// but it is a reason to say so.
+fn export_lines(app: &App) -> (Vec<Line_>, bool) {
+    let Some(history) = app.folded_history.as_ref() else {
+        return (app.lines.clone(), true);
+    };
+    let Ok(events) = history.store.whole_events(&app.session_id) else {
+        return (app.lines.clone(), false);
+    };
+    let before = history.before.min(events.len());
+    let mut lines = crate::session_view::whole_log_lines(&events[..before]);
+    lines.extend(app.lines.iter().cloned());
+    (lines, true)
+}
+
 pub(crate) fn activate_palette_command(
     app: &mut App,
     command: PaletteCommand,
@@ -3218,14 +3294,21 @@ pub(crate) fn activate_palette_command(
                 .filter(|slug| !slug.is_empty())
                 .unwrap_or_else(|| app.session_id.chars().take(8).collect());
             let path = app.cwd.join(format!("ilar-transcript-{stem}.md"));
-            let markdown = transcript_markdown(&app.session_id, &app.lines);
+            let (exported, whole) = export_lines(app);
+            let markdown = transcript_markdown(&app.session_id, &exported);
             match std::fs::write(&path, markdown) {
                 Ok(()) => {
                     // The transcript line is the confirmation; the
                     // notice line stays free.
                     app.push_transcript_line(Line_::System(format!(
-                        "transcript exported to {}",
-                        path.display()
+                        "transcript exported to {}{}",
+                        path.display(),
+                        if whole {
+                            ""
+                        } else {
+                            " — without the turns folded by an earlier compaction, which \
+                             could not be read"
+                        }
                     )));
                 }
                 Err(error) => {
@@ -6537,6 +6620,7 @@ mod tests {
                 ..Default::default()
             },
             at,
+            None,
         );
 
         let texts: Vec<String> = app
@@ -6552,6 +6636,90 @@ mod tests {
             texts,
             vec!["restored first", "restored second", "startup notice"]
         );
+    }
+
+    /// The export splices the folded half onto the screen, rather than
+    /// re-rendering the log. Both halves matter: the folded turns were
+    /// missing outright — the file looked complete with its first half
+    /// gone — and the on-screen rows are the only copy of a turn still
+    /// running, and the only place a delegation's child timeline lives.
+    #[test]
+    fn an_export_splices_the_folded_half_onto_the_screen() {
+        use ilar::session::{SessionEvent, SessionMeta, SessionStore, new_id};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        for text in ["the folded question", "the kept question"] {
+            session
+                .append(SessionEvent::UserMessage {
+                    id: new_id(),
+                    text: text.into(),
+                    images: Vec::new(),
+                    ts: chrono::Utc::now(),
+                })
+                .unwrap();
+        }
+        drop(session);
+
+        let mut app = App::new();
+        app.session_id = session_id.clone();
+        // The screen: the kept turn, a delegation with its child's work
+        // folded inside it, and a message typed a moment ago that no
+        // log holds yet.
+        let mut lines = Vec::new();
+        crate::transcript::push_tool_row(&mut lines, "t1", "g1".into(), "task");
+        let mut delegation = lines.pop().expect("the row just pushed");
+        if let Line_::Tool { child_lines, .. } = &mut delegation {
+            child_lines.push(Line_::Assistant("the child's own words".into()));
+        }
+        app.lines = vec![
+            Line_::User("the kept question".into()),
+            delegation,
+            Line_::User("typed just now".into()),
+        ];
+
+        // Nothing folded: the screen is the whole conversation.
+        let (plain, whole) = export_lines(&app);
+        assert!(whole);
+        assert_eq!(plain.len(), 3, "{plain:?}");
+
+        // Folded: the log's first two events come in front, and every
+        // on-screen row survives.
+        app.folded_history = Some(FoldedHistory {
+            store: store.clone(),
+            before: 2,
+        });
+        let (spliced, whole) = export_lines(&app);
+        assert!(whole);
+        let text = crate::transcript::transcript_markdown(&session_id, &spliced);
+        assert!(text.contains("the folded question"), "{text}");
+        assert!(text.contains("the kept question"), "{text}");
+        assert!(
+            text.contains("typed just now"),
+            "the live row survives: {text}"
+        );
+        assert!(
+            text.contains("the child's own words"),
+            "a delegation exports with the work it did: {text}"
+        );
+
+        // A log that will not read still exports the screen, and says
+        // what is missing.
+        app.session_id = new_id();
+        let (fallback, whole) = export_lines(&app);
+        assert_eq!(fallback.len(), 3);
+        assert!(!whole, "the shortfall is reported, not hidden");
     }
 
     /// A turn can run while the restore worker does — a question
@@ -6589,8 +6757,10 @@ mod tests {
                 },
                 task_cost: Some(0.5),
                 resume_offer: false,
+                history_before: 0,
             },
             0,
+            None,
         );
 
         assert_eq!(app.session_usage.input_tokens, 110);

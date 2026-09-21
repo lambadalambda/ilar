@@ -57,7 +57,7 @@ pub(crate) async fn run(config: &Config, id: &str, theme: crate::theme::ThemeId)
             if let Some(opened) = opened {
                 tail = Some(opened);
             }
-            app.replace_transcript(view);
+            app.replace_transcript(view, Some(&store));
             if std::mem::take(&mut stale) {
                 pending = Some(spawn_restore(&store, id, false));
             }

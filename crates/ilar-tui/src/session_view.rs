@@ -25,6 +25,15 @@ pub(crate) struct RestoredSessionView {
     /// has happened since: the resume Ctrl-R offers is still on the
     /// table, and the restore is the only place that can say so.
     pub(crate) resume_offer: bool,
+    /// Events of the whole log these lines do not cover — what the
+    /// newest compaction folded away, as an index into
+    /// `SessionStore::whole_events`. Zero unless the session was
+    /// compacted before it was opened, and always zero for a child
+    /// slice, which is a window onto a timeline rather than onto a log.
+    ///
+    /// An export reads these back and splices them in front; the screen
+    /// does not want them, which is what the cut is for.
+    pub(crate) history_before: usize,
 }
 
 /// Whether the log ends on a turn that never finished: one that
@@ -272,12 +281,14 @@ pub(crate) enum Liveness {
 /// outside the tests wants the store too, for its children's history.
 #[cfg(test)]
 pub(crate) fn restored_session_view(session: &ilar::session::SessionReader) -> RestoredSessionView {
-    restored_session_invocation_view(
+    let mut view = restored_session_invocation_view(
         session.events(),
         pending_question_id(session),
         None,
         Liveness::Settled,
-    )
+    );
+    view.history_before = session.event_base();
+    view
 }
 
 /// The tool call a session is waiting on an answer for, as the replay
@@ -411,11 +422,39 @@ fn restored_line_id(nested: bool, prefix: &str, index: usize) -> String {
 /// session beyond its events is the question it is waiting on, and a
 /// caller with a bounded slice of somebody's log (a ghost) has no reader
 /// to offer at all.
+/// How much of a log a render covers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Window {
+    /// From the newest compaction. What the model still carries, and
+    /// so what the screen shows, with the handover folded at the top.
+    Compacted,
+    /// Every event, compacted-away turns included, and no handover
+    /// note — an export wants the conversation that happened, not the
+    /// window the model kept of it.
+    Whole,
+}
+
 fn restored_session_invocation_view(
     all_events: &[ilar::session::SessionEvent],
     pending_question_id: Option<&str>,
     parent_tool_call_id: Option<&str>,
     liveness: Liveness,
+) -> RestoredSessionView {
+    restored_session_invocation_view_in(
+        all_events,
+        pending_question_id,
+        parent_tool_call_id,
+        liveness,
+        Window::Compacted,
+    )
+}
+
+fn restored_session_invocation_view_in(
+    all_events: &[ilar::session::SessionEvent],
+    pending_question_id: Option<&str>,
+    parent_tool_call_id: Option<&str>,
+    liveness: Liveness,
+    window: Window,
 ) -> RestoredSessionView {
     let nested = parent_tool_call_id.is_some();
     // Where this view's slice begins in the event list. A child view
@@ -457,7 +496,14 @@ fn restored_session_invocation_view(
     };
     let mut cut = 0usize;
     let mut summary = None;
-    for (index, event) in events.iter().enumerate() {
+    // Under `Whole` there is no cut to find and no handover to fold:
+    // the caller is rendering the half a cut left behind, and a
+    // "transcript compacted" note above it would claim this stretch
+    // was the thing folded.
+    for (index, event) in events.iter().enumerate().take(match window {
+        Window::Compacted => events.len(),
+        Window::Whole => 0,
+    }) {
         if let ilar::session::SessionEvent::Compaction {
             kept_from,
             summary: current,
@@ -742,7 +788,18 @@ fn restored_session_invocation_view(
         // Only the whole-session restore asks for it; a child
         // invocation's slice has no turn of its own to resume.
         resume_offer: false,
+        // A slice cannot know where its log's window begins; the two
+        // entry points that hold a reader fill this in.
+        history_before: 0,
     }
+}
+
+/// The log rendered whole: every turn, compacted-away ones included,
+/// and no handover note. An export wants the conversation that
+/// happened; the screen wants the window the model kept of it, which
+/// is what every other entry point here gives.
+pub(crate) fn whole_log_lines(events: &[ilar::session::SessionEvent]) -> Vec<Line_> {
+    restored_session_invocation_view_in(events, None, None, Liveness::Settled, Window::Whole).lines
 }
 
 pub(crate) fn restored_session_view_with_store(
@@ -756,6 +813,7 @@ pub(crate) fn restored_session_view_with_store(
         None,
         liveness,
     );
+    view.history_before = session.event_base();
     let owner_session_id = session
         .meta()
         .map(|meta| meta.session_id.as_str())
@@ -1759,6 +1817,86 @@ mod tests {
         let mut opened = view.lines.clone();
         crate::transcript::toggle_note_expansion(&mut opened, id);
         assert!(rows(&opened).contains("decisions retained here"));
+    }
+
+    /// The transcript on screen starts at the newest compaction,
+    /// because that is what the model still carries. An export is the
+    /// conversation the person had, and it used to stop there too —
+    /// the file looked complete with its first half missing.
+    #[test]
+    fn an_export_carries_the_turns_the_compaction_folded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let session_id = new_id();
+        let mut session = store
+            .create(SessionMeta {
+                session_id: session_id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "the first question".into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::Compaction {
+                id: new_id(),
+                summary: "earlier: a question was asked".into(),
+                kept_from: 2,
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: new_id(),
+                text: "the second question".into(),
+                images: Vec::new(),
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        drop(session);
+
+        let reader = store.load(&session_id).unwrap();
+        let view = restored_session_view(&reader);
+        assert!(
+            view.history_before > 0,
+            "the compaction folded something away"
+        );
+
+        // The screen is unchanged: the window is still the window. The
+        // reader does not even carry the folded half — a compacted
+        // session loads rebased onto its active window — which is why
+        // the export reads the log again rather than these events.
+        let on_screen = format!("{:?}", view.lines);
+        assert!(!on_screen.contains("the first question"), "{on_screen}");
+        assert!(
+            !format!("{:?}", reader.events()).contains("the first question"),
+            "the reader is the window too"
+        );
+
+        // The export splices the folded half in front of the screen.
+        let whole = store.whole_events(&session_id).unwrap();
+        let mut lines = whole_log_lines(&whole[..view.history_before]);
+        lines.extend(view.lines.iter().cloned());
+        let exported = crate::transcript::transcript_markdown(&session_id, &lines);
+        assert!(exported.contains("the first question"), "{exported}");
+        assert!(exported.contains("the second question"), "{exported}");
+        // And the seam is marked, once: the window's own handover note
+        // says where the fold fell, and the half in front of it — which
+        // folded nothing — renders none of its own.
+        assert_eq!(
+            exported.matches("transcript compacted").count(),
+            1,
+            "{exported}"
+        );
     }
 
     /// A child session compacts like any other, and `kept_from` indexes
