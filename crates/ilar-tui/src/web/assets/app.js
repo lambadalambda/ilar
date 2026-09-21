@@ -37,6 +37,26 @@ function bootToken() {
 
 const token = bootToken();
 
+// A shared session: the whole payload is already in the page, written
+// there by `web::share`, and there is no server behind it. Every read
+// below answers from this table instead of the network, every write is
+// refused, and the live stream is never opened. One renderer, two
+// sources — the alternative was a second renderer to keep in step.
+const SHARE = window.__ILAR_SHARE__ || null;
+
+// What a shared page would have fetched, by the path it would have
+// used. Built once so `api` stays a lookup rather than a branch per
+// call site.
+const shareRoutes = () => {
+  if (!SHARE) return null;
+  const routes = new Map();
+  routes.set("/api/sessions", { sessions: [SHARE.session] });
+  routes.set(apiPath(SHARE.id), SHARE.page);
+  routes.set(apiPath(SHARE.id, "/children"), { children: SHARE.children || [] });
+  for (const [path, body] of Object.entries(SHARE.extra || {})) routes.set(path, body);
+  return routes;
+};
+
 // EventSource and <img> cannot set a header, so those carry ?token=.
 function withToken(path) {
   if (!token) return path;
@@ -52,8 +72,28 @@ async function fetchPath(path) {
   return response;
 }
 
-const api = (path) => fetchPath(path).then((response) => response.json());
-const apiText = (path) => fetchPath(path).then((response) => response.text());
+let SHARE_ROUTES = null;
+
+// A shared page answers from itself. A path it does not carry is a
+// real absence — a result body the writer left out, say — and reads as
+// the failure it is rather than as an empty success.
+const api = (path) => {
+  if (!SHARE) return fetchPath(path).then((response) => response.json());
+  if (!SHARE_ROUTES) SHARE_ROUTES = shareRoutes();
+  const body = SHARE_ROUTES.get(path);
+  return body === undefined
+    ? Promise.reject(new Error("this shared transcript does not carry " + path))
+    : Promise.resolve(body);
+};
+
+const apiText = (path) => {
+  if (!SHARE) return fetchPath(path).then((response) => response.text());
+  if (!SHARE_ROUTES) SHARE_ROUTES = shareRoutes();
+  const body = SHARE_ROUTES.get(path);
+  return body === undefined
+    ? Promise.reject(new Error("this shared transcript does not carry " + path))
+    : Promise.resolve(typeof body === "string" ? body : JSON.stringify(body));
+};
 
 // The write path. Every failure the server explains — a session open in
 // another process, a directory that is not one, a model with no provider
@@ -61,6 +101,10 @@ const apiText = (path) => fetchPath(path).then((response) => response.text());
 // thrown error because the page branches on the status (409 is a state,
 // not a mishap) and shows the words.
 async function post(path, body) {
+  // A share is a record, not a seat: there is no session behind it to
+  // send to. Refused here rather than at each call site, so a control
+  // that slips through still fails honestly.
+  if (SHARE) throw new Error("this is a shared transcript — it cannot be written to");
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = "Bearer " + token;
   const response = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
@@ -591,6 +635,19 @@ function toolTitle(name) {
 
 function Images({ sessionId, eventId, descriptors }) {
   if (!descriptors || !descriptors.length) return null;
+  // A thumbnail is bytes from a route, and a shared file has no route
+  // behind it. The picture's own marker — kind and size — is already
+  // in the text beside this, which is what the terminal shows too, so
+  // the row says what was there rather than showing a broken frame.
+  if (SHARE) {
+    return descriptors.map(
+      (image) => html`
+        <span class="thumb thumb-absent"
+          >[${image.media_type} · ${tokens(image.bytes)} bytes]</span
+        >
+      `,
+    );
+  }
   return descriptors.map(
     (image) => html`
       <img
@@ -725,7 +782,7 @@ function TaskRow({ call, result, sessionId, cwd, live }) {
     };
     // Only while the call could still be running: a finished task with no
     // child in its result, or a swept one, has nothing more to find.
-    const timer = result || dead ? null : setInterval(look, CHILD_POLL_MS);
+    const timer = SHARE || result || dead ? null : setInterval(look, CHILD_POLL_MS);
     look();
     return () => {
       alive = false;
@@ -752,7 +809,18 @@ function TaskRow({ call, result, sessionId, cwd, live }) {
         setPage(loaded);
         setError("");
       })
-      .catch((failure) => alive && setError(message(failure)));
+      .catch(
+        (failure) =>
+          alive &&
+          setError(
+            // A shared file carries this session, not the ones it
+            // delegated to. Say that, rather than the path it went
+            // looking for — the reader has no server to point at.
+            SHARE
+              ? "this delegation's own transcript is not in this file"
+              : message(failure),
+          ),
+      );
     return () => {
       alive = false;
     };
@@ -763,7 +831,7 @@ function TaskRow({ call, result, sessionId, cwd, live }) {
   // — the next one is three seconds away and the rows on screen are
   // still true.
   useEffect(() => {
-    if (!open || !child || result || dead) return undefined;
+    if (SHARE || !open || !child || result || dead) return undefined;
     let alive = true;
     const timer = setInterval(() => {
       slice(child)
@@ -1106,7 +1174,8 @@ function blankView(id) {
     session: null,
     usage: {},
     count: 0,
-    status: id ? "loading…" : "",
+    // A shared file is already here; nothing is on its way.
+    status: SHARE ? "shared transcript" : id ? "loading…" : "",
     error: "",
     // Whether the error on screen is one a button can do anything
     // about: a stream that gave up, or a page that failed to load. A
@@ -1235,6 +1304,9 @@ function useTranscript(id) {
     // stand; `fold` refuses a replayed line either way.
     const attach = () => {
       detach();
+      // A shared session is finished by definition: the file is what
+      // it was, and there is no server to stream from.
+      if (SHARE) return;
       const stream = new EventSource(withToken(apiPath(id, "/events?from=" + view.line)));
       source = stream;
       const on = (name, handler) =>
@@ -1495,6 +1567,8 @@ function NewSession({ cwds, onCreated }) {
     }
   };
 
+  // Nothing to start a session on: there is no server here.
+  if (SHARE) return null;
   if (!open) {
     return html`
       <button class="new-toggle" type="button" onClick=${() => setOpen(true)}>+ new session</button>
@@ -1700,6 +1774,12 @@ function Composer({ id, session, view }) {
     send();
   };
 
+  // A shared file is a record: the pill still says what the session
+  // cost and how it ended, but there is nothing behind it to write to.
+  if (SHARE) {
+    return html`<${StatusPill} view=${view} session=${session} onAbort=${null} aborting=${false} />`;
+  }
+
   return html`
     ${refused &&
     html`<p class="watching">
@@ -1790,7 +1870,8 @@ function DetailPanel({ id, view }) {
         // five-second request loses.
         .catch(() => {});
     refresh();
-    const timer = setInterval(refresh, 5000);
+    // A file never changes under the reader.
+    const timer = SHARE ? null : setInterval(refresh, 5000);
     return () => {
       alive = false;
       clearInterval(timer);
@@ -1927,6 +2008,9 @@ function Center({ id, view, session, onDrawer }) {
 // ------------------------------------------------------------- routing
 
 function routeId() {
+  // A shared file is one session and opens on it. There is no listing
+  // worth a route here, and no URL to have been given a hash.
+  if (SHARE) return SHARE.id;
   const hash = location.hash.replace(/^#/, "");
   return hash.startsWith("/s/") ? decodeURIComponent(hash.slice(3)) : null;
 }
@@ -1963,7 +2047,8 @@ function App() {
         })
         .catch((failure) => alive && setError(message(failure)));
     refresh();
-    const timer = setInterval(refresh, 3000);
+    // A file never changes under the reader: one pass, no clock.
+    const timer = SHARE ? null : setInterval(refresh, 3000);
     return () => {
       alive = false;
       clearInterval(timer);

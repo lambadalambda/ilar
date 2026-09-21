@@ -639,6 +639,15 @@ pre.diff .ctx {
   border-radius: 8px;
   vertical-align: top;
 }
+/* A shared file has no route to fetch bytes from, so a picture is
+   named rather than shown — the same marker the terminal prints. */
+.thumb-absent {
+  display: inline-block;
+  padding: 4px 8px;
+  color: var(--muted);
+  font: inherit;
+  white-space: nowrap;
+}
 .child {
   border-left: 2px solid var(--line);
   margin-left: 2px;

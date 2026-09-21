@@ -484,15 +484,6 @@ pub(crate) fn queued_result_headline(message: &ilar::agent::Steer) -> Option<Str
 /// all.
 const ACTIVITY_RETRY_FRAMES: u16 = 240;
 
-/// The log behind a windowed transcript, and how much of it the window
-/// leaves out. See [`App::folded_history`].
-#[derive(Clone)]
-pub(crate) struct FoldedHistory {
-    pub(crate) store: ilar::session::SessionStore,
-    /// Events of the whole log before the first one on screen.
-    pub(crate) before: usize,
-}
-
 /// The words of every waiting message, for the tests that care about
 /// which message is where rather than what is attached to it.
 #[cfg(test)]
@@ -578,11 +569,16 @@ pub(crate) struct App {
     /// never at open: rendering a compacted session's whole history on
     /// every open is exactly the cost compaction exists to avoid.
     ///
-    /// `None` when nothing is folded — a session opened fresh, or a
+    /// `0` when nothing is folded — a session opened fresh, or a
     /// restore with no compaction behind it. Then what is on screen
     /// already *is* the whole conversation, and an export takes it as
     /// it stands.
-    pub(crate) folded_history: Option<FoldedHistory>,
+    pub(crate) folded_before: usize,
+    /// This session's store, for the two things that read the log
+    /// rather than the screen: an export's folded half, and a share
+    /// file's whole payload. `None` in tests, which build an App with
+    /// no session behind it.
+    pub(crate) store: Option<ilar::session::SessionStore>,
     /// Messages submitted during an active turn, auto-sent in order when
     /// the turn completes — each with whatever was attached when it was
     /// submitted, so waiting for the turn costs the user nothing.
@@ -832,7 +828,8 @@ impl App {
             stream_rate: None,
             turn_committed: false,
             retry_available: false,
-            folded_history: None,
+            folded_before: 0,
+            store: None,
             queued_messages: Vec::new(),
             input_stash: Vec::new(),
             quit_armed: false,
@@ -1320,13 +1317,10 @@ impl App {
         // history is exactly the weight compaction removed, and paying
         // for it on every open to serve an export that may never come
         // is the wrong trade.
-        self.folded_history = match (restored.history_before, store) {
-            (0, _) | (_, None) => None,
-            (before, Some(store)) => Some(FoldedHistory {
-                store: store.clone(),
-                before,
-            }),
-        };
+        self.folded_before = restored.history_before;
+        if let Some(store) = store {
+            self.store.get_or_insert_with(|| store.clone());
+        }
         let at = at.min(self.lines.len());
         // The boundary marks live-turn territory by index. Landed
         // history is pre-turn by definition, so the boundary moves
@@ -3176,13 +3170,13 @@ pub(crate) fn palette_command_blocked(command: PaletteCommand) -> Option<&'stati
 /// on screen still goes out, which is exactly what went out before —
 /// but it is a reason to say so.
 fn export_lines(app: &App) -> (Vec<Line_>, bool) {
-    let Some(history) = app.folded_history.as_ref() else {
+    let Some(store) = app.store.as_ref().filter(|_| app.folded_before > 0) else {
         return (app.lines.clone(), true);
     };
-    let Ok(events) = history.store.whole_events(&app.session_id) else {
+    let Ok(events) = store.whole_events(&app.session_id) else {
         return (app.lines.clone(), false);
     };
-    let before = history.before.min(events.len());
+    let before = app.folded_before.min(events.len());
     let mut lines = crate::session_view::whole_log_lines(&events[..before]);
     lines.extend(app.lines.iter().cloned());
     (lines, true)
@@ -3313,6 +3307,41 @@ pub(crate) fn activate_palette_command(
                 }
                 Err(error) => {
                     app.set_notice(format!("export failed: {error}"), NoticeLevel::Error);
+                }
+            }
+        }
+        PaletteCommand::Share => {
+            let stem = app
+                .topic
+                .as_deref()
+                .map(topic_slug)
+                .filter(|slug| !slug.is_empty())
+                .unwrap_or_else(|| app.session_id.chars().take(8).collect());
+            let path = app.cwd.join(format!("ilar-session-{stem}.html"));
+            let Some(store) = app.store.clone() else {
+                app.set_notice("this session has no log to share yet", NoticeLevel::Info);
+                return;
+            };
+            // The whole log, through the same projection `ilar serve`
+            // renders from — so a share says what the web page would,
+            // secrets cut in the same place.
+            match crate::web::share::payload(&store, &app.session_id)
+                .map(|payload| {
+                    crate::web::share::page(
+                        app.topic.as_deref().unwrap_or("ilar session"),
+                        &payload,
+                    )
+                })
+                .and_then(|html| std::fs::write(&path, html))
+            {
+                Ok(()) => {
+                    app.push_transcript_line(Line_::System(format!(
+                        "session shared to {} — one file, opens offline",
+                        path.display()
+                    )));
+                }
+                Err(error) => {
+                    app.set_notice(format!("share failed: {error}"), NoticeLevel::Error);
                 }
             }
         }
@@ -6696,10 +6725,8 @@ mod tests {
 
         // Folded: the log's first two events come in front, and every
         // on-screen row survives.
-        app.folded_history = Some(FoldedHistory {
-            store: store.clone(),
-            before: 2,
-        });
+        app.store = Some(store.clone());
+        app.folded_before = 2;
         let (spliced, whole) = export_lines(&app);
         assert!(whole);
         let text = crate::transcript::transcript_markdown(&session_id, &spliced);

@@ -12,9 +12,11 @@
 //! a share file needs no server, and refusing to build the renderer
 //! without one would be the tail wagging the dog.
 
+pub(crate) mod share;
 pub(crate) mod view;
 
-/// The page, as the binary carries it, handed out as separate routes.
+/// The page, as the binary carries it. `serve` hands these out as
+/// separate routes; `share` inlines them into one file.
 pub(crate) mod assets {
     /// The server's page shell. A share file builds its own, because
     /// it has no routes to point at.

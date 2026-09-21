@@ -546,6 +546,7 @@ pub(crate) enum PaletteCommand {
     Compact,
     Context,
     Export,
+    Share,
     Skills,
     Pending,
     Help,
@@ -627,9 +628,16 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
     PaletteCommandDefinition {
         id: PaletteCommand::Export,
         section: "General",
-        label: "Export transcript",
+        label: "Export transcript (Markdown)",
         shortcut: "",
-        search_terms: "export markdown save share transcript write file",
+        search_terms: "export markdown save transcript write file",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Share,
+        section: "General",
+        label: "Share transcript (one HTML file)",
+        shortcut: "",
+        search_terms: "share html export page send readable offline single file",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Skills,

@@ -1675,6 +1675,7 @@ async fn main() -> Result<()> {
         } else {
             session_context_tokens(&store, &session_id, &system_prompt, &registry)?
         };
+        app.store = Some(store.clone());
         app.configure_runtime(
             model_for_session.clone(),
             reasoning_for_session,
