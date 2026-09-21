@@ -24,6 +24,7 @@ mod theme;
 mod transcript;
 mod view;
 mod watch;
+mod web;
 
 use std::sync::Arc;
 

@@ -112,12 +112,19 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-use ilar::session::{ContentBlock, ImageContent, LiveDelta, SessionEvent, Usage};
+#[cfg(feature = "serve")]
+use ilar::session::LiveDelta;
+use ilar::session::{ContentBlock, ImageContent, SessionEvent, Usage};
 
 use crate::diff::{DiffKind, DiffLine};
 
 /// One canonical event as the wire sees it. Total: every event projects,
 /// so the result array indexes the same way `Rewind.to` does.
+///
+/// The production paths all carry a call-inputs map and use
+/// [`project_event_with`]; this is the no-inputs convenience the
+/// projection's own tests read with.
+#[cfg(test)]
 pub(crate) fn project_event(event: &SessionEvent) -> Value {
     project_event_with(event, None)
 }
@@ -427,6 +434,7 @@ pub(crate) fn context_limit(model: &str) -> Value {
     })
 }
 
+#[cfg(feature = "serve")]
 /// One line of a running turn's scratch, for the ephemeral `delta`
 /// frame. Same contract as above and the same `type` spelling as the
 /// core enum's serde tag — but nothing here is a canonical event, so it
@@ -472,12 +480,14 @@ pub(crate) fn project_live_delta(delta: &LiveDelta) -> Value {
     }
 }
 
+#[cfg(feature = "serve")]
 /// The frame that retires a client's streaming row: the step committed,
 /// or the turn ended.
 pub(crate) fn live_reset() -> Value {
     json!({ "type": "reset" })
 }
 
+#[cfg(feature = "serve")]
 /// The `?invocation=` slice: one child-session turn, from the
 /// [`SessionEvent::SubagentInvocation`] naming `parent_tool_call_id`
 /// (exclusive) up to the next invocation or the end of the log. Empty
@@ -497,6 +507,7 @@ pub(crate) fn invocation_slice<'a>(
     &events[start + 1..end]
 }
 
+#[cfg(feature = "serve")]
 /// Whether this log holds the invocation a parent's task call spawned —
 /// which is the only link back, and the one that exists *while the
 /// subagent runs*: `ToolResult.child_session_id` is written when the task
@@ -507,6 +518,7 @@ pub(crate) fn has_invocation(events: &[SessionEvent], parent_tool_call_id: &str)
     invocation_at(events, parent_tool_call_id).is_some()
 }
 
+#[cfg(feature = "serve")]
 fn invocation_at(events: &[SessionEvent], parent_tool_call_id: &str) -> Option<usize> {
     events.iter().position(|event| {
         matches!(
@@ -514,6 +526,34 @@ fn invocation_at(events: &[SessionEvent], parent_tool_call_id: &str) -> Option<u
             SessionEvent::SubagentInvocation { parent_tool_call_id: current, .. }
                 if current == parent_tool_call_id
         )
+    })
+}
+
+/// One session's listing row, in the shape the page reads.
+///
+/// Built here rather than at each caller because there are two of
+/// them now — the server's listing and a share file's — and eleven
+/// keys in two places is eleven chances to drift. What differs is
+/// only what the caller knows: whether this process drives it, and
+/// what it is doing.
+pub(crate) fn session_summary(
+    head: &ilar::session::SessionHead,
+    driven: bool,
+    state: &str,
+    activity: Value,
+) -> Value {
+    json!({
+        "driven": driven,
+        "id": head.id,
+        "title": head.title,
+        "cwd": head.meta.cwd.as_ref().map(|cwd| cwd.display().to_string()),
+        "agent": head.meta.agent,
+        "model": head.meta.model,
+        "context_limit": context_limit(&head.meta.model),
+        "parent_id": head.meta.parent_id,
+        "modified": chrono::DateTime::<chrono::Utc>::from(head.modified).to_rfc3339(),
+        "state": state,
+        "activity": activity,
     })
 }
 
@@ -1134,6 +1174,8 @@ mod tests {
 
     /// The live frames, with the core enum's own serde spelling — a
     /// client switches on `type` across both halves of the wire.
+    // The live stream is the server's; a share file has no deltas.
+    #[cfg(feature = "serve")]
     #[test]
     fn live_deltas_project_with_the_core_spelling() {
         let deltas = [
@@ -1184,6 +1226,8 @@ mod tests {
         }
     }
 
+    // A child slice is a serve route; a share carries one session.
+    #[cfg(feature = "serve")]
     #[test]
     fn an_invocation_slice_ends_at_the_next_invocation() {
         let events = vec![
@@ -1211,6 +1255,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "serve")]
     #[test]
     fn an_unknown_invocation_yields_nothing() {
         let events = vec![meta("zai/glm-4.7"), invocation("task-1"), user("x", vec![])];
@@ -1521,6 +1566,7 @@ mod tests {
 
     /// The link that exists *while* a subagent runs, which
     /// `ToolResult.child_session_id` does not.
+    #[cfg(feature = "serve")]
     #[test]
     fn an_invocation_is_found_before_it_has_said_anything() {
         let events = vec![meta("zai/glm-4.7"), invocation("task-1")];

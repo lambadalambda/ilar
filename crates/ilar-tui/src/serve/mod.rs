@@ -18,7 +18,6 @@
 
 pub(crate) mod drive;
 pub(crate) mod http;
-pub(crate) mod view;
 pub(crate) mod watch;
 
 use std::net::SocketAddr;

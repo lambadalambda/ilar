@@ -109,11 +109,11 @@ use ilar::session::{SessionEvent, SessionStore, SessionTail, TailUpdate};
 use tokio::sync::broadcast;
 
 use super::drive::{Drive, DriveError, Fate, NewSession, TurnFailure};
-use super::view::{
-    has_invocation, invocation_slice, live_reset, project_live_delta, project_page, usage_totals,
-};
 use super::watch::{
     LiveMessage, LiveState, SessionEntry, TailEnd, TailMessage, Watcher, next_message,
+};
+use crate::web::view::{
+    has_invocation, invocation_slice, live_reset, project_live_delta, project_page, usage_totals,
 };
 
 /// Events per transcript page. P7's worst session is 906 events; five
@@ -1045,11 +1045,11 @@ fn frame(
 ) -> Frame {
     match message {
         TailMessage::Update(TailUpdate::Appended { line, event }) => {
-            super::view::harvest_call_inputs(std::slice::from_ref(&event), call_inputs);
+            crate::web::view::harvest_call_inputs(std::slice::from_ref(&event), call_inputs);
             Frame {
                 event: named(
                     "append",
-                    &json!({ "line": line, "event": super::view::project_event_with(&event, Some(call_inputs)) }),
+                    &json!({ "line": line, "event": crate::web::view::project_event_with(&event, Some(call_inputs)) }),
                 )
                 .id(line.to_string()),
                 line,
@@ -1057,11 +1057,11 @@ fn frame(
             }
         }
         TailMessage::Update(TailUpdate::Rewound { line, to, event }) => {
-            super::view::harvest_call_inputs(std::slice::from_ref(&event), call_inputs);
+            crate::web::view::harvest_call_inputs(std::slice::from_ref(&event), call_inputs);
             Frame {
                 event: named(
                     "rewind",
-                    &json!({ "line": line, "to": to, "event": super::view::project_event_with(&event, Some(call_inputs)) }),
+                    &json!({ "line": line, "to": to, "event": crate::web::view::project_event_with(&event, Some(call_inputs)) }),
                 )
                 .id(line.to_string()),
                 line,
@@ -1123,19 +1123,12 @@ fn named(event: &str, data: &Value) -> Event {
 /// is a new field beside `state`, not a fourth value of it — a session
 /// can be working under a TUI, and the page must not offer to stop it.
 fn summary(entry: &SessionEntry, drive: &Drive) -> Value {
-    json!({
-        "driven": drive.drives(&entry.head.id),
-        "id": entry.head.id,
-        "title": entry.head.title,
-        "cwd": entry.head.meta.cwd.as_ref().map(|cwd| cwd.display().to_string()),
-        "agent": entry.head.meta.agent,
-        "model": entry.head.meta.model,
-        "context_limit": super::view::context_limit(&entry.head.meta.model),
-        "parent_id": entry.head.meta.parent_id,
-        "modified": rfc3339(entry.head.modified),
-        "state": entry.state.as_str(),
-        "activity": entry.activity,
-    })
+    crate::web::view::session_summary(
+        &entry.head,
+        drive.drives(&entry.head.id),
+        entry.state.as_str(),
+        json!(entry.activity),
+    )
 }
 
 fn rfc3339(time: std::time::SystemTime) -> String {
@@ -1150,30 +1143,27 @@ fn rfc3339(time: std::time::SystemTime) -> String {
 /// preact, its hooks and htm, pinned and copied verbatim, so `ilar serve`
 /// still works on a plane and still has no build step.
 async fn index() -> Response {
-    asset(
-        "text/html; charset=utf-8",
-        include_str!("assets/index.html"),
-    )
+    asset("text/html; charset=utf-8", crate::web::assets::INDEX)
 }
 
 async fn stylesheet() -> Response {
-    asset("text/css; charset=utf-8", include_str!("assets/app.css"))
+    asset("text/css; charset=utf-8", crate::web::assets::APP_CSS)
 }
 
 async fn script() -> Response {
-    script_asset(include_str!("assets/app.js"))
+    script_asset(crate::web::assets::APP_JS)
 }
 
 async fn vendor_preact() -> Response {
-    script_asset(include_str!("assets/vendor/preact.module.js"))
+    script_asset(crate::web::assets::PREACT)
 }
 
 async fn vendor_hooks() -> Response {
-    script_asset(include_str!("assets/vendor/hooks.module.js"))
+    script_asset(crate::web::assets::HOOKS)
 }
 
 async fn vendor_htm() -> Response {
-    script_asset(include_str!("assets/vendor/htm.module.js"))
+    script_asset(crate::web::assets::HTM)
 }
 
 fn script_asset(body: &'static str) -> Response {
