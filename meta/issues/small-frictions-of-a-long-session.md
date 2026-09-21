@@ -102,3 +102,26 @@ is wrong in the presence of a rewind, which folds events away — the
 real path handles that and a shortcut would have to as well. What is
 left is an index that records the effective model per session, which
 is a store change with its own issue's worth of care.
+
+## Done (2026-09-21)
+
+- **`held_notifications` is capped** — 256, four times the channel's
+  capacity, since `0684432`; the overflow is back-pressure into a
+  path that has a message. Ticked here late.
+- **Drag-resize** got no debounce and needs no number: a drag arrives
+  as a run of resize events, and the poll now keeps the last of a run
+  and hands on whatever non-resize event follows it. Rebuilds happen
+  as fast as frames complete, not as fast as the terminal reports
+  widths. Pinned by
+  `a_run_of_resizes_keeps_only_the_last_and_stashes_what_follows`.
+
+Struck, with the reason: **the five O(entries) scans per clean
+frame.** An entry is a transcript line or a tool group, so "entries"
+is thousands at the very most, and each scan is a field read per
+entry — well under a hundred microseconds a frame against a 50 ms
+frame budget. The animation pass that used to dominate those frames
+is fixed in [[live-rows-rerender-every-frame]]; what is left here is
+not measurable. Caching the counts would add invariants to a cache
+whose one invariant is already load-bearing.
+
+Everything in this omnibus is now done or struck.

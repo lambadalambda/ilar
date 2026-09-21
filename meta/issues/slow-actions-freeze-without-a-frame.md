@@ -65,3 +65,28 @@ session, and failure restores the pause it found.
 Still inline: fork's full copy, the turn picker's load, and the
 list-mode picker's `store.list()`; and the structural note about
 `observe` not modelling a rewind in flight.
+
+## Done (2026-09-21)
+
+The three inline loads were measured rather than moved. A 13 MB log
+of 10,000 events, release build, on tenco:
+
+| action | time |
+| --- | --- |
+| cold `load` | 21 ms |
+| warm `load` (checkpoint) | 19 ms |
+| `fork` (load, copy, sync) | 32 ms |
+| `list` | 0.4 ms |
+
+None reaches a frame at the busy poll rate, let alone the second the
+issue's title is about; the seconds were rewind's git work, which
+already runs as a joined task. Fork is followed by a session switch
+that restores the copy — the same read again under "restoring
+session" — so a background copy would shave a third off a wait the
+person is already in, at the price of a fourth in-flight state in a
+loop [[the-loop-top-joins-the-spine]] already finds over-flagged.
+Struck, with the numbers, so it is not picked up again on the filing's
+"O(log)" alone.
+
+The structural note — `observe` not modelling a rewind in flight —
+belongs to [[the-loop-top-joins-the-spine]] and is left there.

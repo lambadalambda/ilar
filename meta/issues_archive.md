@@ -459,3 +459,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [An export stops at the last compaction](issues/an-export-stops-at-the-last-compaction.md)
 - [x] [A share carries its delegations](issues/a-share-carries-its-delegations.md)
 - [x] [Live rows rerender every frame](issues/live-rows-rerender-every-frame.md)
+- [x] [Slow actions freeze without a frame](issues/slow-actions-freeze-without-a-frame.md) — the rest measured in milliseconds and struck
+- [x] [Small frictions of a long session](issues/small-frictions-of-a-long-session.md)

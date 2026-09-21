@@ -1,5 +1,29 @@
 # DEVLOG
 
+## 2026-09-21 — Two sweeps closed by measuring
+
+The responsiveness sweep from 2026-08-31 had two omnibus issues left
+with a tail of items each. Rather than implement the tail, I measured
+it, on tenco, release build, against a 13 MB log of ten thousand
+events: a cold load is 21 ms, a fork 32 ms, the listing under a
+millisecond. The "slow actions" issue was filed on "O(log)"; the one
+action that took seconds was rewind's git work, and that has run as a
+joined task since the day it was filed. A fork is followed by
+restoring the fork, the same read again under a status that says so.
+Moving the copy off the loop would shave a third off a wait the
+person is already in, for a fourth in-flight state in a loop the
+structure sweep already finds over-flagged. Struck, with the table in
+the issue so nobody re-derives the decision from the title.
+
+One item was worth code and turned out to need no number: the
+drag-resize "debounce". A drag is a run of resize events, and each one
+that reached a frame re-wrapped the transcript at a width nobody would
+see. The poll now keeps the last of a run and stashes whatever
+non-resize event follows it, so rebuilds happen as fast as frames
+complete. The per-frame bookkeeping scans are struck as unmeasurable:
+a field read per entry, thousands of entries at most, against a 50 ms
+frame.
+
 ## 2026-09-21 — The frames that did nothing
 
 Three costs the transcript cache paid at 20 fps for rows that had not
