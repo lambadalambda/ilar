@@ -132,6 +132,13 @@ impl FakeChannel {
         self.runs.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Refusals still to come, for a test that has to know the first
+    /// send was attempted before it does anything else.
+    pub fn refusals_left(&self) -> usize {
+        self.failing_sends
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// What a person typed. Buffered, so it may precede `run`.
     pub async fn inject(&self, text: &str, chat_id: &str, sender_id: &str) {
         self.inject_with(text, chat_id, sender_id, false).await;

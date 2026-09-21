@@ -160,6 +160,44 @@ const CHANNEL_RESTART: Duration = Duration::from_secs(5);
 /// How many times a refused send is tried; the pause between them is
 /// `gateway.send_retry_secs`.
 const SEND_TRIES: u32 = 4;
+
+/// The dispatcher's lanes: one sender task per channel, fed in the
+/// order messages were queued, so a channel keeps its order and no
+/// channel waits on another's retries. Unbounded on purpose — the
+/// dispatcher must never block on a lane, or a dead channel would hold
+/// the others through the queue instead of through the send.
+#[derive(Default)]
+struct Lanes {
+    senders: HashMap<String, mpsc::UnboundedSender<Outbound>>,
+    workers: tokio::task::JoinSet<()>,
+}
+
+impl Lanes {
+    fn dispatch(&mut self, gateway: &Arc<Gateway>, message: Outbound) {
+        let lane = self
+            .senders
+            .entry(message.channel.clone())
+            .or_insert_with(|| {
+                let (tx, mut rx) = mpsc::unbounded_channel::<Outbound>();
+                let gateway = gateway.clone();
+                self.workers.spawn(async move {
+                    while let Some(message) = rx.recv().await {
+                        gateway.send(message).await;
+                    }
+                });
+                tx
+            });
+        // A lane whose worker is gone can only mean the dispatcher is
+        // being torn down; there is nobody left to tell.
+        let _ = lane.send(message);
+    }
+
+    /// Close every lane and wait for what they hold to go out.
+    async fn finish(mut self) {
+        self.senders.clear();
+        while self.workers.join_next().await.is_some() {}
+    }
+}
 /// How long after a failed one-shot job it is tried once more.
 const ONE_SHOT_RETRY: chrono::TimeDelta = chrono::TimeDelta::minutes(1);
 /// How long the start announcement keeps trying while the channel
@@ -389,21 +427,30 @@ impl Gateway {
             let gateway = self.clone();
             let closed = self.outbound_closed.clone();
             tokio::spawn(async move {
+                // One lane per channel, each sending in order. A channel
+                // that is down retries on its own lane; the others carry
+                // on. One queue for all of them meant one refused
+                // message held every chat's replies for as long as its
+                // retries took.
+                let mut lanes = Lanes::default();
                 loop {
                     tokio::select! {
                         biased;
                         message = outbound.recv() => match message {
-                            Some(message) => gateway.send(message).await,
+                            Some(message) => lanes.dispatch(&gateway, message),
                             None => break,
                         },
                         () = closed.cancelled() => {
                             while let Ok(message) = outbound.try_recv() {
-                                gateway.send(message).await;
+                                lanes.dispatch(&gateway, message);
                             }
                             break;
                         }
                     }
                 }
+                // Nothing queued is lost: every lane sends what it holds,
+                // then ends.
+                lanes.finish().await;
             })
         };
         let mut handlers = tokio::task::JoinSet::new();
@@ -1308,8 +1355,8 @@ impl Gateway {
             .await;
     }
 
-    /// One outbound message, to its channel. Only the dispatcher calls
-    /// this, one message at a time. The status line is not touched
+    /// One outbound message, to its channel. Only a dispatcher lane
+    /// calls this, one message at a time per channel. The status line is not touched
     /// here: the turn that owns it takes it down when it ends, and the
     /// message tool when its reply to its own chat goes out, so a
     /// scheduled job posting mid-turn no longer clears a line the

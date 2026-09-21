@@ -216,6 +216,62 @@ async fn a_scripts_notification_is_never_a_command() {
     gateway.cancel();
 }
 
+/// A channel that is down retries on its own lane. The dispatcher
+/// used to be one queue, so a message a dead channel refused held
+/// every other channel's replies behind its retries — four tries at
+/// `send_retry_secs` apart, per message, while the live chats waited.
+#[tokio::test]
+async fn a_down_channel_does_not_hold_up_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        announce: false,
+        send_retry_secs: 2,
+        workspace: Some(dir.path().join("workspace")),
+        ..GatewayConfig::default()
+    };
+    let resolver = Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+        vec![says("for the dead wire"), says("for the live one")],
+    ))));
+    let down = FakeChannel::new("down");
+    let up = FakeChannel::new("up");
+    let gateway = Gateway::new(
+        config(dir.path()),
+        settings,
+        resolver,
+        vec![down.clone(), up.clone()],
+    )
+    .unwrap();
+    tokio::spawn(gateway.clone().run());
+
+    // The dead channel refuses three times: six seconds of retrying
+    // for its one message.
+    down.fail_next_sends(3);
+    down.inject("hi", "chat-1", "alice").await;
+    // Only once that first send was actually refused — so its retries
+    // are what the live channel's reply would queue behind.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while down.refusals_left() == 3 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the first send never happened"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    up.inject("hi", "chat-2", "bob").await;
+    let sent = up.wait_for_sent(1, Duration::from_millis(1500)).await;
+    assert_eq!(
+        sent.len(),
+        1,
+        "the live channel's reply waited behind the dead one's retries: {sent:?}"
+    );
+    assert_eq!(sent[0].text, "for the live one");
+
+    // And the dead channel's message still lands once the wire is back.
+    let sent = down.wait_for_sent(1, WAIT).await;
+    assert_eq!(sent[0].text, "for the dead wire", "{sent:?}");
+    gateway.cancel();
+}
+
 #[tokio::test]
 async fn a_send_the_channel_refuses_is_tried_again_and_then_reported() {
     let dir = tempfile::tempdir().unwrap();
