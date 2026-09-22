@@ -85,7 +85,7 @@ const WORKTREE_CORRECTION: &str = "`git worktree add ../ilar-task-<name> -b task
 /// default is ilar's choice rather than the caller's: demoting it keeps
 /// the work happening, and the note keeps the result honest about which
 /// path it took.
-const BACKGROUND_DEMOTED_BY_CAPACITY: &str = "Ran in the foreground: read-only tasks default to \
+const BACKGROUND_DEMOTED_BY_CAPACITY: &str = "Ran in the foreground: tasks default to \
      background, but background capacity was full, so this one ran here instead of failing.";
 
 /// A completed background task's notification — the synthetic user
@@ -995,19 +995,20 @@ impl SubagentSpawner {
             AgentWorkspaceMode::Mutable => WorkspaceAccess::Mutating,
             AgentWorkspaceMode::ReadOnly => WorkspaceAccess::ReadOnly,
         };
-        // The one place `background` stops being a maybe. A read-only
-        // task is independent by nature — no edits to merge, no write
-        // lease to hand back — so omitting the flag means "detach and
-        // tell me when it lands", which leaves the parent free to keep
-        // working. A mutable task's edits are usually wanted before the
-        // next call reads them, so its default stays in the turn.
-        // Everything below sees a bool, so capacity and notification
-        // wiring never have to ask what the caller meant.
+        // The one place `background` stops being a maybe. Omitted, it
+        // means "detach and tell me when it lands", whatever the agent:
+        // a foreground task blocks the parent's *conversation* — a
+        // message the person sends meanwhile is a steer, read at the
+        // parent's next step, which is after the task returns — and
+        // nothing about a mutable task needs that. Its edits still land
+        // in order: in the parent's own checkout it holds the write
+        // lease, and the parent's edits wait behind it. An explicit
+        // false is the caller saying it is blocked on the answer, which
+        // is Codex's `wait_agent` and as rare. Everything below sees a
+        // bool, so capacity and notification wiring never have to ask
+        // what the caller meant.
         let background_explicit = input.background.is_some();
-        let mut background = input.background.unwrap_or(match agent.workspace_mode {
-            AgentWorkspaceMode::ReadOnly => true,
-            AgentWorkspaceMode::Mutable => false,
-        });
+        let mut background = input.background.unwrap_or(true);
         let mut background_demoted: Option<&'static str> = None;
         let child_location = match &input.workspace {
             Some(workspace) => {
@@ -1612,10 +1613,22 @@ impl SubagentSpawner {
             if let Some(on_start) = on_start.take() {
                 on_start();
             }
+            // A mutable task in the parent's own checkout holds its
+            // write lease until it reports: said here, so the parent
+            // reads rather than edits meanwhile, instead of finding out
+            // from a tool row that waits.
+            let holds_checkout = if workspace_access == WorkspaceAccess::Mutating && same_workspace
+            {
+                " It holds this checkout's write lease until it reports, so your own edit, write \
+                 and bash calls would wait behind it: read, glob and grep meanwhile, or give a \
+                 mutable task a worktree of its own."
+            } else {
+                ""
+            };
             return ToolOutput::text(format!(
                 "Deferred background task started (task_id: {returned_session_id}). Completion \
 will trigger a separate follow-up turn. Do not sleep, poll, or check on it. Do not perform this \
-task's scope yourself; continue only clearly disjoint work."
+task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
             ))
             .with_child_session(returned_session_id);
         }
@@ -3471,7 +3484,7 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delegate one clearly bounded unit of work to a configured agent. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. subagent_type names the agent, and the agent — not this call — fixes its tools and whether it may write: prefer an agent marked read-only for repository inspection and review that needs no shell, so sibling tasks can run concurrently; use `review` for a review or verification that has to run tests, builds or git, since it may run things but cannot edit; and use a mutable agent with the write tools only when edits are required.\n\nOmit workspace by default and the task runs in your own checkout. Always omit it for a read-only agent: read-only tasks share the checkout, so they run alongside each other. Omit it for a mutable agent too on an ordinary foreground turn: mutable tasks sharing one checkout serialize behind its write lease, so each one sees the previous one's edits and nothing has to be merged — that is what you want for dependent, sequential work. Pass workspace when independent mutable tasks should run in parallel: write leases are per workspace, so tasks in separate worktrees run at the same time, and you merge their divergent results yourself once each has reported. Pass it also when you are yourself running as a subagent and delegate a mutable task, since your own checkout is already held for the whole of your run, and for a mutable background task, which would otherwise hold your checkout — and block your own edits — until it finishes. A workspace must be an existing Git worktree of this repository that you create first (`git worktree add ../ilar-task-<name> -b task/<name>`) and then name as {\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"} — ilar validates it and never creates one, so outside a Git repository there is no isolated workspace and parallel mutable tasks are unavailable.\n\nBackground follows the agent: a read-only agent's task you delegate runs in the background and reports back as a notification while you keep working, and a mutable agent's task runs in the foreground. Pass background false when you need the result to continue this turn's work — foreground sibling tasks can be called together for parallel current-answer work. Pass background true for a mutable task whose deferred completion should trigger a separate follow-up turn, with a workspace of its own. Never poll a detached task: task_message steers it mid-flight, and its completion comes to you."
+        "Delegate one clearly bounded unit of work to a configured agent. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. subagent_type names the agent, and the agent — not this call — fixes its tools and whether it may write: prefer an agent marked read-only for repository inspection and review that needs no shell, so sibling tasks can run concurrently; use `review` for a review or verification that has to run tests, builds or git, since it may run things but cannot edit; and use a mutable agent with the write tools only when edits are required.\n\nOmit workspace by default and the task runs in your own checkout. Always omit it for a read-only agent: read-only tasks share the checkout, so they run alongside each other. Omit it for a mutable agent too when its edits should land in your checkout in order: mutable tasks sharing one checkout serialize behind its write lease, so each one sees the previous one's edits and nothing has to be merged, which is what you want for dependent, sequential work — and while one runs it holds that lease, so your own edit, write and bash calls wait until it reports; read, glob and grep meanwhile. Pass workspace when independent mutable tasks should run in parallel, or when you want to keep editing while one runs: write leases are per workspace, so tasks in separate worktrees run at the same time, and you merge their divergent results yourself once each has reported. Pass it also when you are yourself running as a subagent and delegate a mutable task, since your own checkout is already held for the whole of your run. A workspace must be an existing Git worktree of this repository that you create first (`git worktree add ../ilar-task-<name> -b task/<name>`) and then name as {\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"} — ilar validates it and never creates one, so outside a Git repository there is no isolated workspace and parallel mutable tasks are unavailable.\n\nEvery task runs in the background: the call returns at once, you keep working, and the task's completion reaches you as a notification that starts a follow-up turn. That is what lets a message from the person reach you while the task runs, and task_message reach the task. Pass background false only when you are blocked on the result for this turn's very next step: a review whose findings gate what you do next is the usual case — a detached reviewer's findings arrive a turn later, after whatever you did meanwhile, and its lease only delays your commit, it does not order the findings before it. Foreground sibling tasks can be called together for parallel current-answer work. Never poll a detached task: task_message steers it mid-flight, and its completion comes to you."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -3557,10 +3570,10 @@ impl Tool for TaskTool {
                     "type": ["string", "null"],
                     "description": "Reasoning variant for the chosen model (see the models tool). Omit for the model's default."
                 },
-                "background": {"type": "boolean", "description": "Whether the task runs detached. Omit it and the agent decides: a read-only agent's task runs in the background, a mutable agent's in the foreground. Pass false when you need the result to continue this turn's work; read-only tasks otherwise run in the background and report back as notifications, freeing you to keep working. Pass true for a mutable task whose completion should trigger a separate follow-up turn, and give it its own workspace. Do not poll a detached task: its completion finds you as a notification, and task_message corrects its course mid-flight."}
+                "background": {"type": "boolean", "description": "Whether the task runs detached. Omitted, it does: every task runs in the background and reports back as a notification that starts a follow-up turn, freeing you to keep working and the person to reach you meanwhile. Pass false only when you are blocked on the result for this turn's very next step. Pass false for a review whose findings gate what you do next: detached, they arrive a turn later. A mutable task without a workspace of its own holds your checkout's write lease until it reports, so your edit, write and bash calls wait; give it a worktree if you want to keep editing. Do not poll a detached task: its completion finds you as a notification, and task_message corrects its course mid-flight."}
                 ,"workspace": {
                     "type": ["object", "null"],
-                    "description": format!("Sibling Git worktree to run this task in. Set null or omit to use the current checkout — right for every read-only agent, and for a mutable agent unless you already hold this checkout or want independent mutable tasks to run in parallel. cwd must already be a registered worktree of this repository, because ilar validates the path and never creates one: {WORKTREE_CORRECTION}. This is a cooperative scheduling domain, not a sandbox: tasks in separate worktrees run at the same time and their results are yours to merge afterwards."),
+                    "description": format!("Sibling Git worktree to run this task in. Set null or omit to use the current checkout — right for every read-only agent, and for a mutable agent unless you already hold this checkout, want independent mutable tasks to run in parallel, or want to keep editing while one runs. cwd must already be a registered worktree of this repository, because ilar validates the path and never creates one: {WORKTREE_CORRECTION}. This is a cooperative scheduling domain, not a sandbox: tasks in separate worktrees run at the same time and their results are yours to merge afterwards."),
                     "properties": {
                         "cwd": {"type": "string"},
                         "isolation": {"type": "string", "enum": ["git_worktree"]}

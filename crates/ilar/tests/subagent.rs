@@ -632,6 +632,7 @@ async fn mutable_tasks_in_distinct_validated_worktrees_may_overlap() {
             "description": "isolated task",
             "prompt": "work",
             "subagent_type": "explore",
+            "background": false,
             "workspace": {"cwd": cwd, "isolation": "git_worktree"}
         }),
     };
@@ -747,6 +748,7 @@ async fn nested_task_rejects_an_ancestor_workspace_lock_cycle() {
                 "description": "cycle",
                 "prompt": "return to first",
                 "subagent_type": "explore",
+            "background": false,
                 "workspace": {"cwd": first, "isolation": "git_worktree"},
             }),
             ctx,
@@ -839,20 +841,22 @@ async fn nested_tasks_do_not_wait_on_busy_sibling_workspaces() {
         tokio::join!(
             task.run(
                 serde_json::json!({
-                    "description": "first to second",
-                    "prompt": "cross over",
-                    "subagent_type": "explore",
-                    "workspace": {"cwd": second, "isolation": "git_worktree"},
-                }),
+                        "description": "first to second",
+                        "prompt": "cross over",
+                        "subagent_type": "explore",
+                "background": false,
+                        "workspace": {"cwd": second, "isolation": "git_worktree"},
+                    }),
                 first_ctx,
             ),
             reverse_task.run(
                 serde_json::json!({
-                    "description": "second to first",
-                    "prompt": "cross over",
-                    "subagent_type": "explore",
-                    "workspace": {"cwd": first, "isolation": "git_worktree"},
-                }),
+                        "description": "second to first",
+                        "prompt": "cross over",
+                        "subagent_type": "explore",
+                "background": false,
+                        "workspace": {"cwd": first, "isolation": "git_worktree"},
+                    }),
                 second_ctx,
             )
         )
@@ -1027,6 +1031,7 @@ async fn depth_cap_errors_with_guidance() {
                 "description": "too deep",
                 "prompt": "hello",
                 "subagent_type": "explore",
+                "background": false,
             }),
             ToolContext::root(std::env::temp_dir()).with_subagents(Arc::new(SubagentSpawner::new(
                 spawner.resolver(),
@@ -1059,11 +1064,12 @@ async fn explicit_task_id_errors_instead_of_starting_a_replacement() {
         let out = task
             .run(
                 serde_json::json!({
-                    "description": "resume",
-                    "prompt": "continue",
-                    "subagent_type": "explore",
-                    "task_id": task_id,
-                }),
+                        "description": "resume",
+                        "prompt": "continue",
+                        "subagent_type": "explore",
+                "background": false,
+                        "task_id": task_id,
+                    }),
                 ToolContext::root(std::env::temp_dir()),
             )
             .await;
@@ -1095,11 +1101,12 @@ async fn blank_task_id_starts_a_new_session() {
         let output = task
             .run(
                 serde_json::json!({
-                    "description": "new child",
-                    "prompt": "work",
-                    "subagent_type": "explore",
-                    "task_id": task_id,
-                }),
+                        "description": "new child",
+                        "prompt": "work",
+                        "subagent_type": "explore",
+                "background": false,
+                        "task_id": task_id,
+                    }),
                 task_context(&parent_id),
             )
             .await;
@@ -1117,6 +1124,7 @@ async fn blank_task_id_starts_a_new_session() {
                 "description": "new child",
                 "prompt": "work",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": null,
                 "workspace": null,
             }),
@@ -1171,6 +1179,7 @@ async fn null_task_id_starts_a_new_session_in_a_validated_worktree() {
                 "description": "isolated child",
                 "prompt": "work",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": null,
                 "workspace": {
                     "cwd": worktree,
@@ -1231,49 +1240,40 @@ fn task_schema_guides_new_calls_without_placeholder_routing_values() {
         "{tool_description}"
     );
     let background = properties["background"]["description"].as_str().unwrap();
-    // The default is per agent type, and both overrides are spelled out:
-    // a model that reads only this property must know what omitting it
-    // buys and how to ask for the other thing.
+    // One default for every agent, and the one override spelled out: a
+    // model that reads only this property must know what omitting it
+    // buys, when false is warranted, and what a mutable task holds.
     assert!(
-        background.contains(
-            "a read-only agent's task runs in the background, a mutable agent's in the foreground"
-        ),
+        background.contains("every task runs in the background"),
         "{background}"
     );
     assert!(
-        background.contains(
-            "Pass false when you need the result to continue this turn's work; read-only tasks \
-             otherwise run in the background and report back as notifications, freeing you to \
-             keep working"
-        ),
+        background.contains("Pass false only when you are blocked on the result"),
         "{background}"
     );
     assert!(
-        background.contains("Pass true for a mutable task"),
+        background.contains("holds your checkout's write lease"),
         "{background}"
     );
-    assert!(
-        background.contains("separate follow-up turn"),
-        "{background}"
-    );
+    assert!(background.contains("follow-up turn"), "{background}");
     assert!(background.contains("Do not poll"), "{background}");
     assert!(background.contains("task_message"), "{background}");
-    // The prose paragraph teaches the same default the property does; the
-    // sentence it replaced told the model the opposite.
+    // The prose paragraph teaches the same default the property does,
+    // and no longer splits it by agent.
     assert!(
-        tool_description.contains("read-only agent's task you delegate runs in the background"),
+        tool_description.contains("Every task runs in the background"),
         "{tool_description}"
     );
     assert!(
-        tool_description.contains("Pass background false when you need the result"),
+        tool_description.contains("Pass background false only when you are blocked"),
         "{tool_description}"
     );
     assert!(
-        tool_description.contains("Pass background true for a mutable task"),
+        !tool_description.contains("Background follows the agent"),
         "{tool_description}"
     );
     assert!(
-        !tool_description.contains("Omit background when the result is needed"),
+        !tool_description.contains("mutable agent's task runs in the foreground"),
         "{tool_description}"
     );
     let subagent = properties["subagent_type"]["description"].as_str().unwrap();
@@ -1335,7 +1335,9 @@ fn task_schema_explains_the_workspace_decision_before_the_first_call() {
         "{description}"
     );
     assert!(
-        description.contains("for a mutable background task"),
+        description.contains(
+            "holds that lease, so your own edit, write and bash calls wait until it reports"
+        ),
         "{description}"
     );
     // A root session handles a background task's completion on an
@@ -1395,6 +1397,7 @@ async fn a_held_checkout_names_the_worktree_input_a_mutable_task_needs() {
                 "description": "nested edit",
                 "prompt": "edit the parser",
                 "subagent_type": "explore",
+                "background": false,
             }),
             ctx,
         )
@@ -1446,6 +1449,7 @@ async fn an_unvalidatable_workspace_names_the_worktree_input_to_pass() {
                 "description": "isolated edit",
                 "prompt": "edit the parser",
                 "subagent_type": "explore",
+                "background": false,
                 "workspace": {"cwd": outside.path(), "isolation": "git_worktree"},
             }),
             ctx,
@@ -1600,6 +1604,7 @@ async fn foreground_subagent_max_iterations_is_error() {
                 "description": "bounded child",
                 "prompt": "work",
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -1645,6 +1650,7 @@ async fn foreground_subagent_abort_is_error() {
                 "description": "cancel child",
                 "prompt": "work",
                 "subagent_type": "explore",
+                "background": false,
             }),
             context,
         )
@@ -1738,6 +1744,7 @@ async fn tool_only_child_does_not_return_its_prompt() {
                 "description": "tool only",
                 "prompt": prompt,
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -1794,6 +1801,7 @@ async fn resumed_subagent_rejects_an_already_active_session() {
                 "description": "duplicate resume",
                 "prompt": "continue again",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             task_context(&parent_id),
@@ -1840,6 +1848,7 @@ async fn resumed_subagent_rejects_persisted_agent_mismatch() {
                 "description": "resume",
                 "prompt": "continue",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             ToolContext::root(std::env::temp_dir()),
@@ -1939,6 +1948,7 @@ async fn subagent_turns_use_the_configured_compaction_threshold() {
                 "description": "resume compacted child",
                 "prompt": "continue",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             ctx,
@@ -1997,6 +2007,7 @@ async fn isolated_resume_requires_an_explicit_workspace() {
                 "description": "resume",
                 "prompt": "continue",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             ctx,
@@ -2070,6 +2081,7 @@ async fn nested_resume_may_inherit_its_parents_validated_worktree() {
                 "description": "resume inherited",
                 "prompt": "continue",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             ctx,
@@ -2125,6 +2137,7 @@ async fn resumed_subagent_rejects_a_different_parent_session() {
                 "description": "resume",
                 "prompt": "continue",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             ctx,
@@ -2196,6 +2209,7 @@ async fn isolated_resume_rejects_a_different_cwd_in_the_same_worktree() {
                 "description": "resume",
                 "prompt": "continue",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
                 "workspace": {"cwd": nested, "isolation": "git_worktree"},
             }),
@@ -2257,6 +2271,7 @@ async fn isolated_resume_rejects_tampered_persisted_workspace_metadata() {
                 "description": "resume",
                 "prompt": "continue",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
                 "workspace": {"cwd": worktree, "isolation": "git_worktree"},
             }),
@@ -2321,6 +2336,7 @@ async fn legacy_resume_cannot_adopt_an_isolated_workspace() {
                 "description": "resume",
                 "prompt": "continue",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
                 "workspace": {"cwd": worktree, "isolation": "git_worktree"},
             }),
@@ -2478,6 +2494,7 @@ async fn subagent_model_override_resolves_its_own_provider() {
                 "description": "route",
                 "prompt": "use your model",
                 "subagent_type": "explore",
+                "background": false,
             }),
             ctx,
         )
@@ -2548,6 +2565,7 @@ async fn resumed_subagent_uses_its_persisted_model() {
                 "description": "resume",
                 "prompt": "continue",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             ctx,
@@ -2571,6 +2589,7 @@ async fn unknown_subagent_type_lists_available() {
                 "description": "x",
                 "prompt": "y",
                 "subagent_type": "nonexistent",
+                "background": false,
             }),
             ToolContext::root(std::env::temp_dir()).with_subagents(spawner_for(&store)),
         )
@@ -2604,6 +2623,7 @@ async fn task_model_override_pins_child_model_and_rejects_unknown() {
             "description": "cheap grunt work",
             "prompt": "grep things",
             "subagent_type": "explore",
+                "background": false,
             "model": model,
             "reasoning": null,
         }),
@@ -2716,6 +2736,7 @@ async fn literal_null_strings_in_optional_task_fields_spawn_as_if_omitted() {
                 "description": "new child",
                 "prompt": "work",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": "null",
                 "model": "null",
                 "reasoning": "null",
@@ -2748,6 +2769,7 @@ async fn literal_null_strings_in_optional_task_fields_spawn_as_if_omitted() {
                 "description": "null",
                 "prompt": "null",
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -2775,6 +2797,7 @@ async fn an_explicit_bad_reasoning_variant_names_the_reasoning_input() {
                 "description": "think hard",
                 "prompt": "work",
                 "subagent_type": "explore",
+                "background": false,
                 "model": "openai/gpt-5.2",
                 "reasoning": "max",
             }),
@@ -2824,6 +2847,7 @@ async fn an_inherited_bad_reasoning_variant_still_says_inherited() {
                 "description": "inherit",
                 "prompt": "work",
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -2864,6 +2888,7 @@ async fn a_task_result_names_the_session_the_model_can_resume() {
                 "description": "survey",
                 "prompt": "look around",
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -2888,6 +2913,7 @@ async fn a_task_result_names_the_session_the_model_can_resume() {
                 "description": "follow up",
                 "prompt": "one more question",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             task_context(&parent_id),
@@ -3019,6 +3045,7 @@ async fn the_review_agent_runs_a_shell_and_has_no_edit_tool() {
                 "description": "review",
                 "prompt": "review the change and run the tests",
                 "subagent_type": "review",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -3089,6 +3116,7 @@ async fn the_tasks_tool_lists_this_session_s_children_with_their_last_word() {
                 "description": "survey",
                 "prompt": "look around the repository",
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -3267,6 +3295,7 @@ async fn a_foreground_task_is_running_while_it_runs() {
                 "description": "read the config",
                 "prompt": "read it",
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -3348,7 +3377,7 @@ async fn a_child_inherits_none_of_the_parents_reads() {
                 prompt: "change alpha to beta".into(),
                 subagent_type: "explore".into(),
                 task_id: None,
-                background: None,
+                background: Some(false),
                 workspace: None,
                 model: None,
                 reasoning: None,
@@ -3474,6 +3503,7 @@ async fn a_message_to_a_finished_task_resumes_it_with_context_intact() {
                 "description": "survey",
                 "prompt": "look around the repository",
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -3532,6 +3562,7 @@ async fn a_message_to_another_sessions_task_is_refused() {
                 "description": "survey",
                 "prompt": "look around",
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -3584,6 +3615,7 @@ async fn a_message_to_a_foreground_task_of_this_turn_names_background_tasks() {
                 "description": "survey",
                 "prompt": "look around",
                 "subagent_type": "explore",
+                "background": false,
             }),
             context,
         )

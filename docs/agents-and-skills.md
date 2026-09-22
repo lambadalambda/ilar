@@ -36,20 +36,30 @@ no lease to protect. A reviewer that must run things is a serialized agent by
 construction: that is `review`, whose allowlist is `read`, `glob`, `grep`,
 `webfetch`, `bash` and `secrets` — no `write`, no `edit`, no delegation, no
 `sudo`. The allowlist is coordination, not a boundary (a shell can write);
-the prompt says to report and not fix. It runs in the foreground like `build`,
-since its findings are what the delegating agent waits on before committing,
-and a detached serialized reviewer would hold the checkout against that
-agent's own edits; `background: true` still detaches it. Tasks can
+the prompt says to report and not fix. Like every task it runs in the
+background unless told otherwise — and a review whose findings gate the next
+step should be told otherwise, with `background: false`: detached, it holds
+the checkout while it runs, which delays the delegating agent's commit behind
+its lease but does not put the findings before that commit; they arrive as a
+follow-up turn, after whatever the agent did meanwhile. Tasks can
 override the child's model per invocation (`model` and `reasoning` on the task
 tool — e.g. a cheap flash model for mechanical sweeps); omitted, the child uses
 the agent definition's model or inherits the parent's model and reasoning. The
 read-only `models` tool lists available models with context windows, pricing,
 and reasoning variants so agents can choose informedly.
 
-A task's `background` follows its agent when the call omits it: a read-only
-agent's task (`explore`) detaches and reports back as a completion
-notification, leaving the parent free to keep working, while a mutable agent's
-task runs inside the turn. An explicit value always wins. A *defaulted*
+Every task runs in the background when the call omits `background`: the call
+returns at once, the parent keeps working, and the task's completion arrives as
+a notification that starts a follow-up turn. That is what lets a message you
+send mid-flight reach the parent — a foreground task blocks the parent's
+conversation until it returns — and lets `task_message` reach the task. A
+mutable task without a workspace of its own still runs in the parent's checkout
+and holds its write lease until it reports, so the parent's own `edit`, `write`
+and `bash` calls wait behind it (`read`, `glob` and `grep` do not); the task's
+started text says so, and a worktree of its own lifts it. `background: false`
+is for the call that is blocked on the answer for the turn's very next step,
+the way Codex's `wait_agent` is — a review before a commit being the usual
+one. A *defaulted*
 background task that cannot detach because background capacity is full runs in
 the foreground instead of failing, and its result says so; an explicit
 `background: true` there is still an error.

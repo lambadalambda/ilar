@@ -429,10 +429,71 @@ async fn a_read_only_task_defaults_to_background() {
     spawner.shutdown().await;
 }
 
-/// The other half of the default: a mutable task's edits are wanted
-/// before the next call reads them, so it stays in the turn.
+/// A mutable task detaches too — a foreground task blocks the parent's
+/// conversation, and nothing about editing needs that — and, running
+/// in the parent's own checkout, says it holds the write lease so the
+/// parent reads rather than edits meanwhile.
 #[tokio::test]
-async fn a_mutable_task_defaults_to_the_foreground() {
+async fn a_mutable_task_defaults_to_the_background_and_names_the_held_checkout() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner_for_workspace(
+        Arc::new(DelayedText {
+            text: "mutable answer",
+            delay_ms: 100,
+        }),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        std::env::temp_dir(),
+    );
+    let mut notifications = spawner.subscribe();
+    let task = task_tool(spawner.clone());
+    let ctx = background_tool_context(session_id.clone(), spawner.clone(), &std::env::temp_dir());
+
+    let started = std::time::Instant::now();
+    let output = task
+        .run(
+            serde_json::json!({
+                "description": "apply the fix",
+                "prompt": "edit things",
+                "subagent_type": "explore",
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("Deferred background task started"),
+        "{}",
+        output.content
+    );
+    assert!(
+        output.content.contains("holds this checkout's write lease"),
+        "{}",
+        output.content
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(80),
+        "defaulted mutable task blocked the caller: {:?}",
+        started.elapsed()
+    );
+    let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("notification within timeout")
+        .expect("notification present");
+    assert_eq!(notification.parent_session_id, session_id);
+    assert!(
+        notification.text.contains("mutable answer"),
+        "{}",
+        notification.text
+    );
+    spawner.shutdown().await;
+}
+
+/// An explicit false is the caller saying it is blocked on the answer,
+/// and it gets it in the result — for a mutable agent as for any.
+#[tokio::test]
+async fn an_explicit_foreground_beats_the_default_for_a_mutable_agent() {
     let (store, session_id) = temp_store();
     let spawner = spawner_for_workspace(
         Arc::new(DelayedText {
@@ -452,6 +513,7 @@ async fn a_mutable_task_defaults_to_the_foreground() {
                 "description": "apply the fix",
                 "prompt": "edit things",
                 "subagent_type": "explore",
+                "background": false,
             }),
             ctx,
         )
@@ -513,9 +575,11 @@ async fn an_explicit_foreground_beats_the_read_only_default() {
     );
 }
 
-/// And an explicit true beats the mutable default.
+/// And an explicit true says the same thing the default does — with
+/// one difference this test does not reach: at full capacity the
+/// default demotes to the foreground, an explicit true errors.
 #[tokio::test]
-async fn an_explicit_background_beats_the_mutable_default() {
+async fn an_explicit_background_is_the_default_said_out_loud() {
     let (store, session_id) = temp_store();
     let spawner = spawner_for_workspace(
         Arc::new(DelayedText {
@@ -831,6 +895,7 @@ async fn a_session_above_two_repositories_runs_mutable_worktree_tasks_concurrent
             "description": "mutate alpha",
             "prompt": "edit alpha",
             "subagent_type": "explore",
+            "background": false,
             "workspace": {"cwd": alpha_task.clone(), "isolation": "git_worktree"},
         }),
         ctx.clone(),
@@ -840,6 +905,7 @@ async fn a_session_above_two_repositories_runs_mutable_worktree_tasks_concurrent
             "description": "mutate beta",
             "prompt": "edit beta",
             "subagent_type": "explore",
+            "background": false,
             "workspace": {"cwd": beta_task.clone(), "isolation": "git_worktree"},
         }),
         ctx,
@@ -1374,6 +1440,7 @@ async fn a_child_inherits_the_paths_its_parent_withholds() {
                 "description": "look something up",
                 "prompt": "find out what you can",
                 "subagent_type": "explore",
+                "background": false,
             }),
             ctx,
         )
@@ -1461,7 +1528,8 @@ async fn foreground_child_rejects_detached_workspace_mutation() {
             serde_json::json!({
                 "description": "nested background Bash",
                 "prompt": "launch benchmark",
-                "subagent_type": "explore"
+                "subagent_type": "explore",
+                "background": false,
             }),
             ctx,
         )
@@ -3938,6 +4006,7 @@ async fn a_message_the_child_never_saw_lands_in_its_next_resume() {
                 "description": "follow up",
                 "prompt": "continue where you left off",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             task_context(&parent_id, spawner.clone()),
@@ -4196,6 +4265,7 @@ async fn a_message_refused_by_the_concurrency_limit_waits_for_the_next_resume() 
                 "description": "original survey",
                 "prompt": "original scope",
                 "subagent_type": "explore",
+                "background": false,
             }),
             task_context(&parent_id, spawner.clone()),
         )
@@ -4272,6 +4342,7 @@ async fn a_message_refused_by_the_concurrency_limit_waits_for_the_next_resume() 
                 "description": "follow up",
                 "prompt": "continue where you left off",
                 "subagent_type": "explore",
+                "background": false,
                 "task_id": child_id,
             }),
             task_context(&parent_id, spawner.clone()),
