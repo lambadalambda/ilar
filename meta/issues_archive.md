@@ -463,3 +463,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Small frictions of a long session](issues/small-frictions-of-a-long-session.md)
 - [x] [Console commands for the chat](issues/console-commands-for-the-chat.md)
 - [x] [A bot in a group answers when spoken to](issues/a-bot-in-a-group-answers-when-spoken-to.md)
+- [x] [Subagents run in the background by default](issues/subagents-run-in-the-background-by-default.md)

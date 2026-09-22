@@ -1,5 +1,31 @@
 # DEVLOG
 
+## 2026-09-22 — Every task in the background
+
+A task's `background` used to follow its agent: read-only detached,
+mutable ran in the turn. The mutable case was the one that hurt, and
+the reason is a chain of three facts. A message the person sends
+while a turn runs is a steer. A steer is read at the turn's next step.
+A turn blocked inside a foreground `task` call has no next step until
+the task returns. So anything the person thought of mid-flight waited
+for the whole subagent, and `task_message` could not reach a
+foreground task at all.
+
+Codex and Claude Code both run subagents only in the background —
+Codex's `wait_agent` is a separate tool its guidance says to call
+"very sparingly" — and now so does ilar. Omitted means detached, for
+every agent; `false` means "I am blocked on this". The ordering
+guarantee the foreground default was protecting survives untouched: a
+mutable task in the parent's checkout holds the write lease, so its
+edits land before the parent's next ones. What changed is that the
+parent's *conversation* no longer stops with its edits, and the task's
+started text says which it is holding.
+
+The tests told the truth about the old default: forty-odd of them
+called the task tool and waited on the result in the turn without
+ever passing `background`. They say `false` now, which is what they
+always meant.
+
 ## 2026-09-21 — In a group, only when spoken to
 
 A bot in a Telegram group with privacy mode off sees everything, and
