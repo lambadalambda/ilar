@@ -106,6 +106,10 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [A Telegram channel](issues/a-telegram-channel.md) — *built and tested; awaiting a live run with a bot token*
 
+## Milestone 25 — The step does not wait
+
+- [ ] [A slow call does not hold the step](issues/a-slow-call-does-not-hold-the-step.md) — *measured: bash rarely holds a step; the holds are task_message resumes and the write lease — needs a decision*
+
 ## Milestone 22 — Memory in every directory
 
 (all complete — see issues_archive.md)
