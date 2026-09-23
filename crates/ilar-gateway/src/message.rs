@@ -133,9 +133,9 @@ impl MessageTool {
         let home_channel = &sending.channel;
         let description = format!(
             "Send a message to the person you are talking to, on {home_channel}. Call it for \
-             every reply you want them to see; your final text is delivered only if you sent \
-             nothing this turn. Another known chat is named with channel (the channel's name, \
-             {home_channel}) and chat (its id). Files travel in media, by path: the text alone \
+             every reply you want them to see. Once you have sent one, your final text is shown \
+             to nobody: do not repeat or sum up the reply there. Another known chat is named \
+             with channel (the channel's name, {home_channel}) and chat (its id). Files travel in media, by path: the text alone \
              attaches nothing, and a text that speaks of an attachment without one is refused \
              unless no_attachment is true. A text that names pictures carries them in the same \
              call: never the caption first and the files in a call after.{}",
@@ -274,7 +274,11 @@ impl Tool for MessageTool {
                 return ToolOutput::error("message: the gateway is not delivering");
             }
             sent.fetch_add(1, Ordering::AcqRel);
-            ToolOutput::text(format!("sent to {key}"))
+            ToolOutput::text(format!(
+                "sent to {key}. They have it; your final text is not shown to anyone this turn, \
+                 so anything more they need goes in a message, and the turn ends with a word or \
+                 nothing."
+            ))
         })
     }
 }
@@ -452,9 +456,18 @@ mod tests {
         let board =
             crate::status::StatusBoard::new(Default::default(), false, std::time::Duration::ZERO);
         let (tool, _out) = tool_on(dir.path(), "fake:12", board);
-        let out = send(&tool, dir.path(), serde_json::json!({"text": "here you go"})).await;
+        let out = send(
+            &tool,
+            dir.path(),
+            serde_json::json!({"text": "here you go"}),
+        )
+        .await;
         assert!(!out.is_error, "{}", out.content);
-        assert!(out.content.starts_with("sent to fake:12"), "{}", out.content);
+        assert!(
+            out.content.starts_with("sent to fake:12"),
+            "{}",
+            out.content
+        );
         assert!(
             out.content.contains("your final text is not shown"),
             "{}",
