@@ -321,6 +321,7 @@ impl Driver {
                     channel: channel.to_string(),
                     chat_id: chat_id.to_string(),
                     session_id: runtime.session_id.clone(),
+                    room: !private,
                 },
                 crate::grants::GRANT_TIMEOUT,
                 cancel.child_token(),

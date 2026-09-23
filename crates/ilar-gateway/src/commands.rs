@@ -97,6 +97,11 @@ impl Command {
             }
             Command::Unlock(_) => ("unlock", password),
             Command::Password(_) => ("password", password),
+            // For good, and for every chat: not a room member's call.
+            Command::Grant {
+                grant: ilar::secrets::Grant::Always,
+                ..
+            } => ("grant always", "allows a secret for every chat from now on"),
             _ => return None,
         })
     }

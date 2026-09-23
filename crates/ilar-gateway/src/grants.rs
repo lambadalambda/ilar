@@ -331,6 +331,16 @@ pub fn password_ask_text(prompt: &PasswordPrompt, asker: &Asker) -> String {
     )
 }
 
+/// What a room is told when sudo wants a password there.
+pub fn room_password_text(prompt: &PasswordPrompt, asker: &Asker) -> String {
+    format!(
+        "🔑 {} needs the sudo password to run:\n\n{}\nA room is no place for a password, so \
+         that call is refused. Ask me in a private chat to run it there.",
+        asker.shown,
+        shown_command(&prompt.detail),
+    )
+}
+
 /// The seat an ask belongs to: where it is posted, and whose session
 /// it is — what tells the seat's own asks from its children's.
 #[derive(Debug, Clone)]
@@ -338,6 +348,9 @@ pub struct Home {
     pub channel: String,
     pub chat_id: String,
     pub session_id: String,
+    /// A room: sudo's password is refused there rather than asked for,
+    /// since `/password` is not taken in a room.
+    pub room: bool,
 }
 
 /// The reply path of whichever ask is in flight: the two carry
@@ -397,6 +410,7 @@ pub async fn watch(
         channel,
         chat_id,
         session_id,
+        room,
     } = home;
     loop {
         let ask = tokio::select! {
@@ -438,6 +452,15 @@ pub async fn watch(
                 )
             }
             // A password is typed, never tapped: no buttons.
+            // A room is no place for a password, and `/password` is not
+            // taken there: the call is refused on the spot, not left
+            // standing on a command nobody in the room can send.
+            Ask::Password(prompt) if room => {
+                let asker = Asker::of_password(&prompt, &session_id);
+                post(room_password_text(&prompt, &asker), Vec::new()).await;
+                Reply::Password(prompt.reply).deny();
+                continue;
+            }
             Ask::Password(prompt) => {
                 let asker = Asker::of_password(&prompt, &session_id);
                 (
@@ -564,6 +587,10 @@ mod tests {
     }
 
     fn harness(timeout: std::time::Duration) -> Harness {
+        harness_in(timeout, false)
+    }
+
+    fn harness_in(timeout: std::time::Duration, room: bool) -> Harness {
         let (prompts, receiver) = ilar::secrets::ask_channel(1);
         let slot: PendingSlot = Arc::new(Mutex::new(None));
         let (outbound_tx, outbound) = mpsc::channel(8);
@@ -576,6 +603,7 @@ mod tests {
                 channel: "deltachat".into(),
                 chat_id: "12".into(),
                 session_id: "s".into(),
+                room,
             },
             timeout,
             cancel.clone(),
@@ -617,6 +645,28 @@ mod tests {
         let (reply, _receive) = oneshot::channel();
         h.prompts.send(Ask::Grant(prompt(reply))).await.unwrap();
         assert!(h.asked().await.text.contains("/grant"));
+        h.cancel.cancel();
+    }
+
+    /// `/password` is not taken in a room, so a room's sudo ask is not
+    /// left standing on it: the call is refused at once, and the room
+    /// is told where it can run.
+    #[tokio::test]
+    async fn a_room_is_not_asked_for_a_password() {
+        let mut h = harness_in(GRANT_TIMEOUT, true);
+        let (reply, receive) = oneshot::channel();
+        h.prompts
+            .send(Ask::Password(password_prompt(reply)))
+            .await
+            .unwrap();
+        let posted = h.outbound.recv().await.unwrap();
+        assert!(posted.text.contains("private chat"), "{}", posted.text);
+        assert!(!posted.text.contains("/password"), "{}", posted.text);
+        assert_eq!(receive.await.unwrap(), None, "the call was not refused");
+        assert!(
+            h.slot.lock().unwrap().is_none(),
+            "nothing waits for an answer"
+        );
         h.cancel.cancel();
     }
 

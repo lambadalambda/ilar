@@ -43,7 +43,7 @@ pub struct GatewayConfig {
     /// reply comes. Off with `status = false`.
     #[serde(default = "default_true")]
     pub status: bool,
-    /// One line to the last active chat when the gateway starts and
+    /// One line to the last private chat when the gateway starts and
     /// when it stops, so a restart is visible where the person looks.
     #[serde(default = "default_true")]
     pub announce: bool,

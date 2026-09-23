@@ -1915,6 +1915,7 @@ async fn a_skill_the_assistant_writes_is_listed_next_session_and_loads_now() {
         dir.path(),
         vec![
             calls(
+        "/grant always",
                 "skill_manage",
                 serde_json::json!({
                     "action": "create", "name": "deploy-check",

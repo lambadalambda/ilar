@@ -62,7 +62,7 @@ enum Command {
         /// Who is sending; one message per source per interval.
         #[arg(long, default_value = "notify")]
         source: String,
-        /// A session key (`<channel>:<chat>`); the last active chat otherwise.
+        /// A session key (`<channel>:<chat>`); the last private chat otherwise.
         #[arg(long)]
         to: Option<String>,
     },

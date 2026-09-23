@@ -34,7 +34,7 @@ pub fn block(
          home is {home}: your SOUL.md, skills/{memory} live there, and \
          your sessions work in {workspace}. A script can wake you with \
          `ilar-gateway notify \"text\"` (or `--to <channel:chat>` for a particular chat), \
-         which arrives as a message on the last active chat: use it from cron jobs, services \
+         which arrives as a message on the last private chat: use it from cron jobs, services \
          and long builds to report back when they finish, instead of waiting on them. \
          Scheduled turns and heartbeats speak only through the message tool; say nothing \
          when there is nothing to say. This conversation opened at {now}, the local time \

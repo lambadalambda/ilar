@@ -1126,7 +1126,12 @@ impl Gateway {
             // goes under it as it does under any unknown command — the
             // guess may be wrong, and then the list is what was wanted.
             Command::MistypedSecret { typed, meant } => format!(
-                "No command /{typed} — did you mean /{meant}? Nothing ran; send it again. {}\n{}",
+                "No command /{typed} — did you mean /{meant}? Nothing ran; send it again{}. {}\n{}",
+                if message.is_group {
+                    " in a private chat with me"
+                } else {
+                    ""
+                },
                 maybe_password_advice(taken_back),
                 commands::HELP
             ),
@@ -1154,6 +1159,7 @@ impl Gateway {
                     Ok(Outcome::Compacted {
                         summary,
                         context_tokens,
+            // In a room "send it again" would be refused: say where to.
                     }) => {
                         log(&format!("{key}: compacted from the chat"));
                         self.note_handover(&seat, &summary);
@@ -1794,9 +1800,8 @@ impl Gateway {
         }
     }
 
-    /// The chat the gateway announces itself to: the last one heard
-    /// from, if any.
-    /// The person's last private chat: a start, a stop and a script's
+    /// The chat the gateway announces itself to: the person's last
+    /// private chat, if any. A start, a stop and a script's
     /// report are the person's business, not a room's.
     fn announce_target(&self) -> Option<(String, String)> {
         let routes = self.routes.snapshot();
@@ -1804,7 +1809,7 @@ impl Gateway {
         split_key(last).map(|(channel, chat)| (channel.to_string(), chat.to_string()))
     }
 
-    /// One line to the last active chat once the gateway is up. The
+    /// One line to the last private chat once the gateway is up. The
     /// channel may still be connecting, so a failed send is tried
     /// again for a while; a chat that has never written gets nothing.
     async fn announce_start(&self) {
@@ -1911,7 +1916,7 @@ impl Gateway {
     }
 
     /// Messages left by `ilar-gateway notify`: rate-limited per source,
-    /// addressed explicitly or to the last active chat.
+    /// addressed explicitly or to the last private chat.
     async fn poll_inbox(&self, inbound: &mpsc::Sender<Inbound>) {
         let waiting = match inbox::drain(&self.inbox_dir) {
             Ok(waiting) => waiting,

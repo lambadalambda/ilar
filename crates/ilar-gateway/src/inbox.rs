@@ -26,7 +26,7 @@ pub fn is_script(sender_id: &str) -> bool {
 pub struct InboxMessage {
     pub source: String,
     pub text: String,
-    /// A session key; the last active chat when absent.
+    /// A session key; the last private chat when absent.
     pub to: Option<String>,
 }
 
