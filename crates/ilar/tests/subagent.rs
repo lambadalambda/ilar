@@ -3515,6 +3515,7 @@ async fn a_message_to_a_finished_task_resumes_it_with_context_intact() {
             serde_json::json!({
                 "task_id": child_id,
                 "message": "one more question: which file was it?",
+                "background": false,
             }),
             task_context(&parent_id),
         )
@@ -3740,6 +3741,7 @@ async fn a_message_resumes_an_isolated_task_without_being_told_its_worktree() {
             serde_json::json!({
                 "task_id": child_id,
                 "message": "one more thing before you finish",
+                "background": false,
             }),
             ctx,
         )

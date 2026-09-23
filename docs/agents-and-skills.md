@@ -127,7 +127,11 @@ finished, and the sender never needs to know which. A running background task
 receives the message at its next step, exactly the way a steer reaches the
 root turn, and keeps its own result path; a finished task is resumed from its
 transcript with the message as its prompt, worktree and agent recovered from
-its own metadata. A message the task's turn ended before reading is not lost:
+its own metadata. That resume follows the task tool's rule: detached unless the
+call passes `background: false`, so the answer comes back as a completion
+notification rather than holding the parent's step. A message you type into a
+focused agent's view resumes it in the foreground instead, since there you are
+the one waiting for the answer. A message the task's turn ended before reading is not lost:
 it heads the prompt of that task's next resume, and the `tasks` listing shows
 it as pending until it is actually seen. In the transcript, a delivered
 message appears inside the child's rows at the moment the child saw it. On wide terminals an `agents` panel in the sidebar shows what

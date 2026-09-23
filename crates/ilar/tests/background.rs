@@ -495,6 +495,82 @@ async fn a_mutable_task_defaults_to_the_background_and_names_the_held_checkout()
     spawner.shutdown().await;
 }
 
+/// A follow-up to a finished task is a task like any other: it resumes
+/// detached unless told otherwise, and the answer comes back as the
+/// completion notification instead of holding the parent's step.
+#[tokio::test]
+async fn a_message_to_a_finished_task_resumes_it_detached() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner_for_workspace(
+        Arc::new(DelayedText {
+            text: "resumed answer",
+            // Under the spawner's 400 ms stall watchdog, and well over
+            // the bound the detached call is held to below.
+            delay_ms: 300,
+        }),
+        &store,
+        AgentWorkspaceMode::Mutable,
+        std::env::temp_dir(),
+    );
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id.clone(), spawner.clone(), &std::env::temp_dir());
+    let finished = registry
+        .get("task")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "description": "apply the fix",
+                "prompt": "edit things",
+                "subagent_type": "explore",
+                "background": false,
+            }),
+            ctx.clone(),
+        )
+        .await;
+    assert!(!finished.is_error, "{}", finished.content);
+    let child_id = finished.child_session_id().unwrap().to_string();
+
+    let started = std::time::Instant::now();
+    let output = registry
+        .get("task_message")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "task_id": child_id,
+                "message": "one more thing: the tests too",
+            }),
+            ctx,
+        )
+        .await;
+
+    assert!(!output.is_error, "{}", output.content);
+    assert!(
+        output.content.contains("Deferred background task started"),
+        "{}",
+        output.content
+    );
+    assert_eq!(output.child_session_id(), Some(child_id.as_str()));
+    assert!(
+        started.elapsed() < Duration::from_millis(150),
+        "a defaulted message held the caller for the resumed turn: {:?}",
+        started.elapsed()
+    );
+    let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("notification within timeout")
+        .expect("notification present");
+    assert_eq!(notification.parent_session_id, session_id);
+    assert!(
+        notification.text.contains("resumed answer"),
+        "{}",
+        notification.text
+    );
+    spawner.shutdown().await;
+}
+
 /// An explicit false is the caller saying it is blocked on the answer,
 /// and it gets it in the result — for a mutable agent as for any.
 #[tokio::test]

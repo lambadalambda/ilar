@@ -1762,12 +1762,19 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
     /// The same send, saying what happened rather than telling a model
     /// about it: a UI that sent the message itself has its own words
     /// for "queued", "held" and "answered", and should not be reprinting
-    /// a paragraph addressed to the model.
+    /// a paragraph addressed to the model. A finished task resumes in
+    /// the foreground here whatever the input says: the person waits
+    /// for the answer in the UI, and a detached resume would hand it to
+    /// the parent's model as a notification instead.
     pub async fn deliver_to_task(
         self: &Arc<Self>,
         input: TaskMessageInput,
         ctx: &ToolContext,
     ) -> TaskMessage {
+        let input = TaskMessageInput {
+            background: Some(false),
+            ..input
+        };
         self.message_task_outcome(input, ctx, None).await
     }
 
@@ -1873,10 +1880,10 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
                     prompt: String::new(),
                     subagent_type: meta.agent,
                     task_id: Some(task_id.clone()),
-                    // Stated, not defaulted: this call promises to return
-                    // the task's answer, so it runs in the turn whatever
-                    // the agent's own default would have been.
-                    background: Some(false),
+                    // The task tool's rule, passed through: omitted, the
+                    // resume detaches and its answer is the completion
+                    // notification; false is the caller blocked on it.
+                    background: input.background,
                     workspace,
                     model: None,
                     reasoning: None,
@@ -3404,7 +3411,8 @@ pub enum TaskMessage {
     /// no live channel; the message waits for its next resume.
     Held { task_id: String },
     /// The task had finished, so it was resumed with the message as its
-    /// prompt: this is what came back.
+    /// prompt: this is what the resume returned — its answer, or its
+    /// started note if it detached.
     Answered {
         task_id: String,
         output: ToolOutput,
@@ -3452,6 +3460,10 @@ pub struct TaskMessageInput {
     /// again, exactly as the task tool's `task_id` does.
     #[serde(default, deserialize_with = "deserialize_optional_workspace")]
     pub workspace: Option<TaskWorkspaceInput>,
+    /// How a finished task's resume runs, with the task tool's default:
+    /// omitted, detached. A running task is steered either way.
+    #[serde(default)]
+    pub background: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3634,7 +3646,7 @@ impl Tool for TaskMessageTool {
     }
 
     fn description(&self) -> &'static str {
-        "Send a message to a task you spawned — one verb whether it is still running or already finished, and you do not need to know which. A task that is still running receives it at its next step, the way a message reaches you mid-turn, and keeps going: its answer arrives as that task's own result or completion notification, never as the output of this call. A task that has finished is resumed from its transcript with your message as its prompt, and this call returns its answer exactly as a task call does. A message a running task ended before reading is not lost: it waits and is delivered ahead of the prompt of that task's next resume, and the tasks tool shows what is still waiting. Use it to correct a background task's course, add a constraint it should have had, or ask a finished task a follow-up question with its context intact. A foreground task of the turn you are in cannot be messaged: you are blocked on its result, so it is over before you can speak again — that is what background tasks are for."
+        "Send a message to a task you spawned — one verb whether it is still running or already finished, and you do not need to know which. A task that is still running receives it at its next step, the way a message reaches you mid-turn, and keeps going: its answer arrives as that task's own result or completion notification, never as the output of this call. A task that has finished is resumed from its transcript with your message as its prompt, exactly as a task call resumes it: in the background unless you pass background false, so its answer arrives as a completion notification while you keep working. A message a running task ended before reading is not lost: it waits and is delivered ahead of the prompt of that task's next resume, and the tasks tool shows what is still waiting. Use it to correct a background task's course, add a constraint it should have had, or ask a finished task a follow-up question with its context intact. A foreground task of the turn you are in cannot be messaged: you are blocked on its result, so it is over before you can speak again — that is what background tasks are for."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -3652,7 +3664,7 @@ impl Tool for TaskMessageTool {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "description": "One message for one task. Running: it lands at that task's next step and the task keeps its own result path. Finished: it resumes the task from its transcript and this call returns what the task says.",
+            "description": "One message for one task. Running: it lands at that task's next step and the task keeps its own result path. Finished: it resumes the task from its transcript, detached unless background is false.",
             "properties": {
                 "task_id": {
                     "type": "string",
@@ -3671,6 +3683,10 @@ impl Tool for TaskMessageTool {
                     },
                     "required": ["cwd", "isolation"],
                     "additionalProperties": false
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "How a finished task's resume runs; a running task is steered either way. Omitted, it detaches, like every task: the answer arrives as a completion notification and you keep working. Pass false only when you are blocked on the answer for your very next step; this call then returns it."
                 }
             },
             "required": ["task_id", "message"]

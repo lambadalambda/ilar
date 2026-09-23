@@ -5176,6 +5176,7 @@ async fn run_app(
                                             task_id: session_id,
                                             message,
                                             workspace: None,
+                                            background: None,
                                         },
                                         &ctx,
                                     )
