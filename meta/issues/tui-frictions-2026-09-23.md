@@ -76,3 +76,25 @@ Done: the search preview's line breaks, the slash popup's stale
 selection, the help overlay's cut actions (wrapped now, up to 100
 columns), the empty pending manager's sentence, and control characters
 in the topic (core and title).
+
+## Progress (2026-09-23, second batch)
+
+Done: a keyboard way into an agent's view (Ctrl-G at the main view and
+the palette's "Focus an agent…", one `focus_agent` path with the panel
+click); Esc keeps a long one-line draft; Ctrl-F says "type to search"
+before a query; the theme picker says "current" beside the id; one
+word, "background task", in the quit warning and the switch notice;
+the abnormal-ending headline shortens like the others; the terminal
+title is saved at start and handed back at exit; `--view` has its own
+greeting and an F1 line; the compact meter says `ctx`; export and share
+files carry the session id, and a share says nothing was uploaded
+(documented in interface.md).
+
+Left, polish: the child compaction wall of text in a live nested
+timeline; `^G` vs `Ctrl-G` labels; blank palette shortcuts for
+Rewind/Compact/Context and F1 without /compact; the slash popup's 64
+columns over the model name; the search prompt `>` matching the
+selection marker; the scrollbar track against the border; ragged model
+picker columns; no reading-width cap at 200 columns; tree connectors at
+60 columns; Ctrl-R's retry mark; an empty session a killed terminal
+leaves; `· bg` on nearly every panel row.
