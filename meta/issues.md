@@ -108,7 +108,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 25 — The step does not wait
 
-(all complete — see issues_archive.md)
+- [ ] [Every ending says its messages wait](issues/every-ending-says-its-messages-wait.md)
 
 ## Milestone 22 — Memory in every directory
 

@@ -1420,7 +1420,8 @@ impl SubagentSpawner {
                 parent_session_id.clone(),
                 description.clone(),
                 self.outbox_dir.clone(),
-            );
+            )
+            .for_session(session_id.clone(), self.child_steers.clone());
             let handle = tokio::spawn(async move {
                 if registered_rx.await.is_err() {
                     // Never admitted: the spawner reported the failure
@@ -2129,11 +2130,10 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
         {
             Ok(location) => location,
             Err(error) => {
-                return self.recorded_propagate(workspace_route_failure(
-                    &meta,
-                    notification,
-                    error,
-                ));
+                return self.recorded_propagate(
+                    &meta.session_id,
+                    workspace_route_failure(&meta, notification, error),
+                );
             }
         };
         let workspace = self.workspace.scoped(&workspace_location);
@@ -2153,7 +2153,10 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
         let system_prompt = match self.agent_system_prompt(agent, workspace_location.cwd()) {
             Ok(prompt) => prompt,
             Err(error) => {
-                return self.recorded_propagate(context_route_failure(&meta, notification, error));
+                return self.recorded_propagate(
+                    &meta.session_id,
+                    context_route_failure(&meta, notification, error),
+                );
             }
         };
         let lease = tokio::select! {
@@ -2178,19 +2181,21 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
         {
             Ok(location) => location,
             Err(error) => {
-                return self.recorded_propagate(workspace_route_failure(
-                    &meta,
-                    notification,
-                    error,
-                ));
+                return self.recorded_propagate(
+                    &meta.session_id,
+                    workspace_route_failure(&meta, notification, error),
+                );
             }
         };
         if leased_location != workspace_location || leased_depth != depth {
-            return self.recorded_propagate(workspace_route_failure(
-                &meta,
-                notification,
-                anyhow::anyhow!("workspace changed while waiting for its lease"),
-            ));
+            return self.recorded_propagate(
+                &meta.session_id,
+                workspace_route_failure(
+                    &meta,
+                    notification,
+                    anyhow::anyhow!("workspace changed while waiting for its lease"),
+                ),
+            );
         }
         // A routed notification is a turn of this session's own, and it
         // belongs to no call in the parent: nothing up there asked for
@@ -2338,22 +2343,46 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
             "<task-notification>\nNested task \"{}\" {status}.\n<result>\n{text}\n</result>\n</task-notification>",
             notification.description
         );
-        self.recorded_propagate(Ok(RouteOutcome::Propagate(Notification {
-            parent_session_id: grandparent_id,
-            description: notification.description,
-            text,
-            is_error,
-        })))
+        self.recorded_propagate(
+            &meta.session_id,
+            Ok(RouteOutcome::Propagate(Notification {
+                parent_session_id: grandparent_id,
+                description: notification.description,
+                text,
+                is_error,
+            })),
+        )
     }
 
     /// A propagated hop is synthesized here and exists nowhere else —
     /// unlike a task completion, no permit guard recorded it at birth.
     /// Every `Propagate` and `Replace` leaves through this, so the
     /// memory it rides to the next hop is never the only copy.
+    ///
+    /// It is also where a propagated hop says what still waits in
+    /// `hop_session`: a routed turn has no live channel, so a message
+    /// the parent sent while it ran is held for the next resume, and
+    /// this report is the parent's only word of that. Every caller runs
+    /// after the turn's hold has dropped, so the count is whole. A
+    /// replacement says nothing: its session could not be restored, so
+    /// "delivered when next resumed" is a promise the next resume may
+    /// break — and a replayed replacement must match the first byte for
+    /// byte, which a count taken twice need not.
     fn recorded_propagate(
         &self,
+        hop_session: &str,
         outcome: anyhow::Result<RouteOutcome>,
     ) -> anyhow::Result<RouteOutcome> {
+        let outcome = match outcome {
+            Ok(RouteOutcome::Propagate(notification)) => {
+                let note = hop_queued_note(self.child_steers.pending(hop_session), hop_session);
+                Ok(RouteOutcome::Propagate(with_queued_note(
+                    notification,
+                    &note,
+                )))
+            }
+            other => other,
+        };
         let propagated = match &outcome {
             Ok(RouteOutcome::Propagate(notification)) => Some(notification),
             // Recorded, never retired here: the retire of the origin is
@@ -2996,16 +3025,41 @@ impl ActivityPublisher {
 /// never started. The foreground path says the same in its result; a
 /// model told nothing reads the message as lost and sends it again.
 fn queued_note(pending: usize) -> String {
+    queued_note_to(pending, "this task")
+}
+
+/// The same line for a hop, which reports on a task it names by
+/// description while the waiting messages were sent to the session the
+/// hop ran in — "this task" would point at the wrong one.
+fn hop_queued_note(pending: usize, hop_session: &str) -> String {
+    queued_note_to(pending, &format!("task {hop_session}"))
+}
+
+fn queued_note_to(pending: usize, task: &str) -> String {
     match pending {
         0 => String::new(),
-        1 => "\n\n(A message to this task is still queued, not lost: it is delivered when the \
-              task is next resumed.)"
-            .into(),
+        1 => format!(
+            "\n\n(A message to {task} is still queued, not lost: it is delivered when that task \
+             is next resumed.)"
+        ),
         n => format!(
-            "\n\n({n} messages to this task are still queued, not lost: they are delivered when \
-             the task is next resumed.)"
+            "\n\n({n} messages to {task} are still queued, not lost: they are delivered when \
+             that task is next resumed.)"
         ),
     }
+}
+
+/// A built notification with [`queued_note`] put inside its envelope,
+/// where the parent loop unwraps it along with the rest.
+fn with_queued_note(mut notification: Notification, note: &str) -> Notification {
+    const CLOSE: &str = "\n</task-notification>";
+    if !note.is_empty() {
+        notification.text = match notification.text.strip_suffix(CLOSE) {
+            Some(body) => format!("{body}{note}{CLOSE}"),
+            None => format!("{}{note}", notification.text),
+        };
+    }
+    notification
 }
 
 /// A background task's word to its parent, in the envelope the parent
@@ -3123,8 +3177,14 @@ fn rollback_created_session(store: &SessionStore, id: &str) {
 /// differ in more than wording: a task can be resumed by id, a job
 /// cannot be resumed at all.
 enum AbnormalWork {
-    Task,
-    Job { job_id: String },
+    /// The task's session and the store its parent's messages wait in,
+    /// once known, so a death can still say what is left waiting.
+    Task {
+        session: Option<(String, ChildSteers)>,
+    },
+    Job {
+        job_id: String,
+    },
 }
 
 /// A background task's reserved place in the notification channel, as a
@@ -3167,8 +3227,17 @@ impl ReservedNotification {
             parent_session_id,
             description,
             outbox_dir,
-            work: AbnormalWork::Task,
+            work: AbnormalWork::Task { session: None },
         }
+    }
+
+    /// The same reservation, knowing its task's session: an abnormal
+    /// ending then says which of the parent's messages still wait.
+    fn for_session(mut self, session_id: String, steers: ChildSteers) -> Self {
+        self.work = AbnormalWork::Task {
+            session: Some((session_id, steers)),
+        };
+        self
     }
 
     /// The same reservation, guarding a background *job*: a tool call
@@ -3209,14 +3278,23 @@ impl Drop for ReservedNotification {
         // the task body, or a future ending on a path that forgot to
         // report. Silence here is the parent waiting forever.
         let notification = match &self.work {
-            AbnormalWork::Task => task_notification(
+            // Once the task body has taken its steer hold over as a
+            // local, the hold is declared after this guard and so has
+            // already dropped, handing back what its prompt took. Before
+            // that the count can only come up short, never long.
+            AbnormalWork::Task { session } => task_notification(
                 &self.parent_session_id,
                 &self.description,
                 &format!(
                     "Task \"{}\" ended abnormally without reporting a result — most \
                      likely a panic in the task. Its session log holds whatever it finished; \
-                     resume it with the task tool to continue, or treat it as failed.",
-                    self.description
+                     resume it with the task tool to continue, or treat it as failed.{}",
+                    self.description,
+                    queued_note(
+                        session
+                            .as_ref()
+                            .map_or(0, |(id, steers)| steers.pending(id))
+                    )
                 ),
                 true,
             ),
@@ -4186,6 +4264,36 @@ mod tests {
         );
         assert!(
             published.text.contains("ended abnormally"),
+            "{}",
+            published.text
+        );
+    }
+
+    /// A task that died still owes its waiting messages a word: the
+    /// parent was told "queued" when it sent them, and a death that says
+    /// nothing reads as having taken them along.
+    #[tokio::test]
+    async fn a_dropped_reservation_says_the_messages_that_wait() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let steers = ChildSteers::default();
+        steers.queue("child", "also check the retries".into());
+        drop(reserved(&sender, "survey the retries").for_session("child".into(), steers));
+
+        let published = receiver.recv().await.unwrap();
+        assert!(
+            published.text.contains("ended abnormally"),
+            "{}",
+            published.text
+        );
+        assert!(
+            published
+                .text
+                .contains("A message to this task is still queued"),
+            "{}",
+            published.text
+        );
+        assert!(
+            published.text.ends_with("</task-notification>"),
             "{}",
             published.text
         );

@@ -2714,6 +2714,80 @@ async fn nested_notification_runs_declared_parent_and_propagates_once() {
     assert!(format!("{:?}", child.transcript()).contains("nested result"));
 }
 
+/// A routed turn has no live channel, so a message its parent sends
+/// while it runs is held for the next resume — and the hop's report to
+/// that parent is where the parent learns it was not lost.
+#[tokio::test]
+async fn a_hop_says_a_message_sent_during_its_turn_still_waits() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    drop(
+        store
+            .create(SessionMeta {
+                session_id: child_id.clone(),
+                parent_id: Some(root_id.clone()),
+                agent: "explore".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap(),
+    );
+    let provider = PacedProvider::default();
+    let spawner = patient_spawner(Arc::new(provider.clone()), &store);
+    let router = spawner.clone();
+    let routed_to = child_id.clone();
+    let routed = tokio::spawn(async move {
+        router
+            .route_notification(
+                ilar::subagent::Notification {
+                    parent_session_id: routed_to,
+                    description: "nested".into(),
+                    text: "nested result".into(),
+                    is_error: false,
+                },
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+    });
+    provider.started.notified().await;
+
+    let held = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap()
+        .get("task_message")
+        .unwrap()
+        .run(
+            serde_json::json!({"task_id": child_id, "message": "also the tests"}),
+            task_context(&root_id, spawner.clone()),
+        )
+        .await;
+    assert!(!held.is_error, "{}", held.content);
+    assert!(held.content.contains("held"), "{}", held.content);
+
+    provider.release.notify_one();
+    let outcome = routed.await.unwrap().unwrap();
+    let ilar::subagent::RouteOutcome::Propagate(propagated) = outcome else {
+        panic!("a hop with a parent propagates");
+    };
+    assert_eq!(propagated.parent_session_id, root_id);
+    // Named, because the hop's headline is about the nested task, not
+    // the session the message went to.
+    assert!(
+        propagated
+            .text
+            .contains(&format!("A message to task {child_id} is still queued")),
+        "{}",
+        propagated.text
+    );
+    assert!(
+        propagated.text.ends_with("</task-notification>"),
+        "{}",
+        propagated.text
+    );
+    spawner.shutdown().await;
+}
+
 /// A routed notification runs a whole turn on a child session, and it
 /// belongs to no call in the parent. Replay slices a child's log by
 /// `SubagentInvocation`, so a turn that writes none is read as a
@@ -4374,7 +4448,10 @@ async fn a_detached_resume_cancelled_in_the_lease_wait_says_its_message_waits() 
     .await
     .expect("the resume queues behind the occupant");
 
-    spawner.abort_all();
+    // The resume alone: stopping the occupant too could free the lease
+    // in the same instant, and a resume that wins it starts its turn —
+    // a different ending, in which the message is delivered.
+    assert!(spawner.cancel_task(&child_id), "the resume was not running");
     let resumed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let notification = notifications.recv().await.unwrap();
@@ -4388,6 +4465,7 @@ async fn a_detached_resume_cancelled_in_the_lease_wait_says_its_message_waits() 
     assert!(resumed.text.contains("still queued"), "{}", resumed.text);
     assert!(resumed.text.contains("next resumed"), "{}", resumed.text);
 
+    spawner.abort_all();
     spawner.shutdown().await;
 }
 
