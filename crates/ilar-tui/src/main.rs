@@ -3392,11 +3392,10 @@ fn center_on_match(text: &str, needle: &str, max_chars: usize) -> String {
 }
 
 /// The terminal window's title: the session's topic once it has one.
+/// The topic alone: a tab label is where the title has to fit, and a
+/// prefix there only pushes the part worth reading off its end.
 fn terminal_title(topic: Option<&str>) -> String {
-    match topic {
-        Some(topic) => format!("ilar — {topic}"),
-        None => "ilar".into(),
-    }
+    topic.unwrap_or("ilar").into()
 }
 
 /// Best-effort OSC title update; a terminal that ignores the sequence
@@ -6278,10 +6277,7 @@ mod tests {
     #[test]
     fn the_window_title_is_the_topic_or_just_ilar() {
         assert_eq!(terminal_title(None), "ilar");
-        assert_eq!(
-            terminal_title(Some("GM1 firmware dig")),
-            "ilar — GM1 firmware dig"
-        );
+        assert_eq!(terminal_title(Some("GM1 firmware dig")), "GM1 firmware dig");
     }
 
     /// The meter must not show the whole window while compaction is

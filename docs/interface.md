@@ -326,9 +326,10 @@ opens a two-pane grep over every session you have:
 
 After a session's first completed turn, ilar names it in a few words —
 that topic appears in the transcript's title bar, the session listing,
-the search, and your terminal's window title (`ilar — GM1 firmware
-dig`) via the standard OSC escape. Sessions from before the feature
-name themselves after their next completed turn.
+the search, and your terminal's window title (`GM1 firmware dig`, just
+`ilar` until the session has a topic) via the standard OSC escape.
+Sessions from before the feature name themselves after their next
+completed turn.
 
 ## Goal mode
 
