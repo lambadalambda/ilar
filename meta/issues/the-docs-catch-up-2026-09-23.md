@@ -41,3 +41,17 @@ Docs, examples and help that drifted from the code.
 ## Notes
 
 - Source: UX sweep 2026-09-23 (docs pass). Size: M, many S.
+
+## Done (2026-09-23)
+
+`fb164e4`, `8cbdaed`, `c679a47`: a key in a sealed store is said to be
+sealed away, with the export that runs without the password; no
+provider names `ilar --help`; `ilar --help` wraps (clap `wrap_help`)
+and `--view` is one line; `exec --json` ends a failed run with an
+`error` event and every event type is documented; `/context` says
+what it takes (k and M in 1024s). ilar.toml.example: no literal `~`,
+valid TOML, the missing keys; the agent example names a model that
+exists; gateway.md: what the home holds and what it does not, pipx,
+0.3.0, `run`; configuration.md: strict reading, F2, the serve
+variables; agents-and-skills.md: TOML frontmatter; serve.md: its real
+size.

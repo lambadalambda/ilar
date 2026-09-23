@@ -54,3 +54,13 @@ the session id; an empty `allow_from` stops the start.
 Still open: a command in the startup backlog (`/unlock` right after
 `/restart`) is skipped before the secret check; the first-run docs for
 finding one's Telegram id.
+
+## Done (2026-09-23)
+
+`694f68b`, `4539016`: a command in the restart backlog does not run,
+but a password in it is taken back out — or, where Telegram will not
+delete it, the chat is told to, every time — and each chat hears once
+that nothing ran; our own `@name` is stripped first and other bots'
+commands are left alone. The backlog now lasts past a full batch of
+100 updates. First-run steps for finding one's Telegram id are in
+docs/gateway.md.

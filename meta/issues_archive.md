@@ -476,3 +476,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A foreground task does not wait out a detached one](issues/a-foreground-task-does-not-wait-out-a-detached-one.md)
 - [x] [The fixed prefix sheds weight](issues/the-fixed-prefix-sheds-weight.md)
 - [x] [Words a model acts on, again](issues/words-a-model-acts-on-again.md)
+- [x] [The chat front door](issues/the-chat-front-door.md)
+- [x] [Chat words, 2026-09-23](issues/chat-words-2026-09-23.md) — /revoke and forum topics struck
+- [x] [The docs catch up, 2026-09-23](issues/the-docs-catch-up-2026-09-23.md)
