@@ -3126,13 +3126,34 @@ fn unknown_subtask_agent(agent: &str, available: &[&str]) -> Option<String> {
 /// superset of the ones this turn owns — so the notice never names a
 /// number, only the rule.
 fn abort_notice(detached: usize) -> String {
+    format!("aborting current operation…{}", detached_clause(detached))
+}
+
+/// What an abort of the turn owes the detached tasks it started, said
+/// the same way whoever aborted — Esc or the stall watchdog.
+fn detached_clause(detached: usize) -> &'static str {
     if detached == 0 {
-        "aborting current operation…".into()
+        ""
     } else {
-        "aborting current operation… — detached tasks this turn started stop with it; \
-         their results are held until your next message"
-            .into()
+        " — detached tasks this turn started stop with it; their results are held until \
+         your next message"
     }
+}
+
+/// Every abort of a turn pauses notifications when something is
+/// detached: the dying children's completions would otherwise start a
+/// fresh turn nobody asked for, moments after the turn was stopped.
+/// Only then, though — a pause with nothing to hold is an unexplained
+/// one, and it would sit on every other session's mail until the next
+/// completed turn. Returns the count, for the notice.
+fn pause_for_detached(app: &App, notifications_paused: &mut bool) -> usize {
+    let detached = app
+        .background_running
+        .saturating_sub(app.deliveries_in_flight);
+    if detached > 0 {
+        *notifications_paused = true;
+    }
+    detached
 }
 
 /// The reasons a session switch (resume, fork, rewind) must wait; the
@@ -3616,8 +3637,12 @@ async fn run_app(
             }
             decide::StallVerdict::Abort { silent_secs } => {
                 if let Some(cancel) = &cancel {
+                    // The same token Esc cancels, so the same detached
+                    // tasks die with it and are owed the same pause.
+                    let detached = pause_for_detached(app, &mut notifications_paused);
                     let message = format!(
-                        "nothing from the provider for {silent_secs}s — the turn was stopped"
+                        "nothing from the provider for {silent_secs}s — the turn was stopped{}",
+                        detached_clause(detached)
                     );
                     // The transcript keeps the why; the TurnDone the
                     // cancellation produces closes the rows and posts
@@ -5358,21 +5383,7 @@ async fn run_app(
                         } else if let Some(cancel) = cancel.as_ref().filter(|_| app.busy) {
                             cancel.cancel();
                             app.status = "aborting…".into();
-                            let detached = app
-                                .background_running
-                                .saturating_sub(app.deliveries_in_flight);
-                            // Cancel-all pauses notifications for
-                            // exactly this reason: the dying children's
-                            // completions would otherwise start a fresh
-                            // turn nobody asked for, moments after the
-                            // user said stop. Only when something is
-                            // actually detached, though — a pause with
-                            // nothing to hold is an unexplained one,
-                            // and it would sit on every other session's
-                            // mail until the next completed turn.
-                            if detached > 0 {
-                                notifications_paused = true;
-                            }
+                            let detached = pause_for_detached(app, &mut notifications_paused);
                             app.set_notice(abort_notice(detached), NoticeLevel::Warning);
                             app.set_activity(Activity::Aborting);
                         } else {
@@ -6086,6 +6097,25 @@ mod tests {
         );
         assert!(with_tasks.contains("detached task"), "{with_tasks}");
         assert!(with_tasks.contains("held"), "{with_tasks}");
+    }
+
+    /// Esc and the stall watchdog cancel the same token, so both owe the
+    /// dying tasks the same pause; a delivery in flight is not one of
+    /// them, and nothing detached means nothing to hold.
+    #[test]
+    fn every_abort_pauses_for_the_detached_tasks_and_only_for_them() {
+        let mut app = App::new();
+        let mut paused = false;
+        app.background_running = 1;
+        app.deliveries_in_flight = 1;
+        assert_eq!(pause_for_detached(&app, &mut paused), 0);
+        assert!(!paused, "a delivery alone is nothing to hold");
+
+        app.background_running = 3;
+        assert_eq!(pause_for_detached(&app, &mut paused), 2);
+        assert!(paused);
+        assert!(detached_clause(2).contains("held until your next message"));
+        assert_eq!(detached_clause(0), "");
     }
 
     /// The switch carries the stash, so the pops still work on the
