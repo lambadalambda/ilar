@@ -112,7 +112,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 27 — Catalog
 
-- [ ] [GPT-6 Sol and Luna](issues/gpt-6-sol-and-luna.md)
+(all complete — see issues_archive.md)
 
 ## Milestone 26 — Sweep 2026-09-23
 

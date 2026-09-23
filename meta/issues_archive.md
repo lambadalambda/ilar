@@ -472,3 +472,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Every ending says its messages wait](issues/every-ending-says-its-messages-wait.md)
 - [x] [Background by default: the loose ends](issues/background-by-default-loose-ends.md) — TUI look of refusals left, noted inside
 - [x] [A room is not the person's console](issues/a-room-is-not-the-persons-console.md)
+- [x] [GPT-6 Sol and Luna](issues/gpt-6-sol-and-luna.md)

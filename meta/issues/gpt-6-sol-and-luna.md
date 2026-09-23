@@ -41,3 +41,11 @@ Four existing GPT prices also moved after `CATALOG_UPDATED`
   (priority tier) and `pro` modes — none is in the API docs.
 - Source: user request, 2026-09-23; data from models.dev, OpenAI's
   model pages and Codex's `models.json`. Size: S.
+
+## Done (2026-09-23)
+
+Rows, prices and the four corrections in `5e9469b`. Live on Zen:
+`ilar exec --model opencode/gpt-6-luna` and `…/gpt-6-sol` both
+answered "ok" on tenco. Not probed: the `openai` rows over an API key
+or a ChatGPT login — no key on the boxes, and the Mac's binary
+predates the rows. The two open decisions in the notes stand.

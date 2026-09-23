@@ -1,5 +1,31 @@
 # DEVLOG
 
+## 2026-09-23 — The sweep after background by default
+
+Five read-only passes over the whole surface (TUI by code and live on
+tenco at four sizes, the gateway chats, the model's words, first run
+and docs) found about ninety things. The worst were this week's own:
+`ilar exec` ran one turn and cancelled at exit the background work
+every task now is, so a headless run that delegated lost it; a
+background task's row was ✓ before its child had done anything and
+stayed ✓ when it failed; and a refused call behind a held checkout
+sent the model to `tasks`, which does not list bash jobs.
+
+`exec` now carries completions as follow-up turns until nothing runs,
+through one delivery step the gateway shares (`deliver_step`). The
+review caught that a job finishing during the first turn is in the
+outbox *and* on the live channel, and would have run twice: the
+outbox is read before the first turn now, and a follow-up already in
+the log is only retired. The checkout's scheduler learned to name its
+holder, so the refusal says "held by the background job "bash: cargo
+test"" instead of "another job".
+
+In the gateway, rooms had inherited every command: any member could
+`/restart`, `/unlock` or approve the person's memory, and a bare
+`/approve` — one tap on Telegram — approved all of it. A grant
+button stayed live after its ask ended and answered whatever was open
+next. Each button now names its ask.
+
 ## 2026-09-23 — The step stops waiting
 
 Unreal Agent (unreallabs.ai, 2026-09-22) claims up to 40% savings over
