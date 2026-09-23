@@ -1,4 +1,5 @@
-//! `ilar exec`: one turn, no terminal.
+//! `ilar exec`: one prompt, no terminal — its turn, and the follow-up
+//! turns the work it sent to the background owes it.
 //!
 //! The split is the whole design. The answer goes to stdout and
 //! nothing else does, so `ilar exec "…" > answer.md` is a useful
@@ -7,12 +8,16 @@
 //! and a human reading along does not. `--json` swaps that for the
 //! loop's own events as NDJSON, and then stdout carries events only.
 
+use std::collections::VecDeque;
 use std::io::Write;
+use std::sync::Arc;
 
 use anyhow::Result;
 use ilar::agent::{LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, TurnOutcome, loop_event_channel};
+use ilar::delivery::{Parcel, Step, deliver_step};
 use ilar::provider::ProviderResolver;
 use ilar::session::SessionStore;
+use ilar::subagent::SubagentSpawner;
 use ilar::tools::{ToolContext, ToolRegistry};
 use tokio_util::sync::CancellationToken;
 
@@ -360,10 +365,14 @@ fn show(
     emit(line, out, err)
 }
 
-/// Run one turn to completion, printing as it goes. `notices` are the
-/// settings this launch could not honour; they belong to the run, not
-/// to the turn, but they print here so that one place decides what
-/// reaches the two streams and in what order.
+/// Run one turn to completion, printing as it goes.
+///
+/// `opening` is `Some` for the run's first turn, carrying the settings
+/// this launch could not honour: they belong to the run, not to the
+/// turn, but they print here so that one place decides what reaches the
+/// two streams and in what order, and the session is named on that
+/// turn's first event. A follow-up turn passes `None` and says neither
+/// again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn exec_turn(
     resolver: &dyn ProviderResolver,
@@ -375,7 +384,7 @@ pub(crate) async fn exec_turn(
     loop_config: LoopConfig,
     tool_ctx: ToolContext,
     format: ExecFormat,
-    notices: &[String],
+    opening: Option<&[String]>,
     cancel: CancellationToken,
     out: &mut dyn Write,
     err: &mut dyn Write,
@@ -383,7 +392,7 @@ pub(crate) async fn exec_turn(
     // Ahead of everything the turn says, and said even when the turn
     // never starts: a setting that was not honoured may be the reason
     // it did not.
-    emit_notices(notices, format, out, err)?;
+    emit_notices(opening.unwrap_or_default(), format, out, err)?;
     let (events, mut rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
     let turn = ilar::agent::run_turn(
         resolver,
@@ -401,7 +410,7 @@ pub(crate) async fn exec_turn(
     );
     tokio::pin!(turn);
     let mut wrote_answer = false;
-    let mut named = false;
+    let mut named = opening.is_none();
     let mut arguments = ilar::agent::ToolArguments::default();
     let outcome = loop {
         tokio::select! {
@@ -430,6 +439,177 @@ pub(crate) async fn exec_turn(
     // exit code, which a person running it by hand never sees.
     if let Some(line) = outcome_line(&outcome, session_id, format) {
         emit(line, out, err)?;
+    }
+    outcome
+}
+
+/// How long a run keeps trying a busy target once nothing else is
+/// running: a target still busy after that is not going to free up for
+/// a process that is about to exit, and the outbox keeps the result.
+const IDLE_HOLD_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The prompt's turn, then every follow-up its background work owes.
+///
+/// A task or a background job reports as a notification that starts a
+/// follow-up turn, and the model was told so. A headless run that
+/// stopped after the first turn cancelled that work at exit and left a
+/// script reading "I started it". So the run carries every completion
+/// to the root — a follow-up turn — or down the tree, the same step the
+/// gateway's seats take, until nothing is running and nothing is owed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn exec_run(
+    resolver: &dyn ProviderResolver,
+    registry: &ToolRegistry,
+    store: &SessionStore,
+    session_id: &str,
+    prompt: &str,
+    system_prompt: Option<&str>,
+    loop_config: LoopConfig,
+    tool_ctx: ToolContext,
+    format: ExecFormat,
+    notices: &[String],
+    spawner: &Arc<SubagentSpawner>,
+    outbox_dir: &std::path::Path,
+    cancel: CancellationToken,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<TurnOutcome> {
+    // Read before the first turn, as a gateway seat does at its start:
+    // what the outbox holds now is an earlier process's. Anything this
+    // run's own work reports is recorded there *and* sent live, so a
+    // read after the first turn would carry it twice.
+    let mut queue: VecDeque<Parcel> = ilar::outbox::pending(store, outbox_dir, session_id)
+        .into_iter()
+        .map(Parcel::fresh)
+        .collect();
+    let mut live = spawner.subscribe();
+    let mut outcome = exec_turn(
+        resolver,
+        registry,
+        store,
+        session_id,
+        prompt,
+        system_prompt,
+        loop_config.clone(),
+        tool_ctx.clone(),
+        format,
+        Some(notices),
+        cancel.clone(),
+        out,
+        err,
+    )
+    .await;
+    let mut held: Vec<Parcel> = Vec::new();
+    // A fixed deadline, not a fresh sleep per pass: a steady trickle of
+    // live notifications must not starve the held ones.
+    let mut retry_at: Option<tokio::time::Instant> = None;
+    let mut idle_since: Option<tokio::time::Instant> = None;
+    // Only after a turn that ended cleanly: one that failed, was
+    // stopped or hit the step cap has said its last word, and the exit
+    // cancels the rest.
+    while matches!(outcome, Ok(TurnOutcome::Completed)) && !cancel.is_cancelled() {
+        while let Ok(notification) = live.try_recv() {
+            queue.push_back(Parcel::fresh(notification));
+        }
+        if let Some(parcel) = queue.pop_front() {
+            match deliver_step(
+                spawner,
+                outbox_dir,
+                session_id,
+                parcel,
+                cancel.child_token(),
+            )
+            .await
+            {
+                // Already in the log — an earlier process delivered it
+                // and died before the retire: settle it, say nothing.
+                Step::FollowUp { retire, .. }
+                    if ilar::delivery::is_delivered(store, session_id, &retire.text) =>
+                {
+                    ilar::outbox::retire(outbox_dir, &retire);
+                }
+                Step::FollowUp { prompt, retire } => {
+                    outcome = exec_turn(
+                        resolver,
+                        registry,
+                        store,
+                        session_id,
+                        &prompt,
+                        system_prompt,
+                        loop_config.clone(),
+                        tool_ctx.clone(),
+                        format,
+                        None,
+                        cancel.clone(),
+                        out,
+                        err,
+                    )
+                    .await;
+                    // Settled once the log holds it, whatever the turn
+                    // did after taking it.
+                    if ilar::delivery::is_delivered(store, session_id, &retire.text) {
+                        ilar::outbox::retire(outbox_dir, &retire);
+                    }
+                }
+                Step::Again(parcel) => queue.push_back(parcel),
+                Step::Hold(parcel) => {
+                    held.push(parcel);
+                    retry_at.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + ilar::delivery::HOLD_RETRY
+                    });
+                }
+                Step::Delivered => {}
+            }
+            continue;
+        }
+        // Counted before the last look at the channel: a task sends its
+        // notification before it stops counting as running, so nothing
+        // can finish in between unseen.
+        let running = spawner.running_background();
+        if let Ok(notification) = live.try_recv() {
+            queue.push_back(Parcel::fresh(notification));
+            continue;
+        }
+        if running > 0 {
+            idle_since = None;
+        } else if held.is_empty() {
+            break;
+        } else if idle_since
+            .get_or_insert_with(tokio::time::Instant::now)
+            .elapsed()
+            > IDLE_HOLD_WAIT
+        {
+            let text = format!(
+                "{} could not be delivered before exit and wait{} in the outbox for the next \
+                 `ilar --continue`",
+                ilar::text::plural(held.len(), "background result"),
+                if held.len() == 1 { "s" } else { "" }
+            );
+            emit(notice_line(&text, format), out, err)?;
+            break;
+        }
+        let retry = async {
+            match retry_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            next = live.recv() => match next {
+                Some(notification) => queue.push_back(Parcel::fresh(notification)),
+                None => break,
+            },
+            () = retry => {
+                retry_at = None;
+                queue.extend(held.drain(..));
+            }
+        }
+    }
+    // Stopped while waiting on the work, after a turn that completed:
+    // the run was interrupted all the same, and a script must hear so.
+    if cancel.is_cancelled() && matches!(outcome, Ok(TurnOutcome::Completed)) {
+        outcome = Ok(TurnOutcome::Aborted);
     }
     outcome
 }
@@ -500,7 +680,7 @@ mod tests {
             loop_config,
             ToolContext::root(std::env::temp_dir()),
             format,
-            notices,
+            Some(notices),
             CancellationToken::new(),
             &mut out,
             &mut err,
@@ -869,7 +1049,7 @@ mod tests {
             LoopConfig::default(),
             ToolContext::root(std::env::temp_dir()),
             ExecFormat::Text,
-            &[],
+            Some(&[]),
             CancellationToken::new(),
             &mut out,
             &mut err,
@@ -942,5 +1122,161 @@ mod tests {
         );
         // Not a word of it on the answer's stream.
         assert!(!ran.out.contains("stopped"), "{:?}", ran.out);
+    }
+
+    /// A session wired for background work: a spawner with an outbox, as
+    /// every runtime has, and the tools and context that reach it.
+    struct Rig {
+        store: SessionStore,
+        session_id: String,
+        spawner: Arc<SubagentSpawner>,
+        registry: ToolRegistry,
+        tool_ctx: ToolContext,
+        outbox: tempfile::TempDir,
+        _dirs: (tempfile::TempDir, tempfile::TempDir),
+    }
+
+    fn rig() -> Rig {
+        use ilar::config::ProjectInstructions;
+        use ilar::provider::FixedProviderResolver;
+
+        let (store, session_id, dir) = temp_store();
+        let cwd = tempfile::tempdir().unwrap();
+        let outbox = tempfile::tempdir().unwrap();
+        let spawner = Arc::new(
+            SubagentSpawner::new(
+                Arc::new(FixedProviderResolver::new(Arc::new(MockProvider::new(
+                    vec![],
+                )))),
+                store.clone(),
+                Vec::new(),
+                cwd.path().to_path_buf(),
+                0,
+                10,
+                3,
+                ProjectInstructions::Include,
+            )
+            .with_outbox_dir(outbox.path().to_path_buf()),
+        );
+        let registry = ToolRegistry::builtin()
+            .with_subagents(spawner.clone())
+            .unwrap();
+        let mut tool_ctx =
+            ToolContext::root(cwd.path().to_path_buf()).with_subagents(spawner.clone());
+        tool_ctx.session_id = session_id.clone();
+        Rig {
+            store,
+            session_id,
+            spawner,
+            registry,
+            tool_ctx,
+            outbox,
+            _dirs: (dir, cwd),
+        }
+    }
+
+    /// A turn that sends `command` to the background, then says so.
+    fn backgrounds(command: &str) -> Vec<ProviderEvent> {
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "call-1".into(),
+                name: "bash".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "call-1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": command, "run_in_background": true}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+        ]
+    }
+
+    async fn run_in(
+        rig: &Rig,
+        provider: &MockProvider,
+        cancel: CancellationToken,
+    ) -> (Result<TurnOutcome>, String, String) {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = exec_run(
+            provider,
+            &rig.registry,
+            &rig.store,
+            &rig.session_id,
+            "run it in the background",
+            Some("system"),
+            LoopConfig::default(),
+            rig.tool_ctx.clone(),
+            ExecFormat::Text,
+            &[],
+            &rig.spawner,
+            rig.outbox.path(),
+            cancel,
+            &mut out,
+            &mut err,
+        )
+        .await;
+        (
+            outcome,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
+    }
+
+    /// Work the turn sent to the background comes back before the run
+    /// ends: its completion is a follow-up turn, and the answer a
+    /// script reads is the one written after it — not "I started it"
+    /// followed by the work cancelled at exit. A job that finishes
+    /// during the first turn is recorded in the outbox *and* sent live,
+    /// and still gets one follow-up, not two.
+    #[tokio::test]
+    async fn a_run_answers_after_the_work_it_sent_to_the_background() {
+        let rig = rig();
+        let provider = MockProvider::new(vec![
+            backgrounds("printf job-output"),
+            answer("started it"),
+            answer("the job said job-output"),
+        ]);
+
+        let (outcome, out, err) = run_in(&rig, &provider, CancellationToken::new()).await;
+
+        assert!(matches!(outcome, Ok(TurnOutcome::Completed)), "{outcome:?}");
+        assert!(out.ends_with("the job said job-output\n"), "{out:?}");
+        assert_eq!(
+            err.lines()
+                .filter(|line| line.starts_with("session "))
+                .count(),
+            1,
+            "the session is named once per run: {err:?}"
+        );
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 3, "one follow-up turn, exactly");
+        let follow_up = format!("{:?}", requests[2].messages.last());
+        assert!(follow_up.contains("job-output"), "{follow_up}");
+        assert_eq!(rig.spawner.running_background(), 0);
+    }
+
+    /// Stopped while it waits on the work, after a turn that completed:
+    /// the run was interrupted all the same, and its exit code says so.
+    #[tokio::test]
+    async fn a_run_stopped_while_it_waits_is_an_interrupted_run() {
+        let rig = rig();
+        let provider = MockProvider::new(vec![backgrounds("sleep 30"), answer("started it")]);
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            stop.cancel();
+        });
+
+        let (outcome, _, _) = run_in(&rig, &provider, cancel).await;
+
+        assert!(matches!(outcome, Ok(TurnOutcome::Aborted)), "{outcome:?}");
+        assert_eq!(exit_code(&outcome), 130);
+        rig.spawner.shutdown().await;
     }
 }

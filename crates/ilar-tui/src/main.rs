@@ -1264,7 +1264,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
     // complete silence, which reads as the setting not existing. They
     // print inside `exec_turn` so that one place decides the order of
     // everything that reaches the two streams.
-    let outcome = exec::exec_turn(
+    let outcome = exec::exec_run(
         runtime.resolver.as_ref(),
         &runtime.registry,
         &runtime.store,
@@ -1275,6 +1275,8 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
         runtime.tool_ctx.clone(),
         format,
         &notices,
+        &runtime.spawner,
+        &ilar::runtime::outbox_dir(config),
         cancel,
         &mut out,
         &mut err,
@@ -1282,7 +1284,8 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
     .await;
 
     // Nothing outlives the process: a background task with no session
-    // to notify, or a service nobody will stop, is a leak.
+    // to notify, or a service nobody will stop, is a leak. The run
+    // waited for its work unless a turn failed or was stopped.
     let background = runtime.spawner.running_background();
     if background > 0 {
         let _ = writeln!(err, "{background} background task(s) cancelled at exit");

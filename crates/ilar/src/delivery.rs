@@ -210,6 +210,92 @@ fn climb(parcel: Parcel, propagated: Notification, retire: Option<Notification>)
     }
 }
 
+/// How long a held delivery waits before its next attempt, for every
+/// driver.
+pub const HOLD_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What one delivery attempt leaves a driver of `root` to do.
+#[derive(Debug)]
+pub enum Step {
+    /// Run a turn on the root with `prompt`, then retire `retire` from
+    /// the outbox once the root's log holds it.
+    FollowUp {
+        prompt: String,
+        retire: Notification,
+    },
+    /// Try this one again now: it climbed to the next session.
+    Again(Parcel),
+    /// Try this one again later: its target was busy.
+    Hold(Parcel),
+    /// Nothing left to do.
+    Delivered,
+}
+
+/// Carry one parcel as far as it goes: a completion for `root` becomes
+/// a follow-up turn, one for a child is routed down the tree, and one
+/// nothing can take is salvaged into a follow-up turn rather than lost.
+/// Every driver of a root session — the gateway's seats, `ilar exec` —
+/// goes through this, so none of them can forget a retire.
+pub async fn deliver_step(
+    spawner: &std::sync::Arc<crate::subagent::SubagentSpawner>,
+    outbox_dir: &std::path::Path,
+    root: &str,
+    parcel: Parcel,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Step {
+    let notification = parcel.notification().clone();
+    if notification.parent_session_id == root {
+        return Step::FollowUp {
+            prompt: notification.text.clone(),
+            retire: notification,
+        };
+    }
+    let routed = spawner.route_notification(notification, cancel).await;
+    match disposition(routed, parcel) {
+        Disposition::Delivered => Step::Delivered,
+        Disposition::Propagate { parcel, retire } => {
+            // Set only for a climb that replaced what it was carrying;
+            // without the retire the next start adopts that entry and
+            // fails it again.
+            if let Some(origin) = retire {
+                crate::outbox::retire(outbox_dir, &origin);
+            }
+            Step::Again(parcel)
+        }
+        Disposition::Hold(parcel) => Step::Hold(parcel),
+        Disposition::Exhausted {
+            notification,
+            retire,
+        } => {
+            // The origin a replacing hop superseded on the way here is
+            // owed its retire too; the follow-up retires the stranded
+            // hop itself once the root holds it.
+            if let Some(origin) = retire {
+                crate::outbox::retire(outbox_dir, &origin);
+            }
+            salvaged(notification, "no session left to climb to")
+        }
+        Disposition::Salvage {
+            notification,
+            error,
+        } => salvaged(notification, &error),
+    }
+}
+
+/// The delivery of last resort: the child's report goes to the root as
+/// an error prompt, and the stranded entry rides along to be retired
+/// once that prompt is in the log.
+fn salvaged(stranded: Notification, reason: &str) -> Step {
+    let prompt = format!(
+        "<task-notification>\nTask \"{}\" finished but its result could not be delivered to the session that asked for it ({reason}). Its report:\n\n{}\n</task-notification>",
+        stranded.description, stranded.text
+    );
+    Step::FollowUp {
+        prompt,
+        retire: stranded,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -259,8 +259,17 @@ both drivers resolve the same runtime — and the session is a real one:
 checkpointed, resumable, and listed in the TUI's picker afterwards.
 Exit codes: 0 completed, 2 hit the iteration limit, 130 aborted, 1
 failed. The `question` tool is not attached, since nobody is there to
-answer; a model that asks is told so immediately. Background tasks and
-services do not outlive the process.
+answer; a model that asks is told so immediately.
+
+A run waits for the work it sent to the background: each task or job
+that reports starts a follow-up turn, exactly as in the TUI, and the
+run ends once nothing is running and nothing is owed. So stdout carries
+every turn's answer, the last one last — "I started the review", then
+the answer written after it. A turn that fails, is stopped or hits the
+iteration limit ends the run there, and whatever is still running is
+cancelled at exit; stopping the run while it waits exits 130. A result
+whose target stays busy is left in the outbox for the next `--continue`,
+and the run says so. Services never outlive the process.
 
 Every run names its session as the turn starts — `session <id>` on
 stderr, or `{"type":"session","id":"…"}` under `--json`, ahead of every

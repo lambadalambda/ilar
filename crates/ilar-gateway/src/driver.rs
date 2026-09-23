@@ -15,7 +15,7 @@ use ilar::agent::{
     loop_event_channel, steer_channel,
 };
 use ilar::config::Config;
-use ilar::delivery::{Disposition, Parcel, disposition};
+use ilar::delivery::{Parcel, Step, deliver_step};
 use ilar::memory::MemoryStore;
 use ilar::provider::ProviderResolver;
 use ilar::runtime::{RuntimeOptions, RuntimePlan, SessionRuntime};
@@ -1129,53 +1129,31 @@ async fn watch_notifications(
     let mut retry_at: Option<tokio::time::Instant> = None;
     loop {
         while let Some(parcel) = queue.pop_front() {
-            let notification = parcel.notification().clone();
-            if notification.parent_session_id == session_id {
-                let follow_up = FollowUp {
-                    session_key: key.clone(),
-                    prompt: notification.text.clone(),
-                    retire: notification,
-                };
-                if follow_ups.send(follow_up).await.is_err() {
-                    return;
-                }
-                continue;
-            }
-            let routed = spawner
-                .route_notification(notification, cancel.child_token())
-                .await;
-            match disposition(routed, parcel) {
-                Disposition::Delivered => {}
-                Disposition::Propagate { parcel, retire } => {
-                    // Set only for a climb that replaced what it was
-                    // carrying; without the retire the next start
-                    // adopts that entry and fails it again. See
-                    // `Disposition::Propagate`.
-                    if let Some(origin) = retire {
-                        ilar::outbox::retire(&outbox_dir, &origin);
+            match deliver_step(
+                &spawner,
+                &outbox_dir,
+                &session_id,
+                parcel,
+                cancel.child_token(),
+            )
+            .await
+            {
+                Step::FollowUp { prompt, retire } => {
+                    let follow_up = FollowUp {
+                        session_key: key.clone(),
+                        prompt,
+                        retire,
+                    };
+                    if follow_ups.send(follow_up).await.is_err() {
+                        return;
                     }
-                    queue.push_back(parcel);
                 }
-                Disposition::Hold(parcel) => {
+                Step::Again(parcel) => queue.push_back(parcel),
+                Step::Hold(parcel) => {
                     held.push(parcel);
                     retry_at.get_or_insert_with(|| tokio::time::Instant::now() + HOLD_RETRY);
                 }
-                Disposition::Exhausted {
-                    notification: stranded,
-                    retire,
-                } => {
-                    // The origin a replacing hop superseded on the way
-                    // here is owed its retire too; `salvage` retires
-                    // the stranded hop itself once the chat holds it.
-                    if let Some(origin) = retire {
-                        ilar::outbox::retire(&outbox_dir, &origin);
-                    }
-                    salvage(&follow_ups, &key, stranded, "no session left to climb to").await;
-                }
-                Disposition::Salvage {
-                    notification,
-                    error,
-                } => salvage(&follow_ups, &key, notification, &error).await,
+                Step::Delivered => {}
             }
         }
         let retry = async {
@@ -1198,33 +1176,10 @@ async fn watch_notifications(
     }
 }
 
-/// How long a held delivery waits before the next attempt.
-pub const HOLD_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+pub use ilar::delivery::HOLD_RETRY;
 
 /// How long `close` waits for the turn it cancelled to wind down.
 pub const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// The delivery of last resort: the child's report goes to the chat's
-/// own session as an error prompt. The stranded outbox entry rides
-/// along and is retired only once that prompt is in the log.
-async fn salvage(
-    follow_ups: &mpsc::Sender<FollowUp>,
-    key: &str,
-    stranded: Notification,
-    reason: &str,
-) {
-    let prompt = format!(
-        "<task-notification>\nTask \"{}\" finished but its result could not be delivered to the session that asked for it ({reason}). Its report:\n\n{}\n</task-notification>",
-        stranded.description, stranded.text
-    );
-    let _ = follow_ups
-        .send(FollowUp {
-            session_key: key.to_string(),
-            prompt,
-            retire: stranded,
-        })
-        .await;
-}
 
 pub fn log(message: &str) {
     eprintln!("{} {message}", chrono::Local::now().format("%H:%M:%S"));
