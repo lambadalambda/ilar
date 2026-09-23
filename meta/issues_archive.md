@@ -473,3 +473,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Background by default: the loose ends](issues/background-by-default-loose-ends.md) — TUI look of refusals left, noted inside
 - [x] [A room is not the person's console](issues/a-room-is-not-the-persons-console.md)
 - [x] [GPT-6 Sol and Luna](issues/gpt-6-sol-and-luna.md)
+- [x] [A foreground task does not wait out a detached one](issues/a-foreground-task-does-not-wait-out-a-detached-one.md)
