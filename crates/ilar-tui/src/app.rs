@@ -2119,12 +2119,7 @@ impl App {
         // last event did — the point where it is longest is the worst
         // possible moment to throw the rendered rows away.
         let mut touched = None;
-        let ending = match &result {
-            Ok(TurnOutcome::Completed) => "done",
-            Ok(TurnOutcome::Aborted) => "aborted",
-            Ok(TurnOutcome::MaxIterations) => "stopped",
-            Err(_) => "failed",
-        };
+        let ending = ilar::agent::turn_finish(&result).word();
         match result {
             Err(error) => {
                 // Closes the open rows and marks the whole transcript.

@@ -774,6 +774,23 @@ fn restored_session_invocation_view_in(
                 lines.push(Line_::System(memory_recall_display(ids.len())));
             }
             ilar::session::SessionEvent::Compaction { .. } => {}
+            // The root's footer, as the live view drew it — less what
+            // was still running then, which the log does not keep. A
+            // task's turns stay unmarked inside its row.
+            ilar::session::SessionEvent::TurnFinished {
+                ending,
+                worked_ms,
+                ts,
+                ..
+            } if !nested => {
+                lines.push(Line_::System(crate::transcript::turn_footer(
+                    std::time::Duration::from_millis(*worked_ms),
+                    ending.word(),
+                    ts.with_timezone(&chrono::Local),
+                    chrono::Local::now(),
+                    0,
+                )));
+            }
             ilar::session::SessionEvent::TurnFinished { .. } => {}
         }
     }
@@ -2870,6 +2887,52 @@ mod tests {
         assert!(
             !format!("{:?}", offer.lines).contains("ask 0\""),
             "not the beginning"
+        );
+    }
+
+    /// A resumed session says when each turn finished, as the live view
+    /// did, from what the turn recorded — never from a guess at where
+    /// it began.
+    #[test]
+    fn a_replayed_turn_leaves_the_footer_the_live_one_did() {
+        use chrono::TimeZone as _;
+        use ilar::session::{SessionEvent, TurnFinish};
+
+        // Another day, so the footer names it.
+        let at = chrono::Utc.with_ymd_and_hms(2026, 1, 2, 12, 0, 0).unwrap();
+        let user = || SessionEvent::UserMessage {
+            id: new_id(),
+            text: "go".into(),
+            images: Vec::new(),
+            ts: at,
+        };
+        let finished = |ending, worked_ms| SessionEvent::TurnFinished {
+            id: new_id(),
+            ending,
+            worked_ms,
+            ts: at,
+        };
+        let events = [
+            user(),
+            finished(TurnFinish::Done, 217_000),
+            user(),
+            finished(TurnFinish::Aborted, 4_000),
+        ];
+
+        let footers: Vec<String> = replayed_lines(&events)
+            .into_iter()
+            .filter_map(|line| match line {
+                Line_::System(text) if text.starts_with("worked ") => Some(text),
+                _ => None,
+            })
+            .collect();
+        let when = at.with_timezone(&chrono::Local).format("%b %-d %H:%M");
+        assert_eq!(
+            footers,
+            vec![
+                format!("worked 3m 37s · done {when}"),
+                format!("worked 4s · aborted {when}"),
+            ]
         );
     }
 }

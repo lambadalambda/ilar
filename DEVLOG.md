@@ -1,5 +1,22 @@
 # DEVLOG
 
+## 2026-09-23 — Each turn says when it finished
+
+After each turn the transcript has a muted footer, as Claude Code
+does: `worked 3m 37s · done 13:51 · 1 background task still
+running`. The live one is timed from `TurnStarted`. Replay first
+guessed turn edges from the log and was wrong for a common case: a
+root abort mid-tool leaves no mark, so the next prompt reads like a
+steer and its footer said "worked 41m". Ctrl-R resumes and mid-stream
+step retries went wrong too. So a started turn now writes
+`TurnFinished { ending, worked_ms }` as its last event, and replay
+draws exactly that. The exception is a turn aborted with a question
+open: the log refuses anything after an unanswered call. Old logs get no footers. The still-running count
+is not kept, so replayed footers leave it out.
+
+A new event type means an older ilar refuses the log ("written by a
+newer ilar?"), as with `TurnEnded`. Install everywhere at once.
+
 ## 2026-09-23 — The sweep after background by default
 
 Five read-only passes over the whole surface (TUI by code and live on
