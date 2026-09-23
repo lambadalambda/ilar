@@ -115,8 +115,9 @@ const UNLOCK_HINT: &str =
 
 /// What `ilar exec` says instead: it has nobody to prompt, by design,
 /// and the store stays sealed for the whole run.
-const EXEC_UNLOCK_HINT: &str = "ilar exec never asks for the master password; run ilar at a \
-                                terminal, or unseal the store with: ilar secret decrypt";
+const EXEC_UNLOCK_HINT: &str = "ilar exec never asks for the master password: export the key's \
+                                variable for this run, run ilar at a terminal, or unseal the \
+                                store with: ilar secret decrypt";
 
 /// The master password is asked for by the call that first needs it, in
 /// a prompt of its own — see [`ilar::secrets::Secrets::unlock_if_locked`]
@@ -303,10 +304,7 @@ struct Args {
     #[arg(long)]
     session: Option<String>,
 
-    /// Open a session read-only: its transcript, followed live, with
-    /// no writer lease taken — the way to look at a gateway chat.
-    /// Nothing about the session is decided here, so the flags that
-    /// would decide one are refused rather than ignored
+    /// Watch a session read-only, followed live (a gateway chat, say)
     #[arg(long, conflicts_with_all = [
         "session",
         "continue_last",
@@ -882,7 +880,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "context",
-        "override the context window this session assumes (32k…1M, default)",
+        "override the context window this session assumes (128k, 1M, 200000, or default)",
     ),
 ];
 const MAX_GOAL_ROUNDS: u32 = 25;
@@ -1300,6 +1298,15 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
 
     if let Err(error) = &outcome {
         let _ = writeln!(err, "error: {error:#}");
+        // A stream a script reads line by line must not simply stop:
+        // under --json the failure is an event like the rest.
+        if args.json {
+            let _ = writeln!(
+                out,
+                "{}",
+                serde_json::json!({"type": "error", "message": format!("{error:#}")})
+            );
+        }
     }
     Ok(exec::exit_code(&outcome))
 }
