@@ -39,3 +39,19 @@ model already chose not to wait for.
 - A foreground `task` (`background: false`) that finds the checkout
   held still waits: the model said it is blocked on that result.
 - Source: measurement, 2026-09-23. Size: S.
+
+## Done (2026-09-23)
+
+The executor refuses a mutating call whose lease is taken, unless a
+mutating sibling of the same step is running — which no built-in tool
+can be today, so in practice every held checkout is refused. The
+refusal does not promise a notification: the review found one holder
+that sends none, a task the person resumed from its own view, which
+runs in the foreground outside the executor. It says what may hold the
+checkout, that a background job's completion arrives as a
+notification, and to end the turn rather than retry.
+
+Left as they are, from the review: a `background: false` task or
+`task_message` behind a detached holder still waits (the caller said it
+is blocked), and a detached resume that fails before its turn starts
+does not say its message is still queued.

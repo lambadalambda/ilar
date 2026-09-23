@@ -464,3 +464,6 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Console commands for the chat](issues/console-commands-for-the-chat.md)
 - [x] [A bot in a group answers when spoken to](issues/a-bot-in-a-group-answers-when-spoken-to.md)
 - [x] [Subagents run in the background by default](issues/subagents-run-in-the-background-by-default.md)
+- [x] [A slow call does not hold the step](issues/a-slow-call-does-not-hold-the-step.md) — measured: bash alone rarely holds; the two below were the holds
+- [x] [A message to a finished task runs detached](issues/a-message-to-a-finished-task-runs-detached.md)
+- [x] [A held checkout answers at once](issues/a-held-checkout-answers-at-once.md)

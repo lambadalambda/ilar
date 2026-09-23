@@ -1,5 +1,36 @@
 # DEVLOG
 
+## 2026-09-23 — The step stops waiting
+
+Unreal Agent (unreallabs.ai, 2026-09-22) claims up to 40% savings over
+Codex by making every tool call asynchronous: a placeholder result at
+once, the model woken per completion. The 40% is against a leaderboard
+row with no token data; against their own Codex runs it is 16–28%, and
+their tokens per turn match Pi's, so the saving is fewer turns with no
+ablation behind the cause. Their placeholder is a second
+`function_call_output` for one call id, which their own footnote says
+some non-OpenAI providers reject — not something our wires can carry.
+
+The question worth asking was whether a slow call holds our steps, so
+the session logs answered it: 2,833 sessions, 142,564 tool steps. Bash
+on its own barely does — in sessions that never delegated, 185 of
+50,635 steps took 30 s or more, 2% of active time, and only seven had
+a fast call beside the slow one. The holds were all on the subagent
+side: foreground tasks (gone since yesterday), `task_message` resuming
+a finished task in the turn (median 43 s), and the parent's bash, edit
+and write waiting on a detached child's write lease — `git status`
+held for ten minutes. Every one of the 354 messages the person sent
+right after a step of a minute or more was in a session that
+delegated.
+
+So the fix went where the time was. A message to a finished task
+resumes it detached, like any task. And a mutating call that finds its
+checkout held by something outside its own step is refused at once,
+naming the job's notification as the moment to retry: inside one step
+bash, edit and write are barriers, so a holder that is not a sibling
+is detached, and waiting for it was waiting for something the model
+had already chosen not to wait for.
+
 ## 2026-09-22 — Every task in the background
 
 A task's `background` used to follow its agent: read-only detached,

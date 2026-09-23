@@ -82,3 +82,10 @@ all in sessions that delegated.
 Also seen: 237 steps (12 h) where the model slept to poll something
 outside ilar — a remote job over ssh, a `nohup` log. That is the
 model's choice, and detaching would not remove it.
+
+## Done (2026-09-23)
+
+Not built as filed: the measurement showed auto-detaching bash would
+buy about 2% of active time. The two holds it did find were fixed as
+[[a-message-to-a-finished-task-runs-detached]] and
+[[a-held-checkout-answers-at-once]].

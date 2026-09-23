@@ -30,3 +30,11 @@ is the one path that still does not.
 ## Notes
 
 - Source: measurement, 2026-09-23. Size: S.
+
+## Done (2026-09-23)
+
+`task_message` takes the task tool's optional `background`, passed
+straight to the resume, so omitted means detached and the started note
+is the call's result. The TUI's focus view forces a foreground resume:
+the person is the one waiting there. The two resume tests that read
+the answer inline say `background: false`; a new one pins the default.
