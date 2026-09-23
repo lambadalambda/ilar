@@ -664,8 +664,9 @@ impl Driver {
         &self,
         seat: &Seat,
         answer: crate::grants::Answer,
+        ask: Option<&str>,
     ) -> Result<String, &'static str> {
-        crate::grants::answer(&seat.grants, answer)
+        crate::grants::answer_to(&seat.grants, answer, ask)
     }
 
     /// Steers the last turn on the seat never delivered.

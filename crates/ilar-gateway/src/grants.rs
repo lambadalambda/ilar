@@ -34,6 +34,9 @@ pub enum Answer {
 
 /// The ask the chat has not answered yet.
 pub struct PendingGrant {
+    /// Which ask this is, as its buttons carry it: a tap on an ask that
+    /// is over must not answer the next one.
+    pub id: String,
     pub secret: String,
     pub asker: Asker,
     /// This is sudo's password ask, not a grant ask: `/password` answers
@@ -124,13 +127,35 @@ pub fn no_answer(secret: &str, asker: &Asker) -> String {
 /// was answered; the ask then stands, so the right command still
 /// reaches it.
 pub fn answer(slot: &PendingSlot, answer: Answer) -> Result<String, &'static str> {
+    answer_to(slot, answer, None)
+}
+
+/// What a tapped button says: the same answer, for the ask named by
+/// `ask`. A keyboard stays under an ask after it is over, and a bare
+/// `/grant always` from yesterday's message would otherwise answer
+/// whatever is open now — another secret, for good.
+pub const STALE_BUTTON: &str = "That button belongs to an ask that is over; nothing was decided.";
+
+/// [`answer`] for one ask in particular, when the answer names it.
+pub fn answer_to(
+    slot: &PendingSlot,
+    answer: Answer,
+    ask: Option<&str>,
+) -> Result<String, &'static str> {
     // One guard for the whole decision: an ask the command cannot
     // answer is left where it is rather than taken out and put back,
     // which could drop an ask that arrived in between.
     let mut held = slot.lock().unwrap();
     let Some(pending) = held.as_ref() else {
-        return Err("Nothing is waiting for a grant.");
+        return Err(if ask.is_some() {
+            STALE_BUTTON
+        } else {
+            "Nothing is waiting for a grant."
+        });
     };
+    if ask.is_some_and(|ask| ask != pending.id) {
+        return Err(STALE_BUTTON);
+    }
     // The wrong command for the ask in flight: say which question is
     // waiting, and leave it waiting.
     match (pending.password, &answer) {
@@ -240,14 +265,16 @@ pub fn waiting(slot: &PendingSlot) -> Option<String> {
 }
 
 /// The four answers to a grant ask, for a channel with buttons. The
-/// text names them too; these are the same commands, one tap each.
-pub fn grant_buttons() -> Vec<crate::bus::Button> {
+/// text names them too; these are the same commands, one tap each,
+/// naming the ask they answer (`#id`) so a tap on an old message
+/// cannot answer a newer one.
+pub fn grant_buttons(ask: &str) -> Vec<crate::bus::Button> {
     use crate::bus::Button;
     vec![
-        Button::new("Once", "/grant"),
-        Button::new("This session", "/grant session"),
-        Button::new("Always", "/grant always"),
-        Button::new("Deny", "/deny"),
+        Button::new("Once", &format!("/grant #{ask}")),
+        Button::new("This session", &format!("/grant session #{ask}")),
+        Button::new("Always", &format!("/grant always #{ask}")),
+        Button::new("Deny", &format!("/deny #{ask}")),
     ]
 }
 
@@ -397,12 +424,13 @@ pub async fn watch(
         };
         // Each ask, told apart once: the chat's text, what the slot
         // says it takes, and where the answer goes.
+        let id = ilar::session::new_id()[..6].to_string();
         let (text, buttons, pending_secret, password, asker, mut reply) = match ask {
             Ask::Grant(prompt) => {
                 let asker = Asker::of(&prompt, &session_id);
                 (
                     ask_text(&prompt, &asker),
-                    grant_buttons(),
+                    grant_buttons(&id),
                     prompt.secret,
                     false,
                     asker,
@@ -430,14 +458,17 @@ pub async fn watch(
                 continue;
             }
         };
-        post(text, buttons).await;
+        // In the slot before it is in the chat: an answer that comes
+        // back faster than the send returns has an ask to find.
         let (answer_tx, answer_rx) = oneshot::channel();
         *slot.lock().unwrap() = Some(PendingGrant {
+            id,
             secret: pending_secret.clone(),
             asker: asker.clone(),
             password,
             answer: answer_tx,
         });
+        post(text, buttons).await;
         tokio::select! {
             answer = answer_rx => {
                 // The command took the slot and decided; the tool gets
@@ -589,6 +620,43 @@ mod tests {
         h.cancel.cancel();
     }
 
+    /// The keyboard stays under an ask once it is over, and a tap on it
+    /// sends the button's command. Naming the ask is what keeps
+    /// yesterday's "Always" from granting today's secret for good; a
+    /// typed answer names none and answers whatever is open.
+    #[tokio::test]
+    async fn a_tap_on_an_ask_that_is_over_answers_nothing() {
+        let mut h = harness(GRANT_TIMEOUT);
+        let (reply, receive) = oneshot::channel();
+        h.prompts.send(Ask::Grant(prompt(reply))).await.unwrap();
+        h.asked().await;
+        let first = h.slot.lock().unwrap().as_ref().unwrap().id.clone();
+        answer(&h.slot, Answer::No).unwrap();
+        assert_eq!(receive.await.unwrap(), None);
+
+        let (reply, receive) = oneshot::channel();
+        h.prompts.send(Ask::Grant(prompt(reply))).await.unwrap();
+        h.asked().await;
+        let second = h.slot.lock().unwrap().as_ref().unwrap().id.clone();
+        assert_ne!(first, second);
+        assert_eq!(
+            answer_to(&h.slot, Answer::Grant(Grant::Always), Some(&first)),
+            Err(STALE_BUTTON)
+        );
+        assert!(
+            h.slot.lock().unwrap().is_some(),
+            "the open ask still stands"
+        );
+        answer_to(&h.slot, Answer::Grant(Grant::Once), Some(&second)).unwrap();
+        assert_eq!(receive.await.unwrap(), Some(Grant::Once));
+        // With nothing open, a tap still says what it was.
+        assert_eq!(
+            answer_to(&h.slot, Answer::No, Some(&second)),
+            Err(STALE_BUTTON)
+        );
+        h.cancel.cancel();
+    }
+
     #[tokio::test]
     async fn the_ask_is_posted_and_the_chats_answer_reaches_the_tool() {
         let mut h = harness(GRANT_TIMEOUT);
@@ -599,8 +667,10 @@ mod tests {
             (posted.channel.as_str(), posted.chat_id.as_str()),
             ("deltachat", "12")
         );
-        // The four answers ride as buttons for a channel that has them.
-        assert_eq!(posted.buttons, grant_buttons());
+        // The four answers ride as buttons for a channel that has them,
+        // each naming the ask it answers.
+        let ask = h.slot.lock().unwrap().as_ref().unwrap().id.clone();
+        assert_eq!(posted.buttons, grant_buttons(&ask));
         assert!(
             posted
                 .buttons

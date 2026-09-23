@@ -774,15 +774,16 @@ impl Gateway {
 
     /// `/grant`, `/password` or `/deny`: the ask standing on this
     /// chat's seat gets the answer, and the chat hears what was decided.
-    fn answer_ask(&self, key: &str, answer: crate::grants::Answer) -> String {
+    fn answer_ask(&self, key: &str, answer: crate::grants::Answer, ask: Option<&str>) -> String {
         match self.driver.seat_by_key(key) {
-            Some(seat) => match self.driver.answer_ask(&seat, answer) {
+            Some(seat) => match self.driver.answer_ask(&seat, answer, ask) {
                 Ok(text) => {
                     log(&format!("{key}: {text}"));
                     text
                 }
                 Err(why) => why.to_string(),
             },
+            None if ask.is_some() => crate::grants::STALE_BUTTON.to_string(),
             None => "Nothing is waiting for a grant.".to_string(),
         }
     }
@@ -1170,13 +1171,17 @@ impl Gateway {
                     }
                 }
             }
-            Command::Grant(grant) => self.answer_ask(key, crate::grants::Answer::Grant(grant)),
-            Command::Deny => self.answer_ask(key, crate::grants::Answer::No),
+            Command::Grant { grant, ask } => {
+                self.answer_ask(key, crate::grants::Answer::Grant(grant), ask.as_deref())
+            }
+            Command::Deny { ask } => {
+                self.answer_ask(key, crate::grants::Answer::No, ask.as_deref())
+            }
             Command::Password(password) => {
                 // In the chat's history the moment it was sent, right
                 // ask or wrong: taken back out above, and said either
                 // way — as `/unlock` does.
-                let verdict = self.answer_ask(key, crate::grants::Answer::Password(password));
+                let verdict = self.answer_ask(key, crate::grants::Answer::Password(password), None);
                 format!("{verdict} {}", password_advice(taken_back))
             }
             Command::Usage(usage) => usage.to_string(),

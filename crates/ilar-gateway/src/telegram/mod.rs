@@ -1535,9 +1535,12 @@ mod tests {
             keyboard(&[Button::new("Fine", "/deny"), Button::new("Too long", &long)]).unwrap();
         assert_eq!(markup["inline_keyboard"][0].as_array().unwrap().len(), 1);
         assert!(keyboard(&[]).is_none());
-        // Two to a row.
-        let four = keyboard(&crate::grants::grant_buttons()).unwrap();
-        assert_eq!(four["inline_keyboard"].as_array().unwrap().len(), 2);
+        // Two to a row, and none of them dropped for its length: the
+        // ask id fits in the callback's 64 bytes.
+        let four = keyboard(&crate::grants::grant_buttons("ab12cd")).unwrap();
+        let rows = four["inline_keyboard"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.as_array().unwrap().len() == 2));
     }
 
     #[test]
