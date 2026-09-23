@@ -1034,7 +1034,12 @@ impl Config {
                     .get(kind.name)
                     .filter(|settings| configured(settings))
                     .ok_or_else(|| {
-                        anyhow::anyhow!(missing_credential_message(model, kind, &self.keyed()))
+                        anyhow::anyhow!(missing_credential_message(
+                            model,
+                            kind,
+                            &self.keyed(),
+                            self.secrets_locked()
+                        ))
                     })?;
                 // A credential the model's access does not accept — an
                 // API-key row under `auth = "chatgpt"`, a model outside
@@ -1048,7 +1053,12 @@ impl Config {
                     offered(&self.reachable_ids(kind.name))
                 );
                 (kind.build)(self, settings).ok_or_else(|| {
-                    anyhow::anyhow!(missing_credential_message(model, kind, &self.keyed()))
+                    anyhow::anyhow!(missing_credential_message(
+                        model,
+                        kind,
+                        &self.keyed(),
+                        self.secrets_locked()
+                    ))
                 })
             }
         }
@@ -1115,6 +1125,12 @@ impl Config {
     }
 
     /// Providers this configuration has a credential for, in table order.
+    /// A sealed store this process has no password for: a key kept in
+    /// it reads here as no key at all, and the error has to say which.
+    fn secrets_locked(&self) -> bool {
+        crate::secrets::SecretStore::open(self.state_dir()).is_locked()
+    }
+
     fn keyed(&self) -> Vec<&'static str> {
         PROVIDERS
             .iter()
@@ -1335,7 +1351,12 @@ fn offered(ids: &[&str]) -> String {
 /// variable to set, the file key that overrides it, and — because the
 /// default model is not always the provider a fresh box has a key for —
 /// which providers *are* configured.
-fn missing_credential_message(model: &str, kind: &ProviderKind, keyed: &[&str]) -> String {
+fn missing_credential_message(
+    model: &str,
+    kind: &ProviderKind,
+    keyed: &[&str],
+    sealed: bool,
+) -> String {
     let provider = kind.name;
     // The same candidates a refused credential names, spelled once.
     let mut message = format!(
@@ -1347,8 +1368,19 @@ fn missing_credential_message(model: &str, kind: &ProviderKind, keyed: &[&str]) 
             ", or run `ilar login` and set providers.{provider}.auth = \"chatgpt\""
         ));
     }
+    // A key in a sealed store is not missing, it is locked away, and
+    // "set it" would send the person to store what they already have.
+    if sealed {
+        message.push_str(&format!(
+            ". The secret store is sealed, so a key kept there is out of reach: `ilar` at a \
+             terminal asks for the master password; for `ilar exec` or the gateway, export {} \
+             for the run",
+            kind.api_key_env
+        ));
+    }
     match keyed {
-        [] => message.push_str(". No provider is configured yet"),
+        [] => message
+            .push_str(". No provider is configured yet; `ilar --help` lists the variable for each"),
         keyed => message.push_str(&format!(
             ". Configured now: {} — point general.model or --model at one of those",
             keyed.join(", ")
@@ -2172,9 +2204,16 @@ mod tests {
         let openai = provider_kind("openai", PROVIDERS).expect("openai is a known provider");
         let zai = provider_kind("zai", PROVIDERS).expect("z.ai is a known provider");
         assert!(
-            missing_credential_message("openai/gpt-5.2", openai, &["zai"]).contains("ilar login")
+            missing_credential_message("openai/gpt-5.2", openai, &["zai"], false)
+                .contains("ilar login")
         );
-        assert!(!missing_credential_message("zai/glm-4.7", zai, &[]).contains("ilar login"));
+        assert!(!missing_credential_message("zai/glm-4.7", zai, &[], false).contains("ilar login"));
+        // Sealed: the key may be there, locked away — say so, and how
+        // to run without the password.
+        let sealed = missing_credential_message("zai/glm-4.7", zai, &[], true);
+        assert!(sealed.contains("The secret store is sealed"), "{sealed}");
+        assert!(sealed.contains("export ILAR_ZAI_API_KEY"), "{sealed}");
+        assert!(!missing_credential_message("zai/glm-4.7", zai, &[], false).contains("sealed"));
 
         // The same table answers "which key did the server refuse".
         assert_eq!(
