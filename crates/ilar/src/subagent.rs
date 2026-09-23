@@ -3404,7 +3404,7 @@ impl Drop for ReservedNotification {
                 &self.parent_session_id,
                 &self.description,
                 &format!(
-                    "Task \"{}\"{} ended abnormally without reporting a result — most \
+                    "Task \"{}\" ended abnormally{} without reporting a result — most \
                      likely a panic in the task. Its session log holds whatever it finished; \
                      task_message resumes it to continue, or treat it as failed.{}",
                     self.description,

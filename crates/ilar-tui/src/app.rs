@@ -2822,18 +2822,27 @@ impl App {
     /// Ctrl-S brings it back. Returns what to say about it, when
     /// something happened worth saying.
     pub(crate) fn discard_or_stash_input(&mut self) -> Option<String> {
+        const KEEP_ONE_LINE_CHARS: usize = 60;
         // Blank first: two Shift-Enters are not a draft, and stashing
         // them would inflate the stash count and the quit warning with
         // nothing.
-        if !self.input.is_blank() && self.input.text().contains('\n') {
+        // Worth keeping: several lines, or one line long enough that
+        // retyping it is not the cheap thing a short one is.
+        let text = self.input.text();
+        let worth_keeping =
+            text.contains('\n') || text.trim().chars().count() >= KEEP_ONE_LINE_CHARS;
+        if !self.input.is_blank() && worth_keeping {
             let lines = self.input.text().lines().count();
             let images = self.pending_images.len();
             self.stash_input();
+            let draft = if lines > 1 {
+                format!("{lines}-line draft")
+            } else {
+                "draft".to_string()
+            };
             return Some(match images {
-                0 => format!("{lines}-line draft stashed — Ctrl-S brings it back"),
-                _ => format!(
-                    "{lines}-line draft and {images} image(s) stashed — Ctrl-S brings them back"
-                ),
+                0 => format!("{draft} stashed — Ctrl-S brings it back"),
+                _ => format!("{draft} and {images} image(s) stashed — Ctrl-S brings them back"),
             });
         }
         // Whitespace included: an emptied prompt that still holds
@@ -2891,7 +2900,7 @@ impl App {
             ends.push(self.busy_work().to_string());
         }
         if cost.background > 0 {
-            ends.push(ilar::text::plural(cost.background, "background agent"));
+            ends.push(ilar::text::plural(cost.background, "background task"));
         }
         if let Some((_, round)) = &self.goal {
             ends.push(format!("the goal (round {round}/{MAX_GOAL_ROUNDS})"));
@@ -3847,7 +3856,7 @@ mod tests {
     }
 
     /// Esc has no undo, so it may only throw away what is cheap to
-    /// retype. A pasted or several-line draft goes to the stash.
+    /// retype. A pasted, several-line or long draft goes to the stash.
     #[test]
     fn esc_stashes_a_multi_line_draft_and_clears_a_single_line() {
         let mut app = App::new();
@@ -3855,6 +3864,17 @@ mod tests {
         assert_eq!(app.discard_or_stash_input(), None);
         assert!(app.input.is_blank());
         assert!(app.input_stash.is_empty(), "one line is cheap to retype");
+
+        // A long one is not: a reflex Esc took a sentence away for good.
+        let long = "please refactor the parser so that errors carry their spans through";
+        app.input = crate::input::InputBuffer::from(long);
+        let notice = app
+            .discard_or_stash_input()
+            .expect("a long line is stashed");
+        assert_eq!(notice, "draft stashed — Ctrl-S brings it back");
+        app.stash_or_pop_input();
+        assert_eq!(app.input.text(), long);
+        app.input.clear();
 
         app.input = crate::input::InputBuffer::from("first\nsecond\nthird");
         app.pending_images = vec![ilar::session::ImageContent::png(b"screenshot")];
@@ -4007,7 +4027,7 @@ mod tests {
             "the key must survive a one-row truncation: {warning}"
         );
         assert!(warning.contains("the running turn"), "{warning}");
-        assert!(warning.contains("2 background agents"), "{warning}");
+        assert!(warning.contains("2 background tasks"), "{warning}");
         assert!(warning.contains("the goal (round 3/"), "{warning}");
         // The queued task result is counted as a result, not as a lost
         // message: it comes back through the outbox.
@@ -4649,6 +4669,8 @@ mod tests {
         let scroll_before = app.scroll_top;
 
         app.open_search();
+        // Opened, nothing typed: an invitation, not "no matches".
+        assert!(rendered_text(&app.status_line(120)).contains("type to search"));
         for character in "needle".chars() {
             app.search_query.push(character);
         }

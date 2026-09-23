@@ -172,7 +172,10 @@ impl App {
         const STATUS_DETAIL_WIDTH: usize = 36;
         let width = width as usize;
         if self.search_active {
-            let counter = if self.search_matches.is_empty() {
+            // Nothing typed is not "no matches": there was no search yet.
+            let counter = if self.search_query.is_empty() {
+                "type to search".to_string()
+            } else if self.search_matches.is_empty() {
                 "no matches".to_string()
             } else {
                 format!("{}/{}", self.search_current + 1, self.search_matches.len())

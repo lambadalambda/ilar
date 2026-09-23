@@ -3506,11 +3506,13 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> Mo
         |index, is_selected| {
             let choice = choices[index];
             let active = choice == picker.active_theme;
-            // The saved theme says so where the others show their id;
-            // the cursor marker stays plain, since the row already
-            // reads as active through its colour and that word.
-            let suffix = if active {
-                "  saved".to_string()
+            // The theme in use says so, beside its id like the others:
+            // "saved" claimed a config line that need not exist, and
+            // hid the id of the one row a person may want to copy.
+            let suffix = if active && inner.width >= 34 {
+                format!("  {} · current", choice.id())
+            } else if active {
+                "  current".to_string()
             } else if inner.width >= 34 {
                 format!("  {}", choice.id())
             } else {

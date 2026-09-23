@@ -373,6 +373,14 @@ impl TerminalSession {
             )?;
         }
 
+        // Save the window title the shell had (xterm's title stack), so
+        // leaving can hand it back rather than a blank tab. A terminal
+        // without the stack ignores the sequence.
+        {
+            use std::io::Write as _;
+            let mut out = std::io::stdout();
+            let _ = out.write_all(PUSH_TITLE).and_then(|()| out.flush());
+        }
         session.mouse_enabled = true;
         crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
         session.paste_enabled = true;
@@ -388,14 +396,24 @@ impl TerminalSession {
     }
 }
 
+/// xterm's window-title stack: push the current title, pop it back.
+const PUSH_TITLE: &[u8] = b"\x1b[22;0t";
+const POP_TITLE: &[u8] = b"\x1b[23;0t";
+
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         if self.terminal_initialized {
-            // The window is ours only while we run. Left as "ilar —
-            // <topic>" it names a session that ended, in a shell that
-            // has moved on; an empty title hands the name back, and
-            // the shell's own prompt hook takes it from there.
+            // The window is ours only while we run. Left as the topic
+            // it names a session that ended, in a shell that has moved
+            // on: the title saved at start comes back, and where the
+            // terminal keeps no such stack the empty title hands the name
+            // to the shell's own prompt hook.
             let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(""));
+            {
+                use std::io::Write as _;
+                let mut out = std::io::stdout();
+                let _ = out.write_all(POP_TITLE).and_then(|()| out.flush());
+            }
         }
         if self.paste_enabled {
             let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
@@ -1286,7 +1304,11 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
     // waited for its work unless a turn failed or was stopped.
     let background = runtime.spawner.running_background();
     if background > 0 {
-        let _ = writeln!(err, "{background} background task(s) cancelled at exit");
+        let _ = writeln!(
+            err,
+            "{} cancelled at exit",
+            ilar::text::plural(background, "background task")
+        );
     }
     runtime.spawner.shutdown().await;
     runtime.services.stop_all();
@@ -3217,7 +3239,8 @@ fn switch_blocked(
         // short: this string is also used as a notice line, where an
         // 80-column terminal would truncate the second key away.
         Some(format!(
-            "{background_agents} background task(s) running; Ctrl-Q cancels all, Ctrl-G picks one"
+            "{} running; Ctrl-Q cancels all, Ctrl-G picks one",
+            ilar::text::plural(background_agents, "background task")
         ))
     } else if deliveries > 0 {
         Some("a task result is being delivered; wait a moment".into())
@@ -6071,10 +6094,7 @@ mod tests {
         // "abort them first" without saying how is a dead end. Short
         // enough to survive an 80-column notice line, too.
         let agents = switch_blocked(false, 1, 0, false, false).expect("agents block the switch");
-        assert!(
-            agents.starts_with("1 background task(s) running"),
-            "{agents}"
-        );
+        assert!(agents.starts_with("1 background task running"), "{agents}");
         assert!(agents.contains("Ctrl-Q"), "{agents}");
         assert!(agents.contains("Ctrl-G"), "{agents}");
         assert!(

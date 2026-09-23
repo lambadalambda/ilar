@@ -147,7 +147,8 @@ pub(crate) fn task_notification_display(text: &str) -> Option<String> {
 ///
 /// Producer strings (subagent.rs): `Task "{d}" completed (task_id:
 /// {id}).`, `Task "{d}" failed: …`, `Task "{d}" was cancelled.`,
-/// `Task "{d}" was aborted.`, `Task "{d}" stalled: …`, and the
+/// `Task "{d}" was aborted.`, `Task "{d}" stalled: …`, `Task "{d}"
+/// ended abnormally (task_id: …) …`, and the
 /// propagated `Nested task "{d}" completed.` / `failed …`. Anything
 /// else is shown as written.
 fn normalize_task_notification(first: &str) -> Headline {
@@ -160,12 +161,13 @@ fn normalize_task_notification(first: &str) -> Headline {
     };
     // Description and outcome may both contain quotes, so the split is
     // the first closing quote followed by one of the producer's verbs.
-    const VERBS: [&str; 5] = [
+    const VERBS: [&str; 6] = [
         "\" completed",
         "\" failed:",
         "\" was cancelled",
         "\" was aborted",
         "\" stalled:",
+        "\" ended abnormally",
     ];
     let Some(split) = VERBS.iter().filter_map(|verb| rest.find(verb)).min() else {
         return Headline::plain(first);
