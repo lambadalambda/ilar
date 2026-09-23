@@ -868,7 +868,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
             ),
             binding!(
                 "Esc / Ctrl-C",
-                "dismiss overlay · deny a grant · abort turn · clear input (a multi-line draft stashes)"
+                "dismiss overlay · deny a grant · abort turn · clear input (a long or multi-line draft stashes)"
             ),
             binding!("Ctrl-D", "quit (blank input, nothing open)"),
             binding!("Ctrl-Q", "queue, goal, tasks, services, held, retry"),

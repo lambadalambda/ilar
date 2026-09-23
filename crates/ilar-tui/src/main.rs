@@ -343,6 +343,9 @@ struct Args {
 
 struct TerminalSession {
     terminal_initialized: bool,
+    /// The shell's title was saved on xterm's stack, so leaving pops
+    /// exactly that and never an entry that was someone else's.
+    title_pushed: bool,
     keyboard_enhanced: bool,
     mouse_enabled: bool,
     paste_enabled: bool,
@@ -352,6 +355,7 @@ impl TerminalSession {
     fn start() -> Result<(ratatui::DefaultTerminal, Self)> {
         let mut session = Self {
             terminal_initialized: false,
+            title_pushed: false,
             keyboard_enhanced: false,
             mouse_enabled: false,
             paste_enabled: false,
@@ -379,7 +383,7 @@ impl TerminalSession {
         {
             use std::io::Write as _;
             let mut out = std::io::stdout();
-            let _ = out.write_all(PUSH_TITLE).and_then(|()| out.flush());
+            session.title_pushed = out.write_all(PUSH_TITLE).and_then(|()| out.flush()).is_ok();
         }
         session.mouse_enabled = true;
         crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
@@ -409,7 +413,7 @@ impl Drop for TerminalSession {
             // terminal keeps no such stack the empty title hands the name
             // to the shell's own prompt hook.
             let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(""));
-            {
+            if self.title_pushed {
                 use std::io::Write as _;
                 let mut out = std::io::stdout();
                 let _ = out.write_all(POP_TITLE).and_then(|()| out.flush());
@@ -2882,12 +2886,6 @@ fn ring_terminal_bell_if_idle(
     Ok(true)
 }
 
-/// Open the focus view on a child session: a placeholder immediately —
-/// the roster row lends the title and says the agent is running — and
-/// the seed follows from a blocking worker, because a large child's
-/// replay used to freeze the UI for the length of its log. Returns
-/// whether the child is streaming, which the seed needs — or `None`
-/// when the view was already on that agent and there is nothing to do.
 /// Put an agent's view in front and start loading its transcript — the
 /// one way in, from a panel click and from the agent picker alike.
 fn focus_agent(
@@ -2915,6 +2913,12 @@ fn focus_agent(
     });
 }
 
+/// Open the focus view on a child session: a placeholder immediately —
+/// the roster row lends the title and says the agent is running — and
+/// the seed follows from a blocking worker, because a large child's
+/// replay used to freeze the UI for the length of its log. Returns
+/// whether the child is streaming, which the seed needs — or `None`
+/// when the view was already on that agent and there is nothing to do.
 fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> Option<bool> {
     // A second click on the row already in front is not a navigation:
     // closing and reopening would round-trip the drafts, stashing what

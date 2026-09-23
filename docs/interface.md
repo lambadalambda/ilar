@@ -162,9 +162,11 @@ the same confirmed cancel `d` gives — since there is nothing there to
 edit; Enter on a held task result delivers it without spending a turn
 on the asking.
 **Esc is strictly immediate-scope**: it aborts the running turn or
-clears the input, and never touches the queue or the goal. A one-line
-draft it clears; a multi-line one — a paste, or a paragraph — goes to
-the stash instead, because Esc has no undo.
+clears the input, and never touches the queue or the goal. A short
+one-line draft it clears; a multi-line one — a paste, or a paragraph —
+or a line of 60 characters or more goes to the stash instead, because
+Esc has no undo. A history entry recalled and left as it was is not
+stashed: it is in the history already.
 
 One thing does follow the turn down: the detached tasks *that turn*
 started, whose cancellation rides on the turn's own. Aborting therefore
@@ -373,7 +375,9 @@ The panel's title counts each kind for what it is — `agents (2) · 1 job
 
 ## Talking to a focused agent
 
-Click an agents-panel row and the child's transcript fills the screen.
+Click an agents-panel row — or press **Ctrl-G** at the main view, or pick
+"Focus an agent…" in the palette, where no mouse or no wide terminal is
+at hand — and the child's transcript fills the screen.
 The prompt is then that agent's: the input title reads `to explore ·
 survey the API`, the root's own draft is put aside until you leave, and
 Enter sends what you typed the way the model's own `task_message` does —
@@ -486,9 +490,8 @@ The palette's "Share transcript" writes the whole session as one HTML
 file that opens offline in any browser, the same view `ilar serve` would
 render, with stored secrets cut out. Nothing is uploaded: the file is
 yours to send. Both files go in the working directory, named after the
-topic and the session (`ilar-session-<topic>-<id>.html`), so a second
-share of the same session replaces the first and another session's never
-does. They are ordinary files in your checkout, so mind `git add -A`.
+topic and the session (`ilar-session-<topic>-<id>.html`), so another
+session's share never replaces this one's. They are ordinary files in your checkout, so mind `git add -A`.
 
 ilar holds the mouse for as long as it runs, which is what its own
 selection needs and which takes the terminal's away. Hold **Shift**

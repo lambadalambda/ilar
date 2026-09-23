@@ -53,6 +53,14 @@ impl PromptHistory {
         self.cursor.is_some()
     }
 
+    /// Whether `text` is the entry being recalled, unedited: already
+    /// kept here, so nothing a caller needs to keep again.
+    pub fn showing(&self, text: &str) -> bool {
+        self.cursor
+            .and_then(|index| self.entries.get(index))
+            .is_some_and(|entry| entry == text)
+    }
+
     /// Move to the previous (older) entry. `current` is the input's text,
     /// stashed as the draft when browsing starts or when it was edited.
     pub fn previous(&mut self, current: &str) -> Option<String> {

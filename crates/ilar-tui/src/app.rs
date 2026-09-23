@@ -808,8 +808,8 @@ pub(crate) fn windowed_rate(
 }
 
 impl App {
-    /// The same, without the welcome line — for a surface whose keys are
-    /// not the ones it names.
+    /// A fresh app without the welcome line — for a surface whose keys
+    /// are not the ones it names.
     pub(crate) fn without_greeting(mut self) -> Self {
         self.lines.clear();
         self
@@ -1275,8 +1275,6 @@ impl App {
         true
     }
 
-    /// Open the link picker over everything currently in the
-    /// transcript. Safe at any time: collection is read-only.
     /// The running agents, for the keyboard: the panel's rows are
     /// clickable only with a mouse on a terminal wide enough to show them.
     pub(crate) fn open_agent_picker(&mut self) {
@@ -1291,12 +1289,21 @@ impl App {
             })
             .collect();
         if agents.is_empty() {
-            self.set_notice("no agents running", NoticeLevel::Info);
+            // Jobs count as background work elsewhere; say why Ctrl-G
+            // has nothing to offer when they are all there is.
+            let notice = if self.agents_view.is_empty() {
+                "no agents running"
+            } else {
+                "only bash jobs running — they have no view; Ctrl-Q cancels them"
+            };
+            self.set_notice(notice, NoticeLevel::Info);
             return;
         }
         self.link_picker = Some(LinkPicker::agents(agents));
     }
 
+    /// Open the link picker over everything currently in the
+    /// transcript. Safe at any time: collection is read-only.
     pub(crate) fn open_link_picker(&mut self) {
         self.link_picker = Some(LinkPicker::new(crate::links::collect_links(&self.lines)));
     }
@@ -2854,6 +2861,15 @@ impl App {
         let text = self.input.text();
         let worth_keeping =
             text.contains('\n') || text.trim().chars().count() >= KEEP_ONE_LINE_CHARS;
+        // Not a copy of what is already kept: a recalled history entry
+        // left as it was (Up, then Esc to leave it) is in the history,
+        // and the stash's own top needs no second copy.
+        let already_kept = self.history.showing(text)
+            || self
+                .input_stash
+                .last()
+                .is_some_and(|last| last.text == text);
+        let worth_keeping = worth_keeping && !already_kept;
         if !self.input.is_blank() && worth_keeping {
             let lines = self.input.text().lines().count();
             let images = self.pending_images.len();
@@ -3865,6 +3881,23 @@ mod tests {
         assert_eq!(app.pending_images, vec![attached]);
     }
 
+    /// A share or an export is named after its topic and its session:
+    /// two sessions on one subject no longer overwrite each other's.
+    #[test]
+    fn an_artifact_is_named_by_topic_and_session() {
+        let mut app = App::new();
+        app.session_id = "0123456789abcdef".into();
+        assert_eq!(
+            artifact_name(&app, "ilar-session", "html"),
+            "ilar-session-01234567.html"
+        );
+        app.topic = Some("Fix the Parser!".into());
+        assert_eq!(
+            artifact_name(&app, "ilar-transcript", "md"),
+            "ilar-transcript-fix-the-parser-01234567.md"
+        );
+    }
+
     /// Esc has no undo, so it may only throw away what is cheap to
     /// retype. A pasted, several-line or long draft goes to the stash.
     #[test]
@@ -3885,6 +3918,24 @@ mod tests {
         app.stash_or_pop_input();
         assert_eq!(app.input.text(), long);
         app.input.clear();
+
+        // Kept already, so not kept again: the stash's own top, and a
+        // history entry recalled and left as it was.
+        app.input = crate::input::InputBuffer::from(long);
+        app.discard_or_stash_input();
+        app.input = crate::input::InputBuffer::from(long);
+        assert_eq!(app.discard_or_stash_input(), None);
+        assert_eq!(app.input_stash.len(), 1, "a second copy of the same draft");
+        app.input_stash.clear();
+        app.history.push(long);
+        app.input = crate::input::InputBuffer::from(
+            app.history
+                .previous("")
+                .expect("the recalled entry")
+                .as_str(),
+        );
+        assert_eq!(app.discard_or_stash_input(), None);
+        assert!(app.input_stash.is_empty(), "a recalled entry was stashed");
 
         app.input = crate::input::InputBuffer::from("first\nsecond\nthird");
         app.pending_images = vec![ilar::session::ImageContent::png(b"screenshot")];
