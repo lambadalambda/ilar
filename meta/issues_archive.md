@@ -470,3 +470,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A detached resume says its message waits](issues/a-detached-resume-says-its-message-waits.md)
 - [x] [The title is the topic](issues/the-title-is-the-topic.md)
 - [x] [Every ending says its messages wait](issues/every-ending-says-its-messages-wait.md)
+- [x] [Background by default: the loose ends](issues/background-by-default-loose-ends.md) — TUI look of refusals left, noted inside
+- [x] [A room is not the person's console](issues/a-room-is-not-the-persons-console.md)

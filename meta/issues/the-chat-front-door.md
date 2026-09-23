@@ -41,3 +41,16 @@ What a person meets first, and what they meet after a restart.
 ## Notes
 
 - Source: UX sweep 2026-09-23 (gateway, docs passes). Size: M.
+
+## Progress (2026-09-23)
+
+Done in `b529ceb` and `d099154`: `/start` greets; only `/word` is a
+command, so a path reaches the model (a near-miss of `/unlock` with an
+argument is still taken back out); another bot's `/x@bot` is ignored
+in a group; grant buttons carry their ask's id; `/status`, `/cost` and
+`/tasks` reopen a known session after a restart, and `/status` shows
+the session id; an empty `allow_from` stops the start.
+
+Still open: a command in the startup backlog (`/unlock` right after
+`/restart`) is skipped before the secret check; the first-run docs for
+finding one's Telegram id.

@@ -37,3 +37,13 @@ them, and two of them act on everything with no argument.
 ## Notes
 
 - Source: UX sweep 2026-09-23 (gateway pass). Size: M.
+
+## Done (2026-09-23)
+
+`cfdc09d` and `727512b`: bare `/approve`/`/reject` list and ask; a room
+is refused `/pending`, `/approve`, `/reject`, `/restart`, `/unlock`,
+`/password`, `/model … --save` and `/grant always`, and Telegram
+offers it a smaller menu (a unit test keeps the two lists in step); a
+room's sudo password ask is refused on the spot; announcements and
+`notify` go to the last private chat; `/new` in a room promises no
+memory.

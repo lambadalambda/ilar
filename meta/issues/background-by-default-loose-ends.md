@@ -54,3 +54,19 @@ Confusing:
 ## Notes
 
 - Source: UX sweep 2026-09-23 (TUI, model words, docs passes). Size: M.
+
+## Done (2026-09-23)
+
+All of the above, in `ed58efc`..`18e0f21`: `exec` carries completions
+as follow-up turns through `ilar::delivery::deliver_step`, now shared
+with the gateway, and exits 130 when stopped while it waits; a task
+row takes its child's ending; the watchdog pauses like Esc; `service`
+status/logs/stop take no lease; a refusal names its holder through
+`WorkspaceScheduler::hold_as`; the texts say "edit, write, bash,
+service start and sudo" and the compaction template has `## Running`.
+
+Left: the refusal still looks like a failure (red ×) in the TUI, the
+panel does not mark the holder's row, `· bg` is still on every row,
+and `## Running` gets no live list the way `## Services` does. The
+queue/held loop is in two drivers (exec, gateway); one core driver
+would end that.
