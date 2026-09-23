@@ -20,3 +20,7 @@ gone.
 ## Notes
 
 - Source: user request, 2026-09-23. Size: XS.
+
+## Done (2026-09-23)
+
+`terminal_title` returns the topic, or `ilar` until there is one.

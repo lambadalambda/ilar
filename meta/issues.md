@@ -93,7 +93,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 20 — Sweep: the user's eye
 
-- [ ] [The title is the topic](issues/the-title-is-the-topic.md)
 - [ ] [Wrapped rows keep their gutter](issues/wrapped-rows-keep-their-gutter.md)
 - [ ] [Sweep 2026-09-15 follow-ups](issues/sweep-2026-09-15-follow-ups.md) — *rest parked with serve*
 - [ ] [A share says where it came from](issues/a-share-says-where-it-came-from.md)
@@ -109,7 +108,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 25 — The step does not wait
 
-- [ ] [A detached resume says its message waits](issues/a-detached-resume-says-its-message-waits.md)
+(all complete — see issues_archive.md)
 
 ## Milestone 22 — Memory in every directory
 

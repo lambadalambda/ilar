@@ -467,3 +467,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A slow call does not hold the step](issues/a-slow-call-does-not-hold-the-step.md) — measured: bash alone rarely holds; the two below were the holds
 - [x] [A message to a finished task runs detached](issues/a-message-to-a-finished-task-runs-detached.md)
 - [x] [A held checkout answers at once](issues/a-held-checkout-answers-at-once.md)
+- [x] [A detached resume says its message waits](issues/a-detached-resume-says-its-message-waits.md)
+- [x] [The title is the topic](issues/the-title-is-the-topic.md)

@@ -26,3 +26,14 @@ reads the detached failure as a lost message and sends it again.
 ## Notes
 
 - Source: review of the detached resume, 2026-09-23. Size: S.
+
+## Done (2026-09-23)
+
+Every detached task notification now ends with a line when messages
+to the task are still queued, counted after the steer hold has given
+back what its prompt took. It covers the lease wait ending (cancelled
+or refused), a turn that never started, and a clean finish with
+messages that came after the last step. Two paths were left without
+it, from the review: the panic fallback in `ReservedNotification`,
+which does not know the session, and a nested hop's routed ending to
+its grandparent.
