@@ -1462,31 +1462,30 @@ impl SubagentSpawner {
                     ) => outcome,
                     () = task_cancel.cancelled() => LeaseOutcome::Cancelled,
                 };
-                let lease = match acquired {
-                    LeaseOutcome::Acquired(lease) => lease,
-                    LeaseOutcome::Cancelled => {
-                        reserved.send(TaskOutcome::Cancelled.before_running(
-                            &spawner.store,
-                            &session_id,
-                            &parent_session_id,
-                            &description,
-                        ));
-                        return;
+                let never_ran = match acquired {
+                    LeaseOutcome::Acquired(lease) => {
+                        child_ctx.workspace_lease = Some(lease);
+                        None
                     }
-                    LeaseOutcome::Failed(failure) => {
-                        reserved.send(
-                            TaskOutcome::Failed(anyhow::anyhow!("{}", failure.message()))
-                                .before_running(
-                                    &spawner.store,
-                                    &session_id,
-                                    &parent_session_id,
-                                    &description,
-                                ),
-                        );
-                        return;
-                    }
+                    LeaseOutcome::Cancelled => Some(TaskOutcome::Cancelled),
+                    LeaseOutcome::Failed(failure) => Some(TaskOutcome::Failed(anyhow::anyhow!(
+                        "{}",
+                        failure.message()
+                    ))),
                 };
-                child_ctx.workspace_lease = Some(lease);
+                if let Some(outcome) = never_ran {
+                    // The hold hands back the messages its prompt took,
+                    // so they are counted as the waiting ones they are.
+                    drop(child_steer);
+                    reserved.send(outcome.before_running(
+                        &spawner.store,
+                        &session_id,
+                        &parent_session_id,
+                        &description,
+                        spawner.child_steers.pending(&session_id),
+                    ));
+                    return;
+                }
                 // Deliberately not a child of `task_cancel`: stopping the
                 // task must go through the select below, which cancels
                 // this token itself and then waits out the graceful
@@ -1577,7 +1576,10 @@ impl SubagentSpawner {
                 if !outcome.turn_never_started() {
                     child_steer.started();
                 }
+                // Now, so what it gives back is counted below.
+                drop(child_steer);
                 activity.turn_done(outcome.activity());
+                let queued = queued_note(spawner.child_steers.pending(&session_id));
 
                 // Every ending's words come from `headline`; only the
                 // clean finish is this branch's own, because it carries
@@ -1585,7 +1587,12 @@ impl SubagentSpawner {
                 let notification = match outcome.headline(&description, stall_timeout) {
                     Some(body) => {
                         outcome.record(&spawner.store, &session_id, &body);
-                        task_notification(&parent_session_id, &description, &body, true)
+                        task_notification(
+                            &parent_session_id,
+                            &description,
+                            &format!("{body}{queued}"),
+                            true,
+                        )
                     }
                     None => {
                         let text = final_assistant_text(&spawner.store, &session_id)
@@ -1596,7 +1603,7 @@ impl SubagentSpawner {
                             &parent_session_id,
                             &description,
                             &format!(
-                                "Task \"{description}\" completed (task_id: {session_id}).\n<result>\n{text}\n</result>"
+                                "Task \"{description}\" completed (task_id: {session_id}).\n<result>\n{text}\n</result>{queued}"
                             ),
                             false,
                         )
@@ -2912,6 +2919,7 @@ impl TaskOutcome {
         session_id: &str,
         parent_session_id: &str,
         description: &str,
+        queued: usize,
     ) -> Notification {
         let body = self
             .headline(description, std::time::Duration::ZERO)
@@ -2919,7 +2927,12 @@ impl TaskOutcome {
         if let Some(ending) = self.ending() {
             record_ending(store, session_id, ending, &body, false);
         }
-        task_notification(parent_session_id, description, &body, true)
+        task_notification(
+            parent_session_id,
+            description,
+            &format!("{body}{}", queued_note(queued)),
+            true,
+        )
     }
 
     /// What the terminal activity event carries: anything that is not a
@@ -2975,6 +2988,23 @@ impl ActivityPublisher {
 
     fn turn_done(&self, outcome: TurnOutcome) {
         self.publish(LoopEvent::TurnDone { outcome });
+    }
+}
+
+/// What a detached task's notification adds while messages to it are
+/// still parked — sent after its turn ended, or taken by a resume that
+/// never started. The foreground path says the same in its result; a
+/// model told nothing reads the message as lost and sends it again.
+fn queued_note(pending: usize) -> String {
+    match pending {
+        0 => String::new(),
+        1 => "\n\n(A message to this task is still queued, not lost: it is delivered when the \
+              task is next resumed.)"
+            .into(),
+        n => format!(
+            "\n\n({n} messages to this task are still queued, not lost: they are delivered when \
+             the task is next resumed.)"
+        ),
     }
 }
 
@@ -4042,7 +4072,7 @@ mod tests {
         let recorded = |id: &str| ending_of(last_run(store.load(id).unwrap().events()));
 
         let notification =
-            TaskOutcome::Cancelled.before_running(&store, &fresh, "parent", "survey the API");
+            TaskOutcome::Cancelled.before_running(&store, &fresh, "parent", "survey the API", 0);
         assert!(
             notification
                 .text
@@ -4050,9 +4080,22 @@ mod tests {
             "{}",
             notification.text
         );
+        assert!(
+            !notification.text.contains("queued"),
+            "{}",
+            notification.text
+        );
         assert_eq!(recorded(&fresh), Some(TurnEnding::Cancelled));
 
-        TaskOutcome::Cancelled.before_running(&store, &resumed, "parent", "survey the API");
+        let notification =
+            TaskOutcome::Cancelled.before_running(&store, &resumed, "parent", "survey the API", 2);
+        assert!(
+            notification
+                .text
+                .contains("2 messages to this task are still queued"),
+            "{}",
+            notification.text
+        );
         assert_eq!(recorded(&resumed), None, "the real run stands");
     }
 

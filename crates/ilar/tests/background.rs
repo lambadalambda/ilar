@@ -4310,6 +4310,87 @@ impl Provider for RecordingPendingOnHang {
     }
 }
 
+/// A detached resume that ends before its turn starts leaves the message
+/// parked, and its notification has to say so — the foreground path
+/// does, and a model told nothing sends the message again.
+#[tokio::test]
+async fn a_detached_resume_cancelled_in_the_lease_wait_says_its_message_waits() {
+    let (store, parent_id) = temp_store();
+    let provider = RecordingPendingOnHang::default();
+    let spawner = patient_spawner(Arc::new(provider.clone()), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let task = registry.get("task").unwrap();
+    let message = registry.get("task_message").unwrap();
+
+    let finished = task
+        .run(
+            serde_json::json!({
+                "description": "original survey",
+                "prompt": "original scope",
+                "subagent_type": "explore",
+                "background": false,
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!finished.is_error, "{}", finished.content);
+    let child_id = finished.child_session_id().unwrap().to_string();
+
+    // A mutable task that never finishes holds the shared checkout.
+    let occupant = task
+        .run(
+            serde_json::json!({
+                "description": "hold the checkout",
+                "prompt": "hang",
+                "subagent_type": "explore",
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!occupant.is_error, "{}", occupant.content);
+
+    let sent = message
+        .run(
+            serde_json::json!({
+                "task_id": child_id,
+                "message": "also check the flag parsing",
+            }),
+            task_context(&parent_id, spawner.clone()),
+        )
+        .await;
+    assert!(!sent.is_error, "{}", sent.content);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !spawner
+            .running_tasks()
+            .iter()
+            .any(|task| task.session_id == child_id && task.waiting)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the resume queues behind the occupant");
+
+    spawner.abort_all();
+    let resumed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notification = notifications.recv().await.unwrap();
+            if notification.description.starts_with("message:") {
+                break notification;
+            }
+        }
+    })
+    .await
+    .expect("the cancelled resume notifies");
+    assert!(resumed.text.contains("still queued"), "{}", resumed.text);
+    assert!(resumed.text.contains("next resumed"), "{}", resumed.text);
+
+    spawner.shutdown().await;
+}
+
 /// One concurrency slot, so "concurrent subagent limit reached" is one
 /// hung background task away — the deterministic stand-in for every
 /// early return of the resume path.
