@@ -3703,7 +3703,7 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delegate one clearly bounded unit of work to a configured agent. Delegation transfers ownership: do not perform the delegated scope yourself. Independent reviews must be explicitly delegated as separate bounded review tasks. subagent_type names the agent, and the agent — not this call — fixes its tools and whether it may write: prefer an agent marked read-only for repository inspection and review that needs no shell, so sibling tasks can run concurrently; use `review` for a review or verification that has to run tests, builds or git, since it may run things but cannot edit; and use a mutable agent with the write tools only when edits are required.\n\nOmit workspace by default and the task runs in your own checkout. Always omit it for a read-only agent: read-only tasks share the checkout, so they run alongside each other. Omit it for a mutable agent too when its edits should land in your checkout in order: mutable tasks sharing one checkout serialize behind its write lease, so each one sees the previous one's edits and nothing has to be merged, which is what you want for dependent, sequential work — and while one runs it holds that lease, so your own edit, write, bash, service start and sudo calls are refused until it reports; read, glob and grep meanwhile. Pass workspace when independent mutable tasks should run in parallel, or when you want to keep editing while one runs: write leases are per workspace, so tasks in separate worktrees run at the same time, and you merge their divergent results yourself once each has reported. Pass it also when you are yourself running as a subagent and delegate a mutable task, since your own checkout is already held for the whole of your run. A workspace must be an existing Git worktree of this repository that you create first (`git worktree add ../ilar-task-<name> -b task/<name>`) and then name as {\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"} — ilar validates it and never creates one, so outside a Git repository there is no isolated workspace and parallel mutable tasks are unavailable.\n\nEvery task runs in the background: the call returns at once, you keep working, and the task's completion reaches you as a notification that starts a follow-up turn. That is what lets a message from the person reach you while the task runs, and task_message reach the task. Pass background false only when you are blocked on the result for this turn's very next step: a review whose findings gate what you do next is the usual case — a detached reviewer's findings arrive a turn later, after whatever you did meanwhile, and while it holds the lease your commit is refused, not ordered after its findings. Foreground sibling tasks can be called together for parallel current-answer work. Never poll a detached task: task_message steers it mid-flight, and its completion comes to you."
+        "Delegate one bounded unit of work to an agent, and do not do that scope yourself; delegate independent reviews as tasks of their own. subagent_type fixes the task's tools: a read-only agent for inspection that needs no shell (several run at once), `review` for checks that must run tests, builds or git (it cannot edit), a mutable agent only when edits or other mutating tools are needed.\n\nA task runs in the background: the call returns at once, and the task's completion arrives as a notification that starts a follow-up turn, so you keep working and the person can reach you meanwhile. Never poll it; task_message steers it. Pass background false only when this turn's very next step needs the result — a review that gates a commit is the usual case. Foreground siblings called together run in parallel.\n\nA mutable task in your own checkout holds its write lease until it reports: mutable tasks there run one after another, each seeing the last one's edits, and meanwhile your own edit, write, bash, service start and sudo calls are refused (read, glob and grep are not). To run independent mutable tasks in parallel or to keep editing, give each a workspace — see that parameter."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -3744,8 +3744,10 @@ impl Tool for TaskTool {
                     None => format!("{} ({mode}): {}", agent.name, agent.description),
                 }
             })
+            // One sentence per agent, whatever its description ends with.
+            .map(|line| line.trim_end().trim_end_matches('.').to_string())
             .collect::<Vec<_>>()
-            .join("; ");
+            .join(". ");
         // Built from the configured agents, so the shape the model copies
         // names an agent that exists here rather than one from another
         // install; the scope is inspection, which every agent may do,
@@ -3758,28 +3760,23 @@ impl Tool for TaskTool {
             })
         });
         let overview = match example {
-            Some(example) => format!(
-                "One agent, one bounded scope. Example: {example}. Add a workspace only in the cases described below."
-            ),
-            None => {
-                "One agent, one bounded scope. Add a workspace only in the cases described below."
-                    .to_string()
-            }
+            Some(example) => format!("One agent, one bounded scope. Example: {example}."),
+            None => "One agent, one bounded scope.".to_string(),
         };
         serde_json::json!({
             "type": "object",
             "description": overview,
             "properties": {
                 "description": {"type": "string", "description": "Short task description (3-5 words)"},
-                "prompt": {"type": "string", "description": "Full instructions for one bounded scope. The parent should continue only clearly disjoint work."},
+                "prompt": {"type": "string", "description": "Full instructions for one bounded scope; meanwhile, do only disjoint work yourself."},
                 "subagent_type": {
                     "type": "string",
                     "enum": agents,
-                    "description": format!("Configured agent to run; it fixes the tools the task gets and whether the task may write. Available agents: {agent_guidance}. Prefer an agent marked read-only for repository review and parallel inspection; use a mutable agent only when edits or mutating tools are required.")
+                    "description": format!("The agent to run; it fixes the task's tools and whether it may write. {agent_guidance}.")
                 },
                 "task_id": {
                     "type": ["string", "null"],
-                    "description": "Existing task session UUID to resume, replaying that task's full context — prefer it over a fresh task for follow-up questions on the same scope. Use an id reported by a task result, a task-notification, or the tasks tool; set null or omit to start a new task, and never invent a value. Resuming a task that ran in its own worktree requires that same workspace passed again."
+                    "description": "A task to resume with its full context — prefer it for a follow-up on the same scope; omit to start a new one. Use an id from a task result, a notification or the tasks tool, and never invent one. A task that ran in its own worktree requires that same workspace passed again."
                 },
                 "model": {
                     "type": ["string", "null"],
@@ -3789,10 +3786,10 @@ impl Tool for TaskTool {
                     "type": ["string", "null"],
                     "description": "Reasoning variant for the chosen model (see the models tool). Omit for the model's default."
                 },
-                "background": {"type": "boolean", "description": "Whether the task runs detached. Omitted, it does: every task runs in the background and reports back as a notification that starts a follow-up turn, freeing you to keep working and the person to reach you meanwhile. Pass false only when you are blocked on the result for this turn's very next step; a mutable task passed false while another detached job holds its checkout is refused rather than left waiting. Pass false for a review whose findings gate what you do next: detached, they arrive a turn later. A mutable task without a workspace of its own holds your checkout's write lease until it reports, so your edit, write, bash, service start and sudo calls are refused until then; give it a worktree if you want to keep editing. Do not poll a detached task: its completion finds you as a notification, and task_message corrects its course mid-flight."}
+                "background": {"type": "boolean", "description": "Omit to run detached. false blocks this turn until the task reports: only when your very next step needs the result, such as a review whose findings gate a commit. A mutable task passed false while another detached job holds its checkout is refused rather than left waiting."}
                 ,"workspace": {
                     "type": ["object", "null"],
-                    "description": format!("Sibling Git worktree to run this task in. Set null or omit to use the current checkout — right for every read-only agent, and for a mutable agent unless you already hold this checkout, want independent mutable tasks to run in parallel, or want to keep editing while one runs. cwd must already be a registered worktree of this repository, because ilar validates the path and never creates one: {WORKTREE_CORRECTION}. This is a cooperative scheduling domain, not a sandbox: tasks in separate worktrees run at the same time and their results are yours to merge afterwards."),
+                    "description": format!("A Git worktree of this repository to run the task in; omit to use your own checkout, which is right for every read-only agent. Pass one to run mutable tasks in parallel, to keep editing while one runs, or to delegate a mutable task when you are yourself a subagent (your checkout is held for your whole run). ilar validates the path and never creates one: {WORKTREE_CORRECTION}. Outside a Git repository there is none. Tasks in separate worktrees run at the same time, and merging their results is yours."),
                     "properties": {
                         "cwd": {"type": "string"},
                         "isolation": {"type": "string", "enum": ["git_worktree"]}
@@ -3854,7 +3851,7 @@ impl Tool for TaskMessageTool {
     }
 
     fn description(&self) -> &'static str {
-        "Send a message to a task you spawned — one verb whether it is still running or already finished, and you do not need to know which. A task that is still running receives it at its next step, the way a message reaches you mid-turn, and keeps going: its answer arrives as that task's own result or completion notification, never as the output of this call. A task that has finished is resumed from its transcript with your message as its prompt, exactly as a task call resumes it: in the background unless you pass background false, so its answer arrives as a completion notification while you keep working. A message a running task ended before reading is not lost: it waits and is delivered ahead of the prompt of that task's next resume, and the tasks tool shows what is still waiting. Use it to correct a background task's course, add a constraint it should have had, or ask a finished task a follow-up question with its context intact. A foreground task of the turn you are in cannot be messaged: you are blocked on its result, so it is over before you can speak again — that is what background tasks are for."
+        "Send a message to a task you spawned, running or finished — you do not need to know which. A task that is still running reads it at its next step and keeps going; its answer comes as that task's own result or notification, never from this call. A task that has finished is resumed from its transcript with the message as its prompt, the way a task resume runs it (detached unless background is false). A message a task stopped before reading is not lost: it heads its next resume, and the tasks tool shows it waiting. A foreground task of the turn you are in cannot be messaged."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -3872,7 +3869,7 @@ impl Tool for TaskMessageTool {
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
-            "description": "One message for one task. Running: it lands at that task's next step and the task keeps its own result path. Finished: it resumes the task from its transcript, detached unless background is false.",
+            "description": "One message for one task: read at its next step if it runs, a resume if it finished.",
             "properties": {
                 "task_id": {
                     "type": "string",
@@ -3884,7 +3881,7 @@ impl Tool for TaskMessageTool {
                 },
                 "workspace": {
                     "type": ["object", "null"],
-                    "description": format!("The Git worktree a finished task is resumed in. Set null or omit: a task that ran in its own worktree is resumed there from its own metadata, which is why this call needs nothing but an id. Pass it only to name that same worktree explicitly, the way the task tool's resume does — it must be the registered worktree the task actually ran in ({WORKTREE_CORRECTION}), and one that has been removed has to be restored at that path."),
+                    "description": "Omit: a finished task resumes in the worktree it ran in. Pass it only to name that same worktree again.",
                     "properties": {
                         "cwd": {"type": "string"},
                         "isolation": {"type": "string", "enum": ["git_worktree"]}
@@ -3894,7 +3891,7 @@ impl Tool for TaskMessageTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "How a finished task's resume runs; a running task is steered either way. Omitted, it detaches, like every task: the answer arrives as a completion notification and you keep working. Pass false only when you are blocked on the answer for your very next step; this call then returns it — unless another detached job holds the task's checkout, which refuses it rather than leaving you waiting."
+                    "description": "A finished task's resume, as the task tool's background: omitted, it detaches; false returns the answer here, and is refused while another detached job holds the task's checkout."
                 }
             },
             "required": ["task_id", "message"]

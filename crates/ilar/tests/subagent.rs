@@ -1271,59 +1271,38 @@ fn task_schema_guides_new_calls_without_placeholder_routing_values() {
         serde_json::json!(["object", "null"])
     );
     let tool_description = task.description();
-    assert!(tool_description.contains("bounded"), "{tool_description}");
-    assert!(
-        tool_description.contains("Delegation transfers ownership"),
-        "{tool_description}"
-    );
-    assert!(
-        tool_description.contains("do not perform the delegated scope yourself"),
-        "{tool_description}"
-    );
-    assert!(
-        tool_description.contains("Independent reviews must be explicitly delegated"),
-        "{tool_description}"
-    );
+    // Each rule once, where the model reads it first.
+    for rule in [
+        "bounded",
+        "do not do that scope yourself",
+        "delegate independent reviews as tasks of their own",
+        "A task runs in the background",
+        "follow-up turn",
+        "Never poll it; task_message steers it",
+        "Pass background false only when this turn's very next step needs the result",
+    ] {
+        assert!(
+            tool_description.contains(rule),
+            "{rule}: {tool_description}"
+        );
+    }
     let background = properties["background"]["description"].as_str().unwrap();
-    // One default for every agent, and the one override spelled out: a
-    // model that reads only this property must know what omitting it
-    // buys, when false is warranted, and what a mutable task holds.
+    assert!(background.contains("Omit to run detached"), "{background}");
     assert!(
-        background.contains("every task runs in the background"),
+        background.contains("false blocks this turn"),
         "{background}"
     );
     assert!(
-        background.contains("Pass false only when you are blocked on the result"),
+        background.contains("is refused rather than left waiting"),
         "{background}"
     );
-    assert!(
-        background.contains("holds your checkout's write lease"),
-        "{background}"
-    );
-    assert!(background.contains("follow-up turn"), "{background}");
-    assert!(background.contains("Do not poll"), "{background}");
-    assert!(background.contains("task_message"), "{background}");
-    // The prose paragraph teaches the same default the property does,
-    // and no longer splits it by agent.
-    assert!(
-        tool_description.contains("Every task runs in the background"),
-        "{tool_description}"
-    );
-    assert!(
-        tool_description.contains("Pass background false only when you are blocked"),
-        "{tool_description}"
-    );
-    assert!(
-        !tool_description.contains("Background follows the agent"),
-        "{tool_description}"
-    );
-    assert!(
-        !tool_description.contains("mutable agent's task runs in the foreground"),
-        "{tool_description}"
-    );
+    // Said once, in the description, not again here.
+    assert!(!background.contains("Do not poll"), "{background}");
     let subagent = properties["subagent_type"]["description"].as_str().unwrap();
     assert!(subagent.contains("explore (mutable)"), "{subagent}");
-    assert!(subagent.contains("marked read-only"), "{subagent}");
+    // One sentence per agent: no ".." where a description's own full
+    // stop met the joining one.
+    assert!(!subagent.contains(".."), "{subagent}");
     assert!(!subagent.contains("Prefer explore"), "{subagent}");
 }
 
@@ -1339,53 +1318,16 @@ fn task_schema_explains_the_workspace_decision_before_the_first_call() {
     let schema = task.input_schema();
     let description = task.description();
 
-    assert!(
-        description.contains("subagent_type names the agent"),
-        "{description}"
-    );
-    assert!(
-        description.contains("Omit workspace by default"),
-        "{description}"
-    );
-    assert!(
-        description.contains("serialize behind its write lease"),
-        "{description}"
-    );
-    assert!(
-        description.contains("dependent, sequential work"),
-        "{description}"
-    );
-    assert!(
-        description.contains("tasks in separate worktrees run at the same time"),
-        "{description}"
-    );
-    assert!(
-        description.contains("merge their divergent results yourself"),
-        "{description}"
-    );
-    assert!(
-        description.contains("git worktree add ../ilar-task-<name> -b task/<name>"),
-        "{description}"
-    );
-    assert!(
-        description.contains("{\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"}"),
-        "{description}"
-    );
-    assert!(
-        description.contains("ilar validates it and never creates one"),
-        "{description}"
-    );
-    assert!(
-        description.contains("when you are yourself running as a subagent"),
-        "{description}"
-    );
-    assert!(
-        description.contains(
-            "holds that lease, so your own edit, write, bash, service start and sudo calls are \
-             refused until it reports"
-        ),
-        "{description}"
-    );
+    // The checkout rule in the description, the recipe on the parameter.
+    for rule in [
+        "subagent_type fixes the task's tools",
+        "holds its write lease until it reports",
+        "run one after another, each seeing the last one's edits",
+        "your own edit, write, bash, service start and sudo calls are refused",
+        "give each a workspace",
+    ] {
+        assert!(description.contains(rule), "{rule}: {description}");
+    }
     // A root session handles a background task's completion on an
     // ordinary turn, holding no lease, so it must not be told it does.
     assert!(
@@ -1411,15 +1353,19 @@ fn task_schema_explains_the_workspace_decision_before_the_first_call() {
     let workspace = schema["properties"]["workspace"]["description"]
         .as_str()
         .unwrap();
-    assert!(
-        workspace.contains("Set null or omit to use the current checkout"),
-        "{workspace}"
-    );
-    assert!(
-        workspace.contains("git worktree add ../ilar-task-<name> -b task/<name>"),
-        "{workspace}"
-    );
-    assert!(workspace.contains("never creates one"), "{workspace}");
+    for rule in [
+        "omit to use your own checkout",
+        "run mutable tasks in parallel",
+        "keep editing while one runs",
+        "when you are yourself a subagent",
+        "git worktree add ../ilar-task-<name> -b task/<name>",
+        "{\"cwd\": \"../ilar-task-<name>\", \"isolation\": \"git_worktree\"}",
+        "never creates one",
+        "Outside a Git repository there is none",
+        "merging their results is yours",
+    ] {
+        assert!(workspace.contains(rule), "{rule}: {workspace}");
+    }
 }
 
 /// The dominant task failure store-wide. The refusal has to hand back the
