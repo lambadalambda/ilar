@@ -97,6 +97,12 @@ public box. Make the bot with BotFather and put its token here.
 | `media_dir` | `<home>/telegram` | Where attachments are fetched to. |
 | `group_mention_only` | `true` | In a group, answer only what is said to the bot: a mention anywhere in the message, a reply to one of its messages, or a command. `false` answers everything a group says. |
 
+**Finding your id.** A stranger is never answered, not even `/whoami`,
+so start from your username: set `allow_from = ["@yourname"]`, restart,
+send the bot `/whoami`, and replace the username with the numeric id it
+reports. A message from someone not on the list is logged as
+`telegram: ignoring <id> (@name)`, which is the other place an id shows.
+
 **In a group.** Add the bot to the group and, in BotFather, turn
 privacy mode off for it (`/setprivacy` → Disable) so it sees the
 conversation and not just commands; the rule above is what keeps it

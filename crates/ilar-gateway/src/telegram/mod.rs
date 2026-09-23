@@ -545,6 +545,45 @@ fn display_name(user: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+impl Telegram {
+    /// A command from before this start is not run (see
+    /// [`is_stale_command`]), but it is not left as it was: a password
+    /// in it comes back out of the chat — `/unlock` is the likeliest
+    /// thing to send right after a restart — and the chat is told, once,
+    /// that nothing ran. Strangers are told nothing, as ever.
+    async fn stale(&self, update: &Value, told: &mut std::collections::HashSet<i64>) {
+        let Some(message) = update.get("message") else {
+            return;
+        };
+        if !message.get("from").is_some_and(|from| self.allowed(from)) {
+            return;
+        }
+        let Some(chat) = message.pointer("/chat/id").and_then(Value::as_i64) else {
+            return;
+        };
+        let text = message.get("text").and_then(Value::as_str).unwrap_or("");
+        let secret = crate::commands::parse(text).is_some_and(|command| command.carries_a_secret());
+        if secret && let Some(id) = message.get("message_id").and_then(Value::as_i64) {
+            let _ = self
+                .api
+                .call("deleteMessage", json!({"chat_id": chat, "message_id": id}))
+                .await;
+        }
+        if told.insert(chat) {
+            let _ = self
+                .api
+                .call(
+                    "sendMessage",
+                    json!({
+                        "chat_id": chat,
+                        "text": "That came in while I was restarting, so nothing ran: send it again.",
+                    }),
+                )
+                .await;
+        }
+    }
+}
+
 /// Whether an update from before this start would act on the present:
 /// a command, or a tapped button. A `/grant always` tapped hours ago
 /// must not answer whatever ask is standing now, and an `/unlock` the
@@ -633,6 +672,8 @@ impl Channel for Telegram {
             // in it are dropped — see [`is_stale_command`]; the
             // messages are answered.
             let mut backlog = true;
+            // The chats told that their backlog commands did not run.
+            let mut told = std::collections::HashSet::new();
             let mut retry = POLL_RETRY;
             loop {
                 let mut params = json!({
@@ -673,6 +714,7 @@ impl Channel for Telegram {
                     }
                     if backlog && is_stale_command(update) {
                         log("telegram: a command from before the start was dropped");
+                        self.stale(update, &mut told).await;
                         continue;
                     }
                     if let Err(error) = self.update(update, &inbound).await {
@@ -1003,6 +1045,22 @@ mod tests {
         );
         assert_eq!(polls[1]["timeout"], POLL_SECS);
         assert_eq!(polls[1]["offset"], 4, "past the backlog");
+        // Not run, but not silent either: the password is taken back out
+        // — the likeliest command after a restart is `/unlock` — and the
+        // chat is told once that nothing ran.
+        let deleted: Vec<&Value> = calls
+            .iter()
+            .filter(|(m, _)| m == "deleteMessage")
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(deleted.len(), 1, "{calls:?}");
+        let told: Vec<&str> = calls
+            .iter()
+            .filter(|(m, p)| m == "sendMessage" && p["chat_id"] == 1)
+            .filter_map(|(_, p)| p["text"].as_str())
+            .filter(|text| text.contains("while I was restarting"))
+            .collect();
+        assert_eq!(told.len(), 1, "one line per chat: {calls:?}");
         run.stop().await;
     }
 
