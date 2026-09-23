@@ -123,6 +123,62 @@ pub fn failed_reply(what: &str, error: &anyhow::Error) -> String {
     failed_line(what, &format!("{error:#}"))
 }
 
+/// What a chat is told when its turn failed. The common provider
+/// failures get a plain first line and what to do about them, the way
+/// [`EMPTY_REPLY`] has one; the clipped cause stays under it for the
+/// operator. Read from the error's text, which is all the core hands on.
+pub fn turn_failed_reply(error: &anyhow::Error) -> String {
+    let chain = format!("{error:#}");
+    let lower = chain.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+    // The status the transport wrote (`HTTP 429: …`), not any three
+    // digits in the chain: "prompt is too long: 201429 tokens" is not a
+    // rate limit, and "140123 tokens" is not a refused key.
+    let status = http_status(&lower);
+    let rate_limited =
+        status == Some(429) || has(&["too many requests", "rate limit", "rate-limit"]);
+    let refused = matches!(status, Some(401 | 403))
+        || has(&["invalid api key", "invalid_api_key", "no credential"]);
+    let trouble = status.is_some_and(|code| (500..600).contains(&code))
+        || has(&[
+            "overloaded",
+            "internal server error",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+        ]);
+    let plain = if rate_limited {
+        Some(
+            "The model provider is rate-limiting me right now. Send it again in a minute, or switch with /model.",
+        )
+    } else if refused {
+        Some(
+            "The model provider refused my credentials, so nothing ran. The key needs fixing on the gateway's box; /model switches to another provider meanwhile.",
+        )
+    } else if trouble {
+        Some(
+            "The model provider is having trouble on its side. Send it again in a minute, or switch with /model.",
+        )
+    } else {
+        None
+    };
+    let cause = failed_reply("That turn", error);
+    match plain {
+        Some(plain) => format!("{plain}\n{cause}"),
+        None => cause,
+    }
+}
+
+/// The status after the first `http ` in a lowercased error chain —
+/// how the transport writes a refused request — if it is three digits.
+fn http_status(lower: &str) -> Option<u16> {
+    let at = lower.find("http ")? + "http ".len();
+    let digits: String = lower[at..].chars().take(3).collect();
+    (digits.len() == 3 && digits.chars().all(|c| c.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
 /// The same for a cause that is already a line of its own.
 pub fn failed_line(what: &str, cause: &str) -> String {
     let cause: String = cause.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -734,12 +790,8 @@ impl Gateway {
             Err(TurnError::Closed) => log(&format!("{key}: turn dropped, the chat started over")),
             Err(TurnError::Failed(error)) => {
                 log(&format!("{key}: turn failed: {error:#}"));
-                self.deliver(
-                    &seat.channel,
-                    &seat.chat_id,
-                    &failed_reply("That turn", &error),
-                )
-                .await;
+                self.deliver(&seat.channel, &seat.chat_id, &turn_failed_reply(&error))
+                    .await;
             }
         }
     }
@@ -951,7 +1003,7 @@ impl Gateway {
                     "every {}",
                     human_duration(std::time::Duration::from_secs(*secs))
                 ),
-                Schedule::At { at } => format!("once at {}", at.to_rfc3339()),
+                Schedule::At { at } => format!("once at {}", at.format("%Y-%m-%d %H:%M UTC")),
             };
             let next = job
                 .next_run
@@ -1062,7 +1114,13 @@ impl Gateway {
             Ok(list) if list.is_empty() => "Nothing pending.".to_string(),
             Ok(list) => list
                 .iter()
-                .map(|p| format!("{} — {}", p.id, p.plan.describe().join("; ")))
+                .map(|p| {
+                    format!(
+                        "{} — {}",
+                        p.id,
+                        p.plan.describe_in(Some(&self.memory)).join("; ")
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n"),
             Err(error) => failed_reply("/pending", &error),
@@ -1142,7 +1200,7 @@ impl Gateway {
                     "Dropped: {}",
                     taken
                         .iter()
-                        .flat_map(|p| p.plan.describe())
+                        .flat_map(|p| p.plan.describe_in(Some(&self.memory)))
                         .collect::<Vec<_>>()
                         .join("; ")
                 ),
@@ -1248,7 +1306,7 @@ impl Gateway {
                     tokio::time::sleep(RESTART_GRACE).await;
                     me.cancel();
                 });
-                "Restarting: turns in flight are stopped, and the service starts the gateway again."
+                "Restarting: turns in flight are stopped. Under the service unit the gateway comes straight back; run by hand, it stops."
                     .to_string()
             }
             Command::Unlock(password) => {
@@ -1576,10 +1634,17 @@ impl Gateway {
         let Some(job) = job else {
             return;
         };
+        let next = match (&job.schedule, job.retries) {
+            (crate::cron::Schedule::At { .. }, 0) => " It runs once more in a minute.",
+            (crate::cron::Schedule::At { .. }, _) => {
+                " That was its second try; it will not run again."
+            }
+            _ => " It runs again at its next scheduled time.",
+        };
         self.deliver(
             channel,
             chat_id,
-            &failed_line(&format!("Job {name}"), cause),
+            &format!("{}{next}", failed_line(&format!("Job {name}"), cause)),
         )
         .await;
         self.retry_once(key, job);
@@ -1695,7 +1760,7 @@ impl Gateway {
         if self.settings.review.approval {
             match self.pending.stage(&seat.key, plan.clone()) {
                 Ok(staged) => {
-                    let lines = plan.describe().join("; ");
+                    let lines = plan.describe_in(Some(&self.memory)).join("; ");
                     self.deliver_with_buttons(
                         &seat.channel,
                         &seat.chat_id,
@@ -2056,6 +2121,43 @@ pub fn attachments(media: &[PathBuf]) -> (Vec<ImageContent>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A provider failure reads as what happened and what to do, with
+    /// the raw cause under it for the operator.
+    #[test]
+    fn a_turn_failure_says_what_happened_in_plain_words_first() {
+        let limited = anyhow::anyhow!("HTTP 429 Too Many Requests: {{\"error\":{{}}}}");
+        let reply = turn_failed_reply(&limited);
+        assert!(
+            reply.starts_with("The model provider is rate-limiting me"),
+            "{reply}"
+        );
+        assert!(reply.contains("/model"), "{reply}");
+        assert!(reply.contains("\nThat turn failed: HTTP 429"), "{reply}");
+
+        let refused = anyhow::anyhow!("HTTP 401 Unauthorized: invalid api key");
+        assert!(
+            turn_failed_reply(&refused).starts_with("The model provider refused my credentials")
+        );
+
+        let down = anyhow::anyhow!("HTTP 503 Service Unavailable");
+        assert!(turn_failed_reply(&down).starts_with("The model provider is having trouble"));
+
+        // Three digits elsewhere in the chain are not a status.
+        let long = anyhow::anyhow!("HTTP 400 Bad Request: prompt is too long: 201429 tokens");
+        assert!(turn_failed_reply(&long).starts_with("That turn failed: HTTP 400"));
+        let counted = anyhow::anyhow!("stream ended after 140123 tokens (max_tokens of 500)");
+        assert!(turn_failed_reply(&counted).starts_with("That turn failed:"));
+        // Anthropic's overloaded is trouble, not a rate limit.
+        let overloaded = anyhow::anyhow!("HTTP 529: overloaded");
+        assert!(turn_failed_reply(&overloaded).starts_with("The model provider is having trouble"));
+        // Anything else keeps the one clipped line it always had.
+        let other = anyhow::anyhow!("the workspace is gone");
+        assert_eq!(
+            turn_failed_reply(&other),
+            "That turn failed: the workspace is gone"
+        );
+    }
 
     #[test]
     fn a_failure_names_what_and_why_on_one_clipped_line() {

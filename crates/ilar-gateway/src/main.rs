@@ -87,6 +87,13 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Invite => {
+            // Invites are Delta Chat's: say so, rather than send someone
+            // with only Telegram looking for a gateway that is running.
+            if channel_table(&config, "deltachat").is_none() {
+                anyhow::bail!(
+                    "invites are for Delta Chat, and [channels.deltachat] is not configured; a Telegram bot is found by its @name"
+                );
+            }
             let settings: DeltaChatConfig = channel_table(&config, "deltachat")
                 .unwrap_or_default()
                 .try_into()

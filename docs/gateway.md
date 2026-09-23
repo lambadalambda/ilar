@@ -103,17 +103,21 @@ send the bot `/whoami`, and replace the username with the numeric id it
 reports. A message from someone not on the list is logged as
 `telegram: ignoring <id> (@name)`, which is the other place an id shows.
 
-**In a group.** Add the bot to the group and, in BotFather, turn
-privacy mode off for it (`/setprivacy` → Disable) so it sees the
-conversation and not just commands; the rule above is what keeps it
-from answering all of it. A message reaches the model as `Name: text`
-so it can tell who is asking, and the mention is taken out of the
-text wherever it sat. Allowlisting still applies per sender: a group
+**In a group.** Add the bot to the group. Privacy mode can stay on:
+Telegram still hands the bot commands, mentions and replies to its
+messages, which is all it answers. Turn it off (`/setprivacy` →
+Disable) only with `group_mention_only = false`. The bot does not read
+the rest of the thread; a mention that replies to someone else carries
+that message as `(replying to Name: "…")`. A message reaches the model
+as `Name: text` so it can tell who is asking, and the mention is taken
+out of the text wherever it sat. A sticker, a location, a contact or a
+poll reaches it as a line saying so; an edited message does not reach
+it at all. Allowlisting still applies per sender: a group
 member who is not in `allow_from` is ignored even when they mention
 the bot. A group is a room to the gateway — it gets no core memory
 and cannot reach the memory files or the session store. Nor can its
 members reach past it: `/pending`, `/approve`, `/reject`, `/restart`,
-`/unlock`, `/password` and `/model … --save` answer "works only in a
+`/unlock`, `/password`, `/model … --save` and `/grant always` answer "works only in a
 private chat with me" there (a message carrying a password is still
 deleted), and Telegram offers a group a menu without them.
 
@@ -123,8 +127,8 @@ them. A grant ask carries its four answers as buttons under it, and a
 staged memory carries *Remember* and *Drop*; a tap is handled exactly
 as the typed command from the person who tapped, the allowlist
 included, and the keyboard comes off the message once it has been
-answered. Replies are plain text under Telegram's 4096-character cap,
-split at line breaks; pictures go as photos, other files as documents,
+answered. Replies are plain text in pieces of up to 4000 characters,
+under Telegram's 4096-character cap, split at line breaks; pictures go as photos, other files as documents,
 with a short text as the first one's caption. A photo, document, voice
 note, audio or video the person sends is fetched and handed to the
 turn as a file. In a group, the bot sees only commands and mentions
@@ -155,7 +159,9 @@ told so, and can build one with its ordinary tools.
 The account is configured on first start and reused after. The
 adapter ignores its own messages, info messages and other bots,
 accepts a contact request from an allowed address, flags group chats,
-and hands attachments to the turn as files. Replies go out as text, or
+and hands attachments to the turn as files. A Delta Chat group has no
+mention rule: the bot answers every message an allowed member sends
+there. Replies go out as text, or
 as a file message per attachment with a short text as the first one's
 caption.
 
@@ -219,7 +225,7 @@ A message that is a slash command is answered by the gateway itself:
 | `/approve <id\|all>`, `/reject <id\|all>` | Decide on it. Bare, they list what is staged and ask which: on Telegram one tap sends the bare word. |
 | `/abort` (or `/stop`) | Cancel the turn running on this chat. The chat gets "Aborted."; messages that arrived meanwhile run as a turn of their own. |
 | `/grant [session\|always]`, `/deny` | Answer a tool's ask for a [stored secret](secrets.md) or for root: the chat is shown who asks — the tool, or "bash (subagent)" for a child of the turn — the secret, and the command verbatim, indented under a blank line so its last line cannot be read as part of the instructions; a command too long for one message is cut with a tail saying so. Bare `/grant` is once; ten minutes without an answer is a no. Approval only: a password typed after the span is refused and pointed at `/password`. |
-| `/password <pw>` | The [sudo password](secrets.md#sudo), for the ask that follows a yes where sudo turns out to want one. The ask shows the command again; ten minutes without an answer is a no, and so is `/deny`, which fails the sudo call. The password is in the chat's history the moment it is sent: the adapter deletes that message where the channel allows it, and the reply says whether to delete it yourself. It is held in memory until this chat is restarted. `/password` alone answers with its usage line, and `/password` against the approval ask says which question is waiting. |
+| `/password <pw>` | The [sudo password](secrets.md#sudo), for the ask that follows a yes where sudo turns out to want one. The ask shows the command again; ten minutes without an answer is a no, and so is `/deny`, which fails the sudo call. The password is in the chat's history the moment it is sent: the adapter deletes that message where the channel allows it, and the reply says whether to delete it yourself. It is held in memory until `/new` or the next gateway restart. `/password` alone answers with its usage line, and `/password` against the approval ask says which question is waiting. |
 | `/unlock <master password>` | Open a [sealed secret store](secrets.md#a-master-password) for this gateway process. The password is in the chat's history the moment it is sent: the adapter deletes that message where the channel allows it, and the reply says whether to delete it yourself. `/unlock` alone answers with its usage line. A tool call that wants a sealed store says so in the room and is refused until one arrives — the password is never asked for as a reply, since a reply stays in the history. The gateway reads provider keys at start, while the store is still locked, so keep provider keys in `ilar.toml` on that box. |
 | `/compact` | Replace this chat's conversation with one handover summary, as the context filling would; waits for a running turn. The summary goes to the daily note, the chat gets its size. |
 | `/status` | This chat's model; whether a turn is running and for how long, or a compaction; subagents running and results held for delivery; an ask waiting for an answer; the context size after the last turn. |

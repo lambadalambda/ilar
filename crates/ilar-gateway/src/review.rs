@@ -250,6 +250,24 @@ impl Plan {
 
     /// One line per change, for the chat.
     pub fn describe(&self) -> Vec<String> {
+        self.describe_in(None)
+    }
+
+    /// [`Plan::describe`], with a note the draft names only by id shown
+    /// by its title from `store`: "note forget: 01J…" said nothing about
+    /// what would be forgotten.
+    pub fn describe_in(&self, store: Option<&MemoryStore>) -> Vec<String> {
+        let titled = |note: &NoteDraft| -> String {
+            match (&note.title, &note.id, store) {
+                (None, Some(id), Some(store)) => store
+                    .get(std::slice::from_ref(id))
+                    .ok()
+                    .and_then(|found| found.into_iter().next())
+                    .map(|found| found.title)
+                    .unwrap_or_else(|| note.subject()),
+                _ => note.subject(),
+            }
+        };
         let mut lines = Vec::new();
         for edit in &self.memory {
             let what = match edit.action.as_str() {
@@ -267,7 +285,7 @@ impl Plan {
                     note.kind.map(kind_name).unwrap_or("?"),
                     note.subject()
                 ),
-                other => format!("note {other}: {}", note.subject()),
+                other => format!("note {other}: {}", titled(note)),
             });
         }
         for skill in &self.skills {
@@ -360,7 +378,19 @@ impl Plan {
                         },
                     )
                     .map(|amended| format!("note {id} amended: {}", amended.title)),
-                ("forget", Some(id)) => store.forget(id).map(|()| format!("note {id} forgotten")),
+                ("forget", Some(id)) => {
+                    // Named before it goes: afterwards there is no title
+                    // to find, and an id tells the chat nothing.
+                    let title = store
+                        .get(&[id.to_string()])
+                        .ok()
+                        .and_then(|found| found.into_iter().next())
+                        .map(|found| found.title)
+                        .unwrap_or_else(|| id.to_string());
+                    store
+                        .forget(id)
+                        .map(|()| format!("note forgotten: {title}"))
+                }
                 ("amend" | "forget", None) => {
                     Err(anyhow::anyhow!("{} needs the note's id", note.action()))
                 }
@@ -538,16 +568,19 @@ mod tests {
             moved.id, wrong.id
         ))
         .expect("a plan");
+        // Without a store only the id is known; with one, the title.
         let described = plan.describe();
         assert_eq!(described[0], format!("note amend: {}", moved.id));
-        assert_eq!(described[1], format!("note forget: {}", wrong.id));
+        let described = plan.describe_in(Some(&store));
+        assert_eq!(described[0], "note amend: Deploy box");
+        assert_eq!(described[1], "note forget: Disk");
 
         let applied = plan.apply(&store, &skills);
         assert_eq!(
             applied.kept,
             [
                 format!("note {} amended: Deploy box", moved.id),
-                format!("note {} forgotten", wrong.id),
+                "note forgotten: Disk".to_string(),
             ]
         );
         assert_eq!(applied.failed.len(), 1, "{:?}", applied.failed);

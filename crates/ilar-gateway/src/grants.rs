@@ -107,7 +107,7 @@ pub fn decided(secret: &str, asker: &Asker, grant: Option<Grant>) -> String {
     match grant {
         Some(Grant::Once) => format!("{secret} allowed for {shown}, this once."),
         Some(Grant::Session) => {
-            format!("{secret} allowed for {shown} until this chat is restarted.")
+            format!("{secret} allowed for {shown} until /new or the next gateway restart.")
         }
         Some(Grant::Always) => format!(
             "{secret} allowed for {shown} from now on; ilar secret revoke {secret} --tool {} \
@@ -323,7 +323,7 @@ pub fn password_ask_text(prompt: &PasswordPrompt, asker: &Asker) -> String {
     format!(
         "🔑 {again}{} needs the sudo password to run:\n\n{}\n/password <pw> answers it; the \
          message is deleted afterwards where the channel allows it, and the password is held in \
-         memory until this chat is restarted. /deny refuses, and so does {} minutes without an \
+         memory until /new or the next gateway restart. /deny refuses, and so does {} minutes without an \
          answer.",
         asker.shown,
         shown_command(&prompt.detail),

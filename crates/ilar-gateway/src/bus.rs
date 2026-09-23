@@ -112,6 +112,55 @@ pub fn split_for_delivery(text: &str, max_lines: usize, line_len: usize) -> Vec<
     pieces
 }
 
+/// Cut a long text into pieces of at most `max_units` UTF-16 units,
+/// newlines included, for a channel that caps a message that way rather
+/// than by what it folds — Telegram's 4096, in which an emoji outside the
+/// basic plane counts twice. Pieces split at line breaks; a single line
+/// too long for a piece is cut at a space where it can be. A piece that
+/// would be only whitespace is dropped: Telegram refuses an empty text.
+pub fn split_by_chars(text: &str, max_units: usize) -> Vec<String> {
+    let max_units = max_units.max(2);
+    let units = |text: &str| text.chars().map(char::len_utf16).sum::<usize>();
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    let mut used = 0;
+    for line in text.split_inclusive('\n') {
+        let mut line = line;
+        while units(line) > max_units {
+            // The byte where `max_units` runs out, at a char boundary.
+            let mut seen = 0;
+            let hard = line
+                .char_indices()
+                .find(|(_, c)| {
+                    seen += c.len_utf16();
+                    seen > max_units
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+            let cut = match line[..hard].rfind(' ') {
+                Some(space) if space > 0 => space + 1,
+                _ => hard,
+            };
+            if !current.is_empty() {
+                pieces.push(std::mem::take(&mut current));
+                used = 0;
+            }
+            pieces.push(line[..cut].to_string());
+            line = &line[cut..];
+        }
+        let needed = units(line);
+        if used + needed > max_units && !current.is_empty() {
+            pieces.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        current.push_str(line);
+        used += needed;
+    }
+    pieces.push(current);
+    pieces.retain(|piece| !piece.trim().is_empty());
+    pieces
+}
+
 /// The two halves of a key. A chat id may itself contain colons, so the
 /// split is at the first one.
 pub fn split_key(key: &str) -> Option<(&str, &str)> {
@@ -121,6 +170,40 @@ pub fn split_key(key: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A list of forty short lines is one Telegram message, not two:
+    /// the cap is characters, and every piece stays under it.
+    #[test]
+    fn a_character_capped_channel_splits_by_characters() {
+        let list: String = (0..40).map(|i| format!("- item {i}\n")).collect();
+        assert_eq!(split_by_chars(&list, 4000), vec![list.clone()]);
+        let long: String = (0..600).map(|i| format!("line number {i}\n")).collect();
+        let pieces = split_by_chars(&long, 4000);
+        assert!(pieces.len() > 1);
+        assert!(pieces.iter().all(|piece| piece.chars().count() <= 4000));
+        assert_eq!(pieces.concat(), long, "nothing lost or doubled");
+        let one_line = "word ".repeat(1000);
+        let pieces = split_by_chars(&one_line, 4000);
+        assert!(pieces.iter().all(|piece| piece.chars().count() <= 4000));
+        assert_eq!(pieces.concat(), one_line);
+        // Telegram counts UTF-16 units: an emoji outside the basic plane
+        // is two, and 3000 of them are 6000 units, not 3000.
+        let emoji = "😀".repeat(3000);
+        let pieces = split_by_chars(&emoji, 4000);
+        assert!(pieces.len() > 1);
+        assert!(
+            pieces
+                .iter()
+                .all(|piece| piece.chars().map(char::len_utf16).sum::<usize>() <= 4000)
+        );
+        // Never a piece of nothing but whitespace, which Telegram refuses.
+        let blob = format!("\n\n\n{}", "x".repeat(5000));
+        assert!(
+            split_by_chars(&blob, 4000)
+                .iter()
+                .all(|p| !p.trim().is_empty())
+        );
+    }
 
     #[test]
     fn long_texts_split_by_display_lines_the_way_delta_chat_counts() {

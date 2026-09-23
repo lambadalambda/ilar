@@ -73,11 +73,10 @@ const POLL_SECS: u64 = 30;
 const POLL_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 const POLL_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 /// Telegram's cap on a message is 4096 characters and on a caption
-/// 1024. Pieces are cut by the gateway's line-counting splitter at 36
-/// lines of 100 — at most 3,600 characters and 36 line breaks — with
-/// room to spare in case the cap counts wider than code points.
-const PIECE_LINES: usize = 36;
-const PIECE_LINE_CHARS: usize = 100;
+/// 1024. Pieces are cut by characters, newlines included, with room to
+/// spare in case the cap counts wider than code points. Counting lines
+/// instead split a forty-line list of a few hundred characters in two.
+const PIECE_CHARS: usize = 4000;
 const CAPTION_CHARS: usize = 1024;
 /// A button's callback data may be at most 64 bytes.
 const CALLBACK_BYTES: usize = 64;
@@ -253,6 +252,20 @@ impl Telegram {
                 return Ok(());
             }
         }
+        // A reply to someone else carries what it answers: "yes, that
+        // one" means nothing to the model without it.
+        let bot_id = self.bot_id.load(std::sync::atomic::Ordering::Acquire);
+        if let Some(quoted) = quoted_reply(message, bot_id) {
+            text = format!("{quoted} {text}");
+        }
+        // Stickers, places, contacts, polls: no text, but not nothing —
+        // they used to arrive as silence, with no reply and no ack.
+        if let Some(note) = non_text_note(message) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&note);
+        }
         // A file that cannot be fetched — too big for the API, a
         // network blip — does not take the person's words with it: the
         // text goes on, with a note where the file would have been.
@@ -264,9 +277,13 @@ impl Telegram {
                     if !text.is_empty() {
                         text.push('\n');
                     }
-                    text.push_str(
-                        "(an attachment came with this message but could not be fetched)",
-                    );
+                    // The one cause worth naming: the Bot API will not
+                    // hand a bot a file over 20 MB, whatever it is.
+                    text.push_str(if format!("{error:#}").contains("too big") {
+                        "(an attachment came with this message but is too large for a bot to fetch: Telegram's limit is 20 MB)"
+                    } else {
+                        "(an attachment came with this message but could not be fetched)"
+                    });
                     Vec::new()
                 }
             },
@@ -531,6 +548,89 @@ fn strip_mention(text: &str, username: &str) -> String {
     out.trim().to_string()
 }
 
+/// `(replying to Alice: "…")` for a reply to someone other than the
+/// bot, with the quoted text clipped; `None` otherwise.
+fn quoted_reply(message: &Value, bot_id: i64) -> Option<String> {
+    let replied = message.get("reply_to_message")?;
+    let from = replied.get("from")?;
+    if from.get("id").and_then(Value::as_i64) == Some(bot_id) {
+        return None;
+    }
+    let said = replied
+        .get("text")
+        .or_else(|| replied.get("caption"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let said: String = said.split_whitespace().collect::<Vec<_>>().join(" ");
+    let said = if said.chars().count() > QUOTE_CHARS {
+        format!(
+            "{}…",
+            said.chars().take(QUOTE_CHARS - 1).collect::<String>()
+        )
+    } else {
+        said
+    };
+    // A channel post or an anonymous admin comes "from" a stand-in
+    // user; the chat it speaks for is the name worth giving.
+    let name = replied
+        .pointer("/sender_chat/title")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| display_name(from))
+        .unwrap_or_else(|| "someone".into());
+    Some(format!("(replying to {name}: \"{said}\")"))
+}
+
+/// How much of a replied-to message rides along with the reply.
+const QUOTE_CHARS: usize = 200;
+
+/// A line for what a message carries instead of text.
+fn non_text_note(message: &Value) -> Option<String> {
+    let str_of =
+        |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+    if let Some(sticker) = message.get("sticker") {
+        return Some(match str_of(sticker, "emoji") {
+            Some(emoji) => format!("(sent a sticker: {emoji})"),
+            None => "(sent a sticker)".into(),
+        });
+    }
+    if let Some(venue) = message.get("venue") {
+        let title = str_of(venue, "title").unwrap_or_default();
+        let address = str_of(venue, "address").unwrap_or_default();
+        return Some(format!("(shared a place: {title}, {address})"));
+    }
+    if let Some(location) = message.get("location") {
+        let lat = location.get("latitude").and_then(Value::as_f64)?;
+        let lon = location.get("longitude").and_then(Value::as_f64)?;
+        return Some(format!("(shared a location: {lat:.5}, {lon:.5})"));
+    }
+    if let Some(contact) = message.get("contact") {
+        let name = display_name(contact).unwrap_or_default();
+        let phone = str_of(contact, "phone_number").unwrap_or_default();
+        return Some(format!("(shared a contact: {name}, {phone})"));
+    }
+    if let Some(poll) = message.get("poll") {
+        let question = str_of(poll, "question").unwrap_or_default();
+        let options: Vec<String> = poll
+            .get("options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|option| str_of(option, "text"))
+            .collect();
+        return Some(format!(
+            "(posted a poll: {question} — {})",
+            options.join(" / ")
+        ));
+    }
+    if let Some(dice) = message.get("dice") {
+        let emoji = str_of(dice, "emoji").unwrap_or_else(|| "🎲".into());
+        let value = dice.get("value").and_then(Value::as_i64).unwrap_or(0);
+        return Some(format!("(rolled {emoji}: {value})"));
+    }
+    None
+}
+
 /// What a person is called: first and last name as Telegram has them,
 /// else the username, else nothing.
 fn display_name(user: &Value) -> Option<String> {
@@ -555,19 +655,51 @@ impl Telegram {
         let Some(message) = update.get("message") else {
             return;
         };
-        if !message.get("from").is_some_and(|from| self.allowed(from)) {
+        let Some(from) = message.get("from") else {
+            return;
+        };
+        // Another bot is not a person, whatever the allowlist says.
+        if from.get("is_bot").and_then(Value::as_bool) == Some(true) || !self.allowed(from) {
             return;
         }
         let Some(chat) = message.pointer("/chat/id").and_then(Value::as_i64) else {
             return;
         };
-        let text = message.get("text").and_then(Value::as_str).unwrap_or("");
-        let secret = crate::commands::parse(text).is_some_and(|command| command.carries_a_secret());
-        if secret && let Some(id) = message.get("message_id").and_then(Value::as_i64) {
-            let _ = self
-                .api
-                .call("deleteMessage", json!({"chat_id": chat, "message_id": id}))
-                .await;
+        // As `incoming` reads it: our own `@name` off the command
+        // (`/unlock@ilar_bot pw` is how a group autocompletes it), and a
+        // command still carrying an `@` is another bot's business.
+        let username = self.username.lock().unwrap().clone().unwrap_or_default();
+        let raw = message.get("text").and_then(Value::as_str).unwrap_or("");
+        let text = strip_mention(raw, &username);
+        if text
+            .split_whitespace()
+            .next()
+            .is_some_and(|first| first.starts_with('/') && first.contains('@'))
+        {
+            return;
+        }
+        let secret =
+            crate::commands::parse(&text).is_some_and(|command| command.carries_a_secret());
+        if secret {
+            let deleted = match message.get("message_id").and_then(Value::as_i64) {
+                Some(id) => self
+                    .api
+                    .call("deleteMessage", json!({"chat_id": chat, "message_id": id}))
+                    .await
+                    .is_ok_and(|done| done.as_bool() != Some(false)),
+                None => false,
+            };
+            // Every time, not once per chat: a password left standing is
+            // the one thing the person must hear about.
+            if !deleted {
+                let _ = self
+                    .api
+                    .call(
+                        "sendMessage",
+                        json!({"chat_id": chat, "text": crate::gateway::password_advice(false)}),
+                    )
+                    .await;
+            }
         }
         if told.insert(chat) {
             let _ = self
@@ -582,6 +714,12 @@ impl Telegram {
                 .await;
         }
     }
+}
+
+/// A text's length the way Telegram measures its caps: UTF-16 units,
+/// in which an emoji outside the basic plane counts twice.
+fn utf16_len(text: &str) -> usize {
+    text.chars().map(char::len_utf16).sum()
 }
 
 /// Whether an update from before this start would act on the present:
@@ -654,8 +792,8 @@ impl Channel for Telegram {
 
     fn constraints(&self) -> &str {
         "plain text, no markdown rendering — asterisks and underscores show as typed; a long \
-         text is sent as several messages, each under 36 lines of 100 characters, split at line \
-         breaks, so write it whole; files are attached by path, pictures are shown as photos, \
+         text is sent as several messages of up to 4000 characters each, split at line breaks, \
+         so write it whole; files are attached by path, pictures are shown as photos, \
          and a text that fits one message rides as the first file's caption"
     }
 
@@ -721,7 +859,10 @@ impl Channel for Telegram {
                         log(&format!("telegram: update dropped: {error:#}"));
                     }
                 }
-                backlog = false;
+                // `getUpdates` hands back at most 100: a full batch means
+                // more of the backlog waits, and a command in it must not
+                // run as live just because it came 101st.
+                backlog = backlog && updates.as_array().is_some_and(|batch| batch.len() >= 100);
             }
         })
     }
@@ -827,14 +968,13 @@ impl Channel for Telegram {
         Box::pin(async move {
             let chat_id = Self::chat_id(&message)?;
             let markup = keyboard(&message.buttons);
-            let mut pieces =
-                crate::bus::split_for_delivery(&message.text, PIECE_LINES, PIECE_LINE_CHARS);
+            let mut pieces = crate::bus::split_by_chars(&message.text, PIECE_CHARS);
             // A text that fits a caption rides on the first file; a
             // longer one goes ahead of the files as messages of its own.
             let mut caption = None;
             if !message.media.is_empty()
                 && pieces.len() == 1
-                && pieces[0].chars().count() <= CAPTION_CHARS
+                && utf16_len(&pieces[0]) <= CAPTION_CHARS
             {
                 caption = pieces.pop();
             }
@@ -1115,8 +1255,11 @@ mod tests {
             .unwrap();
         let message = next(&mut run.inbound).await;
         assert!(message.text.starts_with("the report\n"), "{}", message.text);
+        // Too big is the one cause worth naming: the limit is the API's.
         assert!(
-            message.text.contains("could not be fetched"),
+            message
+                .text
+                .contains("too large for a bot to fetch: Telegram's limit is 20 MB"),
             "{}",
             message.text
         );
@@ -1609,15 +1752,74 @@ mod tests {
         assert!(rows.iter().all(|row| row.as_array().unwrap().len() == 2));
     }
 
+    /// What carries no text still arrives: it used to be silence, with
+    /// no reply and no ack. A reply to someone else brings its quote.
+    #[tokio::test]
+    async fn stickers_places_and_replies_reach_the_model_as_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut run = started(
+            TelegramConfig {
+                allow_from: vec!["1".into()],
+                ..TelegramConfig::default()
+            },
+            dir.path(),
+        );
+        run.updates.send(json!([])).await.unwrap();
+        let with = |update_id: i64, extra: Value| {
+            let mut message = json!({
+                "message_id": update_id * 10,
+                "from": user(1, Some("alice")),
+                "chat": {"id": 1, "type": "private"},
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                message[key] = value.clone();
+            }
+            json!({"update_id": update_id, "message": message})
+        };
+        run.updates
+            .send(json!([
+                with(
+                    1,
+                    json!({"sticker": {"file_id": "s", "file_unique_id": "s", "emoji": "👍"}})
+                ),
+                with(
+                    2,
+                    json!({"location": {"latitude": 52.52, "longitude": 13.405}})
+                ),
+                with(
+                    3,
+                    json!({
+                        "text": "yes, that one",
+                        "reply_to_message": {
+                            "message_id": 5,
+                            "from": {"id": 7, "first_name": "Bob"},
+                            "text": "shall we take the 9:40 train?",
+                        }
+                    })
+                ),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(next(&mut run.inbound).await.text, "(sent a sticker: 👍)");
+        assert_eq!(
+            next(&mut run.inbound).await.text,
+            "(shared a location: 52.52000, 13.40500)"
+        );
+        assert_eq!(
+            next(&mut run.inbound).await.text,
+            "(replying to Bob: \"shall we take the 9:40 train?\") yes, that one"
+        );
+        run.stop().await;
+    }
+
     #[test]
     fn the_constraints_name_the_cap_the_code_splits_at() {
         let dir = tempfile::tempdir().unwrap();
         let (api, _updates) = fake();
         let channel = Telegram::over(TelegramConfig::default(), api, dir.path());
         let text = channel.constraints().to_string();
-        assert!(text.contains(&format!("{PIECE_LINES} lines")), "{text}");
         assert!(
-            text.contains(&format!("{PIECE_LINE_CHARS} characters")),
+            text.contains(&format!("{PIECE_CHARS} characters")),
             "{text}"
         );
     }

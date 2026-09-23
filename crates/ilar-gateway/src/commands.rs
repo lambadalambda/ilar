@@ -352,7 +352,7 @@ pub const MENU: &[(&str, &str)] = &[
         "grant",
         "allow a tool's ask for a secret or root: [session|always]",
     ),
-    ("deny", "refuse it"),
+    ("deny", "refuse a secret or root ask"),
     ("password", "the sudo password, after a yes: /password <pw>"),
     (
         "unlock",

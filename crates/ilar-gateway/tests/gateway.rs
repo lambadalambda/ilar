@@ -814,6 +814,12 @@ async fn a_scheduled_turn_that_fails_says_so_and_a_one_shot_gets_one_more_go() {
         sent[1].text.starts_with("Job ping failed:") && sent[1].text.contains("provider is down"),
         "{sent:?}"
     );
+    // And says what happens next, rather than leaving the person to
+    // wonder whether the reminder is gone.
+    assert!(
+        sent[1].text.contains("runs once more in a minute"),
+        "{sent:?}"
+    );
     // A one-shot that never fired is not lost: it is scheduled once
     // more, and marked so a second failure ends it.
     let jobs = ilar_gateway::cron::CronStore::open(dir.path().join("state/gateway/cron.json"))
