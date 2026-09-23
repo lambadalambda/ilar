@@ -29,10 +29,10 @@ pub enum Command {
     Help,
     /// What the review staged and has not been approved.
     Pending,
-    /// Apply a staged plan by id, or `all`.
-    Approve(String),
-    /// Drop a staged plan by id, or `all`.
-    Reject(String),
+    /// Apply a staged plan by id, or `all`; with neither, list and ask.
+    Approve(Option<String>),
+    /// Drop a staged plan by id, or `all`; with neither, list and ask.
+    Reject(Option<String>),
     Unknown(String),
     /// A misspelt `/unlock` or `/password` that carried an argument:
     /// nothing was unlocked and the argument was probably the password.
@@ -73,9 +73,44 @@ impl Command {
     }
 }
 
+impl Command {
+    /// The name and the reason, for a command that reaches past the chat
+    /// it is sent in — the person's memory, every chat's model, the
+    /// process, a password — and so is refused in a room, where any
+    /// allowlisted member could send it.
+    pub fn private_only(&self) -> Option<(&'static str, &'static str)> {
+        let memory = "decides what I remember about you";
+        let password = "carries a password";
+        Some(match self {
+            Command::Pending => ("pending", "shows what I would remember about you"),
+            Command::Approve(_) => ("approve", memory),
+            Command::Reject(_) => ("reject", memory),
+            Command::Restart => ("restart", "restarts me for every chat"),
+            Command::Model { save: true, .. } => {
+                ("model … --save", "changes the default model for every chat")
+            }
+            Command::Unlock(_) => ("unlock", password),
+            Command::Password(_) => ("password", password),
+            _ => return None,
+        })
+    }
+}
+
+/// The menu a room is offered: [`MENU`] without the commands a room is
+/// refused (see [`Command::private_only`]).
+pub fn group_menu() -> impl Iterator<Item = (&'static str, &'static str)> {
+    const PRIVATE: &[&str] = &[
+        "password", "unlock", "pending", "approve", "reject", "restart",
+    ];
+    MENU.iter()
+        .copied()
+        .filter(|(name, _)| !PRIVATE.contains(name))
+}
+
 /// What a person on a chat does about a sealed secret store, for every
-/// refusal the lock causes.
-pub const UNLOCK_HINT: &str = "send /unlock <master password> in this chat";
+/// refusal the lock causes. The store is the process's, so a private
+/// chat opens it for a room too — and a room is no place to type it.
+pub const UNLOCK_HINT: &str = "send me /unlock <master password> in a private chat";
 
 /// `Some` when the text is a command: a slash, a word, maybe an
 /// argument. Anything else is a message for the model.
@@ -116,8 +151,10 @@ pub fn parse(text: &str) -> Option<Command> {
         ("compact", _) => Command::Compact,
         ("help", _) => Command::Help,
         ("pending", _) => Command::Pending,
-        ("approve", argument) => Command::Approve(argument.unwrap_or("all").to_string()),
-        ("reject", argument) => Command::Reject(argument.unwrap_or("all").to_string()),
+        // No argument is not "all": Telegram sends a menu entry, and the
+        // `/approve` in a staging message, as the bare word on one tap.
+        ("approve", argument) => Command::Approve(argument.map(str::to_string)),
+        ("reject", argument) => Command::Reject(argument.map(str::to_string)),
         ("status", _) => Command::Status,
         ("cost" | "usage", _) => Command::Cost,
         ("cron", None) => Command::Cron { remove: None },
@@ -410,12 +447,16 @@ mod tests {
         assert!(edits_within("sesion", "session", 2));
         assert!(!edits_within("hunter2", "session", 2));
         assert_eq!(parse("/pending"), Some(Command::Pending));
-        assert_eq!(parse("/approve"), Some(Command::Approve("all".into())));
+        // Bare is not "all": that is one tap on Telegram.
+        assert_eq!(parse("/approve"), Some(Command::Approve(None)));
         assert_eq!(
             parse("/approve ab12"),
-            Some(Command::Approve("ab12".into()))
+            Some(Command::Approve(Some("ab12".into())))
         );
-        assert_eq!(parse("/reject all"), Some(Command::Reject("all".into())));
+        assert_eq!(
+            parse("/reject all"),
+            Some(Command::Reject(Some("all".into())))
+        );
         // A phone that capitalises the first word is understood; an
         // unknown word is echoed as it was typed.
         assert_eq!(parse("/Help"), Some(Command::Help));

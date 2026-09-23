@@ -7,7 +7,7 @@ this page grows with it.
 
 ```sh
 ilar-gateway                       # listen on the configured channels
-ilar-gateway notify "build green"  # a message from a script, to the last active chat
+ilar-gateway notify "build green"  # a message from a script, to the last private chat
 ilar-gateway notify --to deltachat:12 --source ci "…"
 ilar-gateway invite                # the Delta Chat invite link to add the bot with
 ilar-gateway prompt                # what a private chat's model gets: prompt, tools, schemas; --group for a room
@@ -37,8 +37,8 @@ journalctl --user -u ilar-gateway -f
 
 It restarts on failure. After editing `ilar.toml` or `SOUL.md`,
 `systemctl --user restart ilar-gateway`: configuration is read at
-start, and a chat's prompt when its session opens. The last active
-chat is told on the way: "⏹ ilar-gateway stopping", then
+start, and a chat's prompt when its session opens. The last private
+chat is told on the way (never a room): "⏹ ilar-gateway stopping", then
 "▶ ilar-gateway 0.2.0 (f3cd7a7) started · default model …" with the commit
 the binary was built from, so a deploy is visible where you are
 looking. `gateway.announce = false` keeps it quiet. Delta Chat's
@@ -78,7 +78,7 @@ declares them is warned about and ignored.
 | `gateway.status` | `true` | A status line in the chat while a turn runs. |
 | `gateway.status_interval_secs` | `4` | The least time between two edits of it. |
 | `gateway.send_retry_secs` | `2` | Between two tries at a send the channel refused; four tries, then the chat and the model are told. |
-| `gateway.announce` | `true` | A line to the last active chat when the gateway starts and stops. |
+| `gateway.announce` | `true` | A line to the last private chat when the gateway starts and stops. |
 | `channels.deltachat.*` | — | The Delta Chat adapter; see below. |
 | `channels.telegram.*` | — | The Telegram adapter; see below. |
 
@@ -105,7 +105,11 @@ so it can tell who is asking, and the mention is taken out of the
 text wherever it sat. Allowlisting still applies per sender: a group
 member who is not in `allow_from` is ignored even when they mention
 the bot. A group is a room to the gateway — it gets no core memory
-and cannot reach the memory files or the session store.
+and cannot reach the memory files or the session store. Nor can its
+members reach past it: `/pending`, `/approve`, `/reject`, `/restart`,
+`/unlock`, `/password` and `/model … --save` answer "works only in a
+private chat with me" there (a message carrying a password is still
+deleted), and Telegram offers a group a menu without them.
 
 The gateway registers its commands with Telegram at every start, so
 typing `/` offers them with a line each and the Menu button lists
@@ -206,7 +210,7 @@ A message that is a slash command is answered by the gateway itself:
 | `/model <provider/model>` | Switch this chat. Recorded at once when the chat is idle, or as the running turn ends; the reply says which. The switch is the session's and outlives a restart; a session whose model is no longer configured cannot be resumed, and the chat starts over on the default. |
 | `/model <provider/model> --save`, `/model --save` | Also make it, or the chat's current model, the default for new chats: kept as `<home>/model`, above `gateway.model`. |
 | `/pending` | What the review staged, when approval is on. |
-| `/approve [id\|all]`, `/reject [id\|all]` | Decide on it. |
+| `/approve <id\|all>`, `/reject <id\|all>` | Decide on it. Bare, they list what is staged and ask which: on Telegram one tap sends the bare word. |
 | `/abort` (or `/stop`) | Cancel the turn running on this chat. The chat gets "Aborted."; messages that arrived meanwhile run as a turn of their own. |
 | `/grant [session\|always]`, `/deny` | Answer a tool's ask for a [stored secret](secrets.md) or for root: the chat is shown who asks — the tool, or "bash (subagent)" for a child of the turn — the secret, and the command verbatim, indented under a blank line so its last line cannot be read as part of the instructions; a command too long for one message is cut with a tail saying so. Bare `/grant` is once; ten minutes without an answer is a no. Approval only: a password typed after the span is refused and pointed at `/password`. |
 | `/password <pw>` | The [sudo password](secrets.md#sudo), for the ask that follows a yes where sudo turns out to want one. The ask shows the command again; ten minutes without an answer is a no, and so is `/deny`, which fails the sudo call. The password is in the chat's history the moment it is sent: the adapter deletes that message where the channel allows it, and the reply says whether to delete it yourself. It is held in memory until this chat is restarted. `/password` alone answers with its usage line, and `/password` against the approval ask says which question is waiting. |

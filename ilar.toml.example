@@ -115,7 +115,7 @@ background_tool_timeout_ms = 600000
 # tools.deny = []                         # tools no chat may use
 # heartbeat.every_secs = 0                # 0 is off
 # review.approval = false                 # true: memory writes wait for /approve
-# announce = true                         # a line to the last active chat on start and stop
+# announce = true                         # a line to the last private chat on start and stop
 
 # One channel or several; each has its own allowlist, and an empty one
 # refuses to start unless allow_anyone = true.

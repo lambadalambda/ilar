@@ -354,12 +354,19 @@ async fn two_chats_are_two_sessions_and_the_routes_remember_them() {
 }
 
 #[tokio::test]
-async fn an_inbox_message_reaches_the_last_active_chat() {
+async fn an_inbox_message_reaches_the_last_private_chat() {
     let dir = tempfile::tempdir().unwrap();
-    let (gateway, fake) = gateway(dir.path(), vec![says("hi alice"), says("noted the build")]);
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![says("hi alice"), says("hi room"), says("noted the build")],
+    );
 
     fake.inject("hi", "chat-1", "alice").await;
     fake.wait_for_sent(1, WAIT).await;
+    // A room heard from since is not where a script's report goes: it
+    // is the person's business.
+    fake.inject_in_group("hi bot", "room-1", "alice").await;
+    fake.wait_for_sent(2, WAIT).await;
     ilar_gateway::inbox::write(
         gateway.inbox_dir(),
         &ilar_gateway::inbox::InboxMessage {
@@ -369,10 +376,10 @@ async fn an_inbox_message_reaches_the_last_active_chat() {
         },
     )
     .unwrap();
-    let sent = fake.wait_for_sent(2, WAIT).await;
-    assert_eq!(sent.len(), 2, "{sent:?}");
-    assert_eq!(sent[1].text, "noted the build");
-    assert_eq!(sent[1].chat_id, "chat-1");
+    let sent = fake.wait_for_sent(3, WAIT).await;
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert_eq!(sent[2].text, "noted the build");
+    assert_eq!(sent[2].chat_id, "chat-1");
     assert!(
         ilar_gateway::inbox::drain(gateway.inbox_dir())
             .unwrap()
@@ -1822,19 +1829,26 @@ async fn a_quiet_episode_is_not_reviewed_and_approval_stages_the_plan() {
     fake.inject("/pending", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(4, WAIT).await;
     assert!(sent[3].text.contains("Likes earl grey"), "{sent:?}");
+    // Bare, it asks which: on Telegram one tap on the menu, or on the
+    // `/approve` inside the staging message, sends just the word.
+    fake.inject("/approve", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(5, WAIT).await;
+    assert!(sent[4].text.contains("Likes earl grey"), "{sent:?}");
+    assert!(sent[4].text.contains("/approve all"), "{sent:?}");
+    assert!(!dir.path().join("state/gateway/memory/USER.md").exists());
     // A mistyped id says what is staged instead of just refusing.
     fake.inject("/approve nope", "chat-1", "alice").await;
-    let sent = fake.wait_for_sent(5, WAIT).await;
+    let sent = fake.wait_for_sent(6, WAIT).await;
     assert!(
-        sent[4]
+        sent[5]
             .text
             .starts_with("Nothing pending as nope. Pending: "),
         "{sent:?}"
     );
     fake.inject("/approve all", "chat-1", "alice").await;
-    let sent = fake.wait_for_sent(6, WAIT).await;
+    let sent = fake.wait_for_sent(7, WAIT).await;
     assert!(
-        sent[5]
+        sent[6]
             .text
             .starts_with("💾 remembered: user: Likes earl grey"),
         "{sent:?}"
@@ -1842,11 +1856,55 @@ async fn a_quiet_episode_is_not_reviewed_and_approval_stages_the_plan() {
     let user = std::fs::read_to_string(dir.path().join("state/gateway/memory/USER.md")).unwrap();
     assert_eq!(user, "Likes earl grey\n");
     fake.inject("/pending", "chat-1", "alice").await;
-    let sent = fake.wait_for_sent(7, WAIT).await;
-    assert_eq!(sent[6].text, "Nothing pending.");
-    fake.inject("/reject all", "chat-1", "alice").await;
     let sent = fake.wait_for_sent(8, WAIT).await;
     assert_eq!(sent[7].text, "Nothing pending.");
+    fake.inject("/reject all", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(9, WAIT).await;
+    assert_eq!(sent[8].text, "Nothing pending.");
+    gateway.cancel();
+}
+
+/// A room is not the person's console: what the review wants to
+/// remember about them, a restart of every chat, the default model for
+/// every chat and the master password all reach past the room, and any
+/// allowlisted member of it could send them.
+#[tokio::test]
+async fn a_room_cannot_reach_past_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        announce: false,
+        ..GatewayConfig::default()
+    };
+    let (gateway, fake) = gateway_with(dir.path(), vec![], settings);
+    let reached = [
+        "/pending",
+        "/approve all",
+        "/reject all",
+        "/restart",
+        "/model zai/glm-4.7 --save",
+        "/unlock hunter2",
+        "/password hunter2",
+    ];
+    for (n, command) in reached.iter().enumerate() {
+        fake.inject_in_group(command, "room-1", "alice").await;
+        let sent = fake.wait_for_sent(n + 1, WAIT).await;
+        assert!(
+            sent[n].text.contains("only in a private chat with me"),
+            "{command}: {sent:?}"
+        );
+    }
+    // The room's /restart stopped nothing.
+    assert!(!gateway.restart_requested());
+    // Nothing that reaches past the room is offered there either.
+    let offered: Vec<&str> = ilar_gateway::commands::group_menu()
+        .map(|(name, _)| name)
+        .collect();
+    for private in [
+        "pending", "approve", "reject", "restart", "unlock", "password",
+    ] {
+        assert!(!offered.contains(&private), "{private}: {offered:?}");
+    }
+    assert!(offered.contains(&"new"), "{offered:?}");
     gateway.cancel();
 }
 

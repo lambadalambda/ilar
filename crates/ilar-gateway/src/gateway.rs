@@ -1031,6 +1031,19 @@ impl Gateway {
         lines.join("\n")
     }
 
+    /// What is staged, one line each, or that nothing is.
+    fn pending_listing(&self) -> String {
+        match self.pending.list() {
+            Ok(list) if list.is_empty() => "Nothing pending.".to_string(),
+            Ok(list) => list
+                .iter()
+                .map(|p| format!("{} — {}", p.id, p.plan.describe().join("; ")))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Err(error) => failed_reply("/pending", &error),
+        }
+    }
+
     /// `/approve` or `/reject` for an id that is not staged: say what
     /// is, since the ids are short and easy to mistype.
     fn nothing_pending_as(&self, id: &str) -> String {
@@ -1053,18 +1066,36 @@ impl Gateway {
         // in the chat's history now: out it comes first, and every arm
         // below says whether that worked.
         let taken_back = command.carries_a_secret() && self.delete_inbound(message).await;
+        if message.is_group
+            && let Some((name, why)) = command.private_only()
+        {
+            let advice = if command.carries_a_secret() {
+                format!(
+                    " {} Others here may have read it first.",
+                    maybe_password_advice(taken_back)
+                )
+            } else {
+                String::new()
+            };
+            return format!("/{name} works only in a private chat with me: it {why}.{advice}");
+        }
         match command {
             Command::Help => commands::HELP.to_string(),
-            Command::Pending => match self.pending.list() {
-                Ok(list) if list.is_empty() => "Nothing pending.".to_string(),
-                Ok(list) => list
-                    .iter()
-                    .map(|p| format!("{} — {}", p.id, p.plan.describe().join("; ")))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                Err(error) => failed_reply("/pending", &error),
-            },
-            Command::Approve(id) => match self.pending.take(&id) {
+            Command::Pending => self.pending_listing(),
+            // Bare: which one? Acting on all of them is one tap away on
+            // Telegram, and not something to do by accident.
+            Command::Approve(None) | Command::Reject(None) => {
+                let verb = if matches!(command, Command::Approve(_)) {
+                    "approve"
+                } else {
+                    "reject"
+                };
+                match self.pending_listing().as_str() {
+                    "Nothing pending." => "Nothing pending.".to_string(),
+                    listing => format!("{listing}\nWhich one? /{verb} <id>, or /{verb} all."),
+                }
+            }
+            Command::Approve(Some(id)) => match self.pending.take(&id) {
                 Ok(taken) if taken.is_empty() => self.nothing_pending_as(&id),
                 Ok(taken) => taken
                     .iter()
@@ -1073,7 +1104,7 @@ impl Gateway {
                     .report(),
                 Err(error) => failed_reply("/approve", &error),
             },
-            Command::Reject(id) => match self.pending.take(&id) {
+            Command::Reject(Some(id)) => match self.pending.take(&id) {
                 Ok(taken) if taken.is_empty() => self.nothing_pending_as(&id),
                 // What was dropped, not how many: an id nobody reads
                 // means nothing a week later.
@@ -1198,6 +1229,10 @@ impl Gateway {
                 _ => "Nothing is running.".to_string(),
             },
             Command::New => match self.driver.close(key).await {
+                // A room has no memory to keep, so it is not promised one.
+                Ok(()) if message.is_group => {
+                    format!("Started a fresh chat on {}.", self.driver.default_model())
+                }
                 Ok(()) => format!(
                     "Started a fresh chat on {}. What I remember about you stays.",
                     self.driver.default_model()
@@ -1756,9 +1791,12 @@ impl Gateway {
 
     /// The chat the gateway announces itself to: the last one heard
     /// from, if any.
+    /// The person's last private chat: a start, a stop and a script's
+    /// report are the person's business, not a room's.
     fn announce_target(&self) -> Option<(String, String)> {
-        let last = self.routes.snapshot().last_active?;
-        split_key(&last).map(|(channel, chat)| (channel.to_string(), chat.to_string()))
+        let routes = self.routes.snapshot();
+        let last = routes.last_private_chat()?;
+        split_key(last).map(|(channel, chat)| (channel.to_string(), chat.to_string()))
     }
 
     /// One line to the last active chat once the gateway is up. The
@@ -1888,10 +1926,12 @@ impl Gateway {
                 log(&format!("inbox: {} rate-limited, dropped", message.source));
                 continue;
             }
-            let target = message
-                .to
-                .clone()
-                .or_else(|| self.routes.snapshot().last_active);
+            let target = message.to.clone().or_else(|| {
+                self.routes
+                    .snapshot()
+                    .last_private_chat()
+                    .map(str::to_string)
+            });
             let Some((channel, chat_id)) = target.as_deref().and_then(split_key) else {
                 log(&format!(
                     "inbox: no chat to deliver {} to; dropped",

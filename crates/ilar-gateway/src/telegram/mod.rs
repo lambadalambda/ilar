@@ -154,18 +154,25 @@ impl Telegram {
         );
         // The menu: what typing `/` offers. Best effort — a menu that
         // would not set is a bot without one, not a bot that is down.
-        let commands: Vec<Value> = crate::commands::MENU
-            .iter()
-            .map(|(name, description)| json!({"command": name, "description": description}))
-            .collect();
-        if let Err(error) = self
-            .api
-            .call("setMyCommands", json!({"commands": commands}))
-            .await
-        {
-            log(&format!(
-                "telegram: the command menu was not set: {error:#}"
-            ));
+        let entries = |menu: &mut dyn Iterator<Item = (&str, &str)>| -> Vec<Value> {
+            menu.map(|(name, description)| json!({"command": name, "description": description}))
+                .collect()
+        };
+        // Groups get their own, smaller menu: a room is refused what
+        // reaches past it, so it is not offered it either.
+        let menus = [
+            json!({"commands": entries(&mut crate::commands::MENU.iter().copied())}),
+            json!({
+                "commands": entries(&mut crate::commands::group_menu()),
+                "scope": {"type": "all_group_chats"},
+            }),
+        ];
+        for menu in menus {
+            if let Err(error) = self.api.call("setMyCommands", menu).await {
+                log(&format!(
+                    "telegram: the command menu was not set: {error:#}"
+                ));
+            }
         }
         if self.config.allow_from.is_empty() {
             if !self.config.allow_anyone {
@@ -1193,7 +1200,10 @@ mod tests {
         // The stranger and the bot's own message never arrived.
         assert!(run.inbound.try_recv().is_err());
         let seen = methods(&run.api.calls);
-        assert_eq!(&seen[..3], ["getMe", "setMyCommands", "getUpdates"]);
+        assert_eq!(
+            &seen[..4],
+            ["getMe", "setMyCommands", "setMyCommands", "getUpdates"]
+        );
         assert!(
             seen.iter().filter(|m| *m == "setMessageReaction").count() >= 3,
             "{seen:?}"
@@ -1228,6 +1238,19 @@ mod tests {
         for (name, _) in crate::commands::MENU {
             assert!(names.contains(name), "{name} missing from {names:?}");
         }
+        // And a smaller one for groups, without what a room is refused.
+        let (_, group) = calls
+            .iter()
+            .find(|(m, p)| m == "setMyCommands" && p["scope"]["type"] == "all_group_chats")
+            .expect("a group menu");
+        let offered: Vec<&str> = group["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["command"].as_str().unwrap())
+            .collect();
+        assert!(offered.contains(&"new"), "{offered:?}");
+        assert!(!offered.contains(&"unlock"), "{offered:?}");
         run.stop().await;
     }
 
