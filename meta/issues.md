@@ -110,6 +110,10 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 (all complete — see issues_archive.md)
 
+## Milestone 27 — Catalog
+
+- [ ] [GPT-6 Sol and Luna](issues/gpt-6-sol-and-luna.md)
+
 ## Milestone 26 — Sweep 2026-09-23
 
 - [ ] [UX sweep 2026-09-23](issues/ux-sweep-2026-09-23.md) — index

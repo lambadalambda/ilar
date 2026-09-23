@@ -2,7 +2,7 @@
 
 /// Upstream catalog snapshot used to maintain this module.
 pub const CATALOG_SOURCE: &str = "https://models.dev/api.json";
-pub const CATALOG_UPDATED: &str = "2026-08-15";
+pub const CATALOG_UPDATED: &str = "2026-09-23";
 pub const DEFAULT_CONTEXT_SOURCE: &str = "https://github.com/openai/codex/pull/34009";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +76,28 @@ macro_rules! pricing {
 /// absent — their effective token price depends on the plan, so the UI
 /// shows tokens without dollars.
 static PRICING: &[(&str, &str, ModelPricing)] = &[
+    // GPT-6 Sol and Luna (2026-09-22): the same on Zen. Base tier only,
+    // as for astra — past 272k input the rate doubles.
+    (
+        "openai",
+        "gpt-6-sol",
+        pricing!(2.0, 10.0, Some(0.2), Some(2.5)),
+    ),
+    (
+        "opencode",
+        "gpt-6-sol",
+        pricing!(2.0, 10.0, Some(0.2), Some(2.5)),
+    ),
+    (
+        "openai",
+        "gpt-6-luna",
+        pricing!(0.1, 0.5, Some(0.01), Some(0.125)),
+    ),
+    (
+        "opencode",
+        "gpt-6-luna",
+        pricing!(0.1, 0.5, Some(0.01), Some(0.125)),
+    ),
     (
         "openai",
         "gpt-6-astra",
@@ -157,10 +179,11 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ("openai", "gpt-5.4-pro", pricing!(30.0, 180.0, None, None)),
     ("openai", "gpt-5.5", pricing!(5.0, 30.0, Some(0.5), None)),
     ("openai", "gpt-5.5-pro", pricing!(30.0, 180.0, None, None)),
+    // Cut 2026-08-25 (models.dev 0b2318a6).
     (
         "openai",
         "gpt-5.6",
-        pricing!(5.0, 30.0, Some(0.5), Some(6.25)),
+        pricing!(4.0, 20.0, Some(0.4), Some(5.0)),
     ),
     (
         "openai",
@@ -170,7 +193,7 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     (
         "openai",
         "gpt-5.6-sol",
-        pricing!(5.0, 30.0, Some(0.5), Some(6.25)),
+        pricing!(4.0, 20.0, Some(0.4), Some(5.0)),
     ),
     (
         "openai",
@@ -270,15 +293,17 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "nemotron-3.5-lightning-free",
         pricing!(0.0, 0.0, Some(0.0), None),
     ),
+    // Zen's discount ended 2026-09-18 (models.dev 156818aa).
     (
         "opencode",
         "gpt-5.6-sol",
-        pricing!(2.0, 10.0, Some(0.2), Some(2.5)),
+        pricing!(4.0, 20.0, Some(0.4), Some(5.0)),
     ),
+    // Zen's own price since 2026-07-10, not the openai twin's.
     (
         "opencode",
         "gpt-5.6-terra",
-        pricing!(2.0, 12.0, Some(0.2), Some(2.5)),
+        pricing!(2.5, 15.0, Some(0.25), Some(3.125)),
     ),
     (
         "opencode",
@@ -929,6 +954,31 @@ macro_rules! model {
 // the docs file under the Messages wire answer on chat-completions and
 // are cataloged there; the Claude and Gemini families do not.
 static CATALOG: &[ModelInfo] = &[
+    // GPT-6 Sol and Luna (2026-09-22). The window and input cap as for
+    // astra below; the full ladder from none, like the 5.6 rows; every
+    // ChatGPT plan, with no access gate (Codex's models.json).
+    model!(
+        "openai",
+        "gpt-6-sol",
+        "GPT-6 Sol",
+        272_000,
+        128_000,
+        OpenAiBoth
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_NONE_TO_MAX),
+    model!(
+        "openai",
+        "gpt-6-luna",
+        "GPT-6 Luna",
+        272_000,
+        128_000,
+        OpenAiBoth
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_NONE_TO_MAX),
     // GPT-6 Astra (2026-09-04). models.dev: 1,050,000 context, 922,000
     // input cap; kept at the 5.6 rows' 272k working window, which is
     // also where Zen's price doubles. `OpenAiBoth`: the ChatGPT backend
@@ -1235,8 +1285,30 @@ static CATALOG: &[ModelInfo] = &[
     model!("zai", "glm-4.5", "GLM-4.5", 131_072, 98_304, ZaiBoth),
     // OpenCode Zen: the models the docs place on the Responses wire, then
     // the chat-completions ones, live-probed 2026-09-03 (see the
-    // opencode module). gpt-6-astra joined 2026-09-05 (Zen only; Go
-    // does not list it).
+    // opencode module). gpt-6-astra joined 2026-09-05, gpt-6-sol and
+    // gpt-6-luna 2026-09-22 (Zen only; Go lists none of them).
+    model!(
+        "opencode",
+        "gpt-6-sol",
+        "GPT-6 Sol",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_NONE_TO_MAX),
+    model!(
+        "opencode",
+        "gpt-6-luna",
+        "GPT-6 Luna",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_NONE_TO_MAX),
     model!(
         "opencode",
         "gpt-6-astra",
@@ -2254,6 +2326,52 @@ mod tests {
         assert!(ids("openai/gpt-5.3-chat-latest").is_empty());
         assert!(ids("openai/gpt-4.1").is_empty());
         assert!(ids("zai/glm-5.2").is_empty());
+    }
+
+    /// GPT-6 Sol and Luna (2026-09-22), and the GPT prices that moved
+    /// after 2026-08-15 — per models.dev and OpenAI's model pages.
+    #[test]
+    fn the_gpt_6_rows_and_the_prices_that_moved() {
+        for id in ["gpt-6-sol", "gpt-6-luna"] {
+            for provider in ["openai", "opencode"] {
+                let row = find(&format!("{provider}/{id}")).expect(id);
+                assert_eq!(row.context_limit, 272_000, "{provider}/{id}");
+                assert_eq!(row.output_limit, 128_000, "{provider}/{id}");
+                assert!(row.vision, "{provider}/{id}");
+                let rungs: Vec<_> = row.variants().iter().map(|v| v.id).collect();
+                assert_eq!(rungs, ["none", "low", "medium", "high", "xhigh", "max"]);
+            }
+            assert_eq!(
+                find(&format!("openai/{id}")).unwrap().access,
+                ModelAccess::OpenAiBoth
+            );
+            assert!(
+                find(&format!("opencode-go/{id}")).is_none(),
+                "Go does not list {id}"
+            );
+        }
+        let price = |id: &str| {
+            let p = pricing_for(id).unwrap_or_else(|| panic!("{id} has no price"));
+            (p.input, p.output, p.cache_read, p.cache_write)
+        };
+        for provider in ["openai", "opencode"] {
+            assert_eq!(
+                price(&format!("{provider}/gpt-6-sol")),
+                (2.0, 10.0, Some(0.2), Some(2.5))
+            );
+            assert_eq!(
+                price(&format!("{provider}/gpt-6-luna")),
+                (0.1, 0.5, Some(0.01), Some(0.125))
+            );
+        }
+        let cut = (4.0, 20.0, Some(0.4), Some(5.0));
+        assert_eq!(price("openai/gpt-5.6-sol"), cut);
+        assert_eq!(price("openai/gpt-5.6"), cut);
+        assert_eq!(price("opencode/gpt-5.6-sol"), cut);
+        assert_eq!(
+            price("opencode/gpt-5.6-terra"),
+            (2.5, 15.0, Some(0.25), Some(3.125))
+        );
     }
 
     #[test]

@@ -6493,7 +6493,8 @@ mod tests {
         // 1500 read of a 1820-token prompt (300 fresh + 1500 read + 20 written).
         assert!(status.contains("cache 82%"), "{status}");
         assert!(status.contains("Σ 1k"), "{status}");
-        assert!(status.contains("$0.004"), "{status}");
+        // 300×4 + 50×20 + 1500×0.4 + 20×5 per million: $0.0029.
+        assert!(status.contains("$0.003"), "{status}");
         let narrow = rendered_text(&app.status_line(60));
         assert!(narrow.contains("gpt-5.6"), "{narrow}");
         assert!(narrow.contains("high"), "{narrow}");
