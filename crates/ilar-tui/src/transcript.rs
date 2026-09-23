@@ -1286,6 +1286,7 @@ pub(crate) fn apply_subagent_activity(
         };
     }
     let Line_::Tool {
+        state,
         child_lines,
         child_group,
         child_running,
@@ -1297,6 +1298,19 @@ pub(crate) fn apply_subagent_activity(
     };
     *child_session_id = Some(activity.child_session_id.clone());
     *child_running = !matches!(activity.event, LoopEvent::TurnDone { .. });
+    // A call that already returned — a background task's started note —
+    // said nothing about how the work would go, so the child's ending
+    // is the row's. A call still open is left alone: its own result
+    // settles it, and `finish_tool_row` only finds rows still open.
+    if let LoopEvent::TurnDone { outcome } = &activity.event
+        && matches!(state, ToolState::Succeeded | ToolState::Failed)
+    {
+        *state = if matches!(outcome, TurnOutcome::Completed) {
+            ToolState::Succeeded
+        } else {
+            ToolState::Failed
+        };
+    }
     // The inner index is the focus view's concern; here the owner
     // row's own index (returned below) is the dirty extent.
     let _ = apply_child_loop_event(

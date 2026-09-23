@@ -3673,6 +3673,53 @@ mod tests {
         assert!(!row.1.is_empty(), "the child's work is shown, not hidden");
     }
 
+    /// A background task's call returns its started note at once, so the
+    /// row was ✓ before the child had done anything — and stayed ✓ when
+    /// the child failed, stalled or was cancelled. The child's own ending
+    /// decides the row once the call has returned.
+    #[test]
+    fn a_background_task_row_ends_the_way_its_child_did() {
+        use crate::transcript::ToolState;
+        let row_state = |app: &App| {
+            app.lines
+                .iter()
+                .find_map(|line| match line {
+                    Line_::Tool { state, .. } => Some(*state),
+                    _ => None,
+                })
+                .expect("the task row")
+        };
+        for (outcome, expected) in [
+            (TurnOutcome::Aborted, ToolState::Failed),
+            (TurnOutcome::MaxIterations, ToolState::Failed),
+            (TurnOutcome::Completed, ToolState::Succeeded),
+        ] {
+            let mut app = App::new();
+            app.session_id = "root".into();
+            app.push_loop_event(&LoopEvent::ToolStarted {
+                id: "task-1".into(),
+                name: "task".into(),
+            });
+            app.push_loop_event(&LoopEvent::ToolFinished {
+                id: "task-1".into(),
+                name: "task".into(),
+                is_error: false,
+                result: "Background task started (task_id: child).".into(),
+                child_session_id: Some("child".into()),
+            });
+            assert_eq!(row_state(&app), ToolState::Succeeded);
+
+            app.push_subagent_activity(&ilar::subagent::SubagentActivity {
+                parent_session_id: "root".into(),
+                parent_call_id: "task-1".into(),
+                child_session_id: "child".into(),
+                agent: "build".into(),
+                event: LoopEvent::TurnDone { outcome },
+            });
+            assert_eq!(row_state(&app), expected, "{outcome:?}");
+        }
+    }
+
     /// A subtask the user starts has no tool call behind it, so it had
     /// no row and no call id — and every event it produced carried an
     /// empty `parent_call_id` and was dropped outright. Its start was
