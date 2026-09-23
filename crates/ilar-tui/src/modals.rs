@@ -890,8 +890,6 @@ static HELP_SECTIONS: &[HelpSection] = &[
             binding!("Ctrl-Home / Ctrl-End", "jump to top / tail"),
             binding!("Up / Down", "scroll line (at the edges of the draft)"),
             binding!("mouse wheel / drag", "scroll · select and copy"),
-            // Short enough to survive the 53-cell action column: the
-            // long form truncated away the part that mattered.
             binding!("Shift-drag", "select with the terminal, not with ilar"),
             binding!("click ▸/▾", "fold or expand tool details"),
         ],
@@ -1049,18 +1047,49 @@ fn help_lines(width: usize, keys: crate::input::TerminalKeys) -> Vec<Line<'stati
                 continue;
             }
             let padded = format!("  {:<24}", truncate_display(keys, 24, Truncation::Right));
-            let action_width = width.saturating_sub(UnicodeWidthStr::width(padded.as_str()) + 1);
-            lines.push(Line::from(vec![
-                Span::styled(padded, Style::default().fg(theme::SECONDARY)),
-                Span::styled(
-                    format!(
-                        " {}",
-                        truncate_display(binding.action, action_width.max(1), Truncation::Right)
-                    ),
-                    Style::default().fg(theme::PRIMARY),
-                ),
-            ]));
+            let indent = UnicodeWidthStr::width(padded.as_str());
+            let action_width = width.saturating_sub(indent + 1).max(1);
+            // Wrapped under its own column, never cut: the action is the
+            // part of the line that explains, and "abort tur…" explained
+            // nothing at any terminal size.
+            for (index, part) in wrap_words(binding.action, action_width)
+                .into_iter()
+                .enumerate()
+            {
+                let lead = if index == 0 {
+                    Span::styled(padded.clone(), Style::default().fg(theme::SECONDARY))
+                } else {
+                    Span::raw(" ".repeat(indent))
+                };
+                lines.push(Line::from(vec![
+                    lead,
+                    Span::styled(format!(" {part}"), Style::default().fg(theme::PRIMARY)),
+                ]));
+            }
         }
+    }
+    lines
+}
+
+/// `text` in lines of at most `width` columns, broken between words; a
+/// word longer than the width is cut to fit rather than lost.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let needed = UnicodeWidthStr::width(current.as_str())
+            + usize::from(!current.is_empty())
+            + UnicodeWidthStr::width(word);
+        if !current.is_empty() && needed > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(&truncate_display(word, width, Truncation::Right));
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
     }
     lines
 }
@@ -1087,9 +1116,11 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
     };
     if snapshot.rows.is_empty() {
         frame.render_widget(
+            // Wrapped: cut at the frame, the sentence lost its point.
             Paragraph::new(muted_line(
                 "nothing pending — queued messages, the goal, background tasks, held results and retry offers appear here",
-            )),
+            ))
+            .wrap(ratatui::widgets::Wrap { trim: true }),
             inner,
         );
         return ModalHit::default();
@@ -1124,14 +1155,13 @@ pub(crate) fn render_pending_manager(frame: &mut Frame, snapshot: &PendingSnapsh
     body.finish(frame, inner)
 }
 
-/// The overlay's outer width, in columns — not a percentage. Two of
-/// them are the border, so [`HELP_INNER_WIDTH`] is what a line has.
-const HELP_WIDTH: u16 = 72;
-/// What `help_lines` is actually given. Tests that render wider assert
-/// on text the reader never sees: the action column is fixed, and an
-/// entry past it is truncated at every terminal size.
+/// The overlay's widest outer width, in columns — not a percentage;
+/// a narrower terminal gets less, and the actions wrap to fit.
+const HELP_WIDTH: u16 = 100;
+/// The narrowest width tests render at: what an 80-column terminal
+/// leaves inside the overlay's margin and border.
 #[cfg(test)]
-const HELP_INNER_WIDTH: usize = HELP_WIDTH as usize - 2;
+const HELP_INNER_WIDTH: usize = 80 - 2 - 2;
 
 pub(crate) fn render_help(frame: &mut Frame, scroll: usize, keys: crate::input::TerminalKeys) {
     let area = centered_rect(frame.area(), HELP_WIDTH, 24);
@@ -2445,12 +2475,17 @@ pub(crate) fn render_session_search(frame: &mut Frame, search: &SessionSearch) -
                 } else {
                     Style::default().fg(MUTED)
                 };
-                lines.push(Line::from(highlighted_spans(
-                    text,
-                    if *is_hit { &search.query } else { "" },
-                    base,
-                    theme::title(theme::MARKUP),
-                )));
+                // One styled line per line of text: a line break inside a
+                // single `Line` is dropped, and the words either side of
+                // it ran together ("… ok" + "test …" as "oktest").
+                for part in text.lines() {
+                    lines.push(Line::from(highlighted_spans(
+                        part,
+                        if *is_hit { &search.query } else { "" },
+                        base,
+                        theme::title(theme::MARKUP),
+                    )));
+                }
                 lines.push(Line::raw(""));
             }
             frame.render_widget(
@@ -3929,6 +3964,35 @@ mod tests {
     /// explained, and it had stopped at milestone 14: no sidebar
     /// section, no wheel in a focus view, no `d` in the pending
     /// manager, nothing about the watchdog that aborts a quiet turn.
+    /// Every action is shown whole, at the narrowest overlay a normal
+    /// terminal gives: cut at a fixed column, eight of them ended in
+    /// "…" at every size — "abort tur…", "steers it or …".
+    #[test]
+    fn every_help_action_is_shown_whole() {
+        for keys in [
+            crate::input::TerminalKeys {
+                enhanced: true,
+                modified_enter: true,
+            },
+            crate::input::TerminalKeys::default(),
+        ] {
+            let text = help_lines(HELP_INNER_WIDTH, keys)
+                .iter()
+                .map(rendered_text)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            for binding in HELP_SECTIONS.iter().flat_map(|s| s.bindings.iter()) {
+                let action = binding
+                    .action
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(text.contains(&action), "cut: {action:?}");
+            }
+        }
+    }
+
     #[test]
     fn help_covers_the_surfaces_that_came_after_it() {
         // The width the overlay actually renders at: `render_help`
@@ -3946,6 +4010,8 @@ mod tests {
         .map(rendered_text)
         .collect::<Vec<_>>()
         .join("\n");
+        // Wrapped, a phrase may cross a line: compare word by word.
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
 
         for expected in [
             // Clickable sidebar rows: `sidebar.rs` builds a hit for each.
@@ -5129,6 +5195,41 @@ mod tests {
                 ("assistant".into(), context_line.into(), true),
             ],
         }
+    }
+
+    /// The empty manager says what would appear there, all of it: cut at
+    /// the frame, "retry offers appear here" was lost.
+    #[test]
+    fn the_empty_pending_manager_says_its_whole_sentence() {
+        let snapshot = PendingSnapshot {
+            selected: 0,
+            armed: false,
+            rows: Vec::new(),
+        };
+        let (screen, _) = draw_modal(80, 20, |frame| render_pending_manager(frame, &snapshot));
+        let text = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(text.contains("retry offers appear here"), "{screen}");
+    }
+
+    /// A preview line break is a line break: inside one styled line it
+    /// was dropped, and the words either side of it ran together.
+    #[test]
+    fn the_search_preview_keeps_the_line_breaks_of_what_it_shows() {
+        let mut search = SessionSearch::new();
+        search.push_rows(
+            0,
+            vec![search_row(
+                "s",
+                "a session",
+                "test export::streams_all_rows ... ok\ntest another_one ... ok",
+            )],
+        );
+        let (screen, _) = draw_modal(120, 24, |frame| render_session_search(frame, &search));
+        assert!(!screen.contains("okt"), "{screen}");
+        let line_of = |needle: &str| screen.lines().position(|line| line.contains(needle));
+        let first = line_of("streams_all_rows").expect("the first line shows");
+        let second = line_of("another_one").expect("the second line shows");
+        assert!(second > first, "{screen}");
     }
 
     /// The same directory-first rule in the two-pane search: with no
