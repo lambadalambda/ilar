@@ -69,3 +69,10 @@ Polish:
 ## Notes
 
 - Source: UX sweep 2026-09-23 (TUI and live passes). Size: L, many S.
+
+## Progress (2026-09-23)
+
+Done: the search preview's line breaks, the slash popup's stale
+selection, the help overlay's cut actions (wrapped now, up to 100
+columns), the empty pending manager's sentence, and control characters
+in the topic (core and title).

@@ -118,8 +118,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [UX sweep 2026-09-23](issues/ux-sweep-2026-09-23.md) — index
 - [ ] [The chat front door](issues/the-chat-front-door.md) — *backlog /unlock and first-run docs left*
-- [ ] [Words a model acts on, again](issues/words-a-model-acts-on-again.md)
-- [ ] [TUI frictions, 2026-09-23](issues/tui-frictions-2026-09-23.md)
+- [ ] [TUI frictions, 2026-09-23](issues/tui-frictions-2026-09-23.md) — *the five bugs done; keyboard focus and polish left*
 - [ ] [Chat words, 2026-09-23](issues/chat-words-2026-09-23.md)
 - [ ] [The docs catch up, 2026-09-23](issues/the-docs-catch-up-2026-09-23.md)
 

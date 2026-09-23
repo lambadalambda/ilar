@@ -43,3 +43,19 @@ another text, found in the 2026-09-23 sweep. Siblings of
 ## Notes
 
 - Source: UX sweep 2026-09-23 (model words pass). Size: S-M.
+
+## Done (2026-09-23)
+
+In `426e902`: the queued notes say who resumes a task and not to
+resend, and an identical unread message is queued once; a task's
+abort is "cancelled" everywhere (`TurnEnding::Aborted` stays readable
+for old logs); the base prompt no longer lists six tools to agents
+that have others; compaction says "drops out of sight", not "lost";
+the abnormal ending names its task id; the resume refusals name
+`task_message` or the worktree path, and say when there is none; the
+tasks tool and the task tool agree on `task_id`; the capacity refusal
+says what to do; "Deferred" is gone; `run_in_background` is accepted
+for `background` on task and task_message.
+
+Kept: "Background job job-1" — the TUI and the share page parse the
+id out of that line.

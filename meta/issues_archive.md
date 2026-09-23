@@ -475,3 +475,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [GPT-6 Sol and Luna](issues/gpt-6-sol-and-luna.md)
 - [x] [A foreground task does not wait out a detached one](issues/a-foreground-task-does-not-wait-out-a-detached-one.md)
 - [x] [The fixed prefix sheds weight](issues/the-fixed-prefix-sheds-weight.md)
+- [x] [Words a model acts on, again](issues/words-a-model-acts-on-again.md)
