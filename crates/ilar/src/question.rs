@@ -30,10 +30,12 @@ pub struct Question {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum QuestionKind {
     SingleChoice {
+        #[serde(default)]
         allow_other: bool,
         options: Vec<QuestionOption>,
     },
     MultipleChoice {
+        #[serde(default)]
         allow_other: bool,
         options: Vec<QuestionOption>,
     },
@@ -331,10 +333,14 @@ fn nonempty(value: Option<&str>) -> bool {
 }
 
 /// Non-executable provider definition recognized by the agent as a question.
+///
+/// One question object, its kind an enum: the choice fields are optional
+/// in the schema and required by the typed parse, which refuses a choice
+/// question without options with a message that says so.
 pub fn question_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: QUESTION_TOOL_NAME.into(),
-        description: "Ask the user one or more structured questions. Use stable IDs. Choice questions may permit a custom other answer.".into(),
+        description: "Ask the user one or more structured questions. Use stable IDs. The two choice types take options and may allow a custom other answer; free_text takes neither.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "additionalProperties": false,
@@ -344,11 +350,31 @@ pub fn question_tool_definition() -> ToolDefinition {
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                        "oneOf": [
-                            question_schema("single_choice", true),
-                            question_schema("multiple_choice", true),
-                            question_schema("free_text", false)
-                        ]
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["id", "type", "prompt", "required"],
+                        "properties": {
+                            "id": {"type": "string", "minLength": 1},
+                            "type": {"type": "string", "enum": ["single_choice", "multiple_choice", "free_text"]},
+                            "prompt": {"type": "string", "minLength": 1},
+                            "description": {"type": "string", "minLength": 1},
+                            "required": {"type": "boolean"},
+                            "allow_other": {"type": "boolean"},
+                            "options": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["id", "label"],
+                                    "properties": {
+                                        "id": {"type": "string", "minLength": 1},
+                                        "label": {"type": "string", "minLength": 1},
+                                        "description": {"type": "string", "minLength": 1}
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -356,37 +382,42 @@ pub fn question_tool_definition() -> ToolDefinition {
     }
 }
 
-fn question_schema(kind: &str, choice: bool) -> serde_json::Value {
-    let mut properties = serde_json::json!({
-        "id": {"type": "string", "minLength": 1, "description": "Stable question ID"},
-        "type": {"type": "string", "const": kind},
-        "prompt": {"type": "string", "minLength": 1},
-        "description": {"type": "string", "minLength": 1},
-        "required": {"type": "boolean"}
-    });
-    let mut required = vec!["id", "type", "prompt", "required"];
-    if choice {
-        properties["allow_other"] = serde_json::json!({"type": "boolean"});
-        properties["options"] = serde_json::json!({
-            "type": "array",
-            "minItems": 1,
-            "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["id", "label"],
-                "properties": {
-                    "id": {"type": "string", "minLength": 1, "description": "Stable option ID"},
-                    "label": {"type": "string", "minLength": 1},
-                    "description": {"type": "string", "minLength": 1}
-                }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One question shape, the kind named by an enum: the three `oneOf`
+    /// variants said the same six fields three times over on every
+    /// request. The typed parse still tells the kinds apart.
+    #[test]
+    fn the_schema_is_one_object_and_every_kind_still_parses() {
+        let definition = question_tool_definition();
+        let schema = serde_json::to_string(&definition.input_schema).unwrap();
+        assert!(!schema.contains("oneOf"), "{schema}");
+        assert!(schema.len() < 1500, "{} bytes", schema.len());
+        let kinds = &definition.input_schema["properties"]["questions"]["items"]["properties"]["type"]
+            ["enum"];
+        assert_eq!(
+            kinds,
+            &serde_json::json!(["single_choice", "multiple_choice", "free_text"])
+        );
+
+        let request: QuestionRequest = serde_json::from_value(serde_json::json!({"questions": [
+            {"id": "a", "type": "single_choice", "prompt": "Which?", "required": true,
+             "options": [{"id": "x", "label": "X"}]},
+            {"id": "b", "type": "multiple_choice", "prompt": "Which ones?", "required": false,
+             "allow_other": true, "options": [{"id": "y", "label": "Y"}]},
+            {"id": "c", "type": "free_text", "prompt": "Anything else?", "required": false}
+        ]}))
+        .unwrap();
+        validate_request(&request).unwrap();
+        // allow_other left out is a no.
+        assert!(matches!(
+            request.questions[0].kind,
+            QuestionKind::SingleChoice {
+                allow_other: false,
+                ..
             }
-        });
-        required.extend(["allow_other", "options"]);
+        ));
     }
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": required,
-        "properties": properties
-    })
 }
