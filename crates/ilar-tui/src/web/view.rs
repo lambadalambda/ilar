@@ -271,6 +271,18 @@ pub(crate) fn project_event_with(
             "detail": detail,
             "ts": ts,
         }),
+        SessionEvent::TurnFinished {
+            id,
+            ending,
+            worked_ms,
+            ..
+        } => json!({
+            "type": "turn_finished",
+            "id": id,
+            "ending": ending.word(),
+            "worked_ms": worked_ms,
+            "ts": ts,
+        }),
         SessionEvent::Topic { id, text, .. } => json!({
             "type": "topic",
             "id": id,

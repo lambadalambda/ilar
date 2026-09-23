@@ -1625,7 +1625,8 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             | SessionEvent::ImageCutoff { id, .. }
             | SessionEvent::MemoryRecall { id, .. }
             | SessionEvent::Rewind { id, .. }
-            | SessionEvent::TurnEnded { id, .. } => Some(id),
+            | SessionEvent::TurnEnded { id, .. }
+            | SessionEvent::TurnFinished { id, .. } => Some(id),
         };
         if let Some(event_id) = event_id
             && !event_ids.insert(event_id)
@@ -2335,7 +2336,8 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
             | SessionEvent::Topic { .. }
             | SessionEvent::ImageCutoff { .. }
             | SessionEvent::Rewind { .. }
-            | SessionEvent::TurnEnded { .. } => {}
+            | SessionEvent::TurnEnded { .. }
+            | SessionEvent::TurnFinished { .. } => {}
             // After the user message it was surfaced for, as one more
             // block of that message.
             SessionEvent::MemoryRecall { text, .. } => {

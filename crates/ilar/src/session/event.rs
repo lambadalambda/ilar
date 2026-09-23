@@ -187,6 +187,41 @@ pub enum SessionEvent {
         detail: String,
         ts: DateTime<Utc>,
     },
+    /// How a started turn finished and how long it worked, written by
+    /// the turn itself as its last event — root or task, clean or not.
+    /// Without it a replay could only guess where a turn began: an
+    /// abort mid-tool leaves a log that reads like a steer. The one
+    /// turn without it is one aborted with a question open, whose
+    /// unanswered call the log will not close. Session state, never
+    /// conversation.
+    TurnFinished {
+        id: String,
+        ending: TurnFinish,
+        worked_ms: u64,
+        ts: DateTime<Utc>,
+    },
+}
+
+/// How a turn finished, in the words its transcript footer uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnFinish {
+    Done,
+    Aborted,
+    /// The iteration limit.
+    Stopped,
+    Failed,
+}
+
+impl TurnFinish {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Aborted => "aborted",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// The verb set for a turn that did not finish — the same one the task
@@ -234,7 +269,8 @@ impl SessionEvent {
             | SessionEvent::ImageCutoff { ts, .. }
             | SessionEvent::MemoryRecall { ts, .. }
             | SessionEvent::Rewind { ts, .. }
-            | SessionEvent::TurnEnded { ts, .. } => *ts,
+            | SessionEvent::TurnEnded { ts, .. }
+            | SessionEvent::TurnFinished { ts, .. } => *ts,
         }
     }
 }

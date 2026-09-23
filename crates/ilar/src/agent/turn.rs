@@ -260,6 +260,17 @@ pub enum TurnOutcome {
     MaxIterations,
 }
 
+/// How a turn's result reads in its log and footer.
+pub fn turn_finish(result: &Result<TurnOutcome>) -> crate::session::TurnFinish {
+    use crate::session::TurnFinish;
+    match result {
+        Ok(TurnOutcome::Completed) => TurnFinish::Done,
+        Ok(TurnOutcome::Aborted) => TurnFinish::Aborted,
+        Ok(TurnOutcome::MaxIterations) => TurnFinish::Stopped,
+        Err(_) => TurnFinish::Failed,
+    }
+}
+
 /// Accumulated blocks from one provider call.
 #[derive(Default)]
 struct StepAccumulator {
@@ -1457,8 +1468,65 @@ enum TurnStart<'a> {
     Resume(crate::question::QuestionResponse),
 }
 
+/// The turn, and on every way out of one that started, the record of
+/// how it finished.
 #[allow(clippy::too_many_arguments)]
 async fn run_turn_inner(
+    resolver: &dyn ProviderResolver,
+    registry: &ToolRegistry,
+    store: &SessionStore,
+    session_id: &str,
+    start: TurnStart<'_>,
+    system_prompt: Option<&str>,
+    config: LoopConfig,
+    events: LoopEventSender,
+    cancel: CancellationToken,
+    tool_ctx: crate::tools::ToolContext,
+    steer: Option<SteerReceiver>,
+) -> Result<TurnOutcome> {
+    // Everything up to the prompt append is marked `TurnNeverStarted`:
+    // a failure here provably wrote nothing, and the callers that fold
+    // queued steers into the prompt key their restore on that marker.
+    let mut session = store
+        .acquire_writer(session_id)
+        .map_err(|error| TurnNeverStarted::mark(error.into()))?
+        .load()
+        .map_err(|error| TurnNeverStarted::mark(error.into()))?;
+    let mut started = None;
+    let result = run_turn_steps(
+        &mut session,
+        &mut started,
+        resolver,
+        registry,
+        store,
+        session_id,
+        start,
+        system_prompt,
+        config,
+        events,
+        cancel,
+        tool_ctx,
+        steer,
+    )
+    .await;
+    if let Some(started) = started {
+        // Bookkeeping: a turn that ran is not failed for want of it.
+        // Refused while a question call is unanswered — an abort with
+        // the question open — which leaves that turn without one.
+        let _ = session.append(SessionEvent::TurnFinished {
+            id: crate::session::new_id(),
+            ending: turn_finish(&result),
+            worked_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            ts: Utc::now(),
+        });
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_turn_steps(
+    session: &mut crate::session::Session,
+    started: &mut Option<std::time::Instant>,
     resolver: &dyn ProviderResolver,
     registry: &ToolRegistry,
     store: &SessionStore,
@@ -1471,14 +1539,6 @@ async fn run_turn_inner(
     mut tool_ctx: crate::tools::ToolContext,
     mut steer: Option<SteerReceiver>,
 ) -> Result<TurnOutcome> {
-    // Everything up to the prompt append is marked `TurnNeverStarted`:
-    // a failure here provably wrote nothing, and the callers that fold
-    // queued steers into the prompt key their restore on that marker.
-    let mut session = store
-        .acquire_writer(session_id)
-        .map_err(|error| TurnNeverStarted::mark(error.into()))?
-        .load()
-        .map_err(|error| TurnNeverStarted::mark(error.into()))?;
     let model = session.effective_model();
     let variant = session.effective_variant();
     let request_options = crate::model::with_output_cap(
@@ -1597,6 +1657,7 @@ async fn run_turn_inner(
     // deleted by its own drop guard on every path out of this function —
     // see `session::live`.
     let mut live = crate::session::LiveScratch::start(store, session_id);
+    *started = Some(std::time::Instant::now());
     events.publish(LoopEvent::TurnStarted, &cancel).await;
 
     let tools = registry.definitions();
@@ -1614,7 +1675,7 @@ async fn run_turn_inner(
         && let Some(summary) = crate::compaction::compact_if_needed_locked(
             provider.as_provider(),
             &model,
-            &mut session,
+            session,
             crate::compaction::CompactionOptions {
                 context_limit: limit,
                 threshold: config.compaction_threshold,
@@ -1632,7 +1693,7 @@ async fn run_turn_inner(
             .publish(
                 LoopEvent::Compacted {
                     context_tokens: crate::compaction::estimate_tokens_with_request(
-                        &session,
+                        session,
                         system_prompt,
                         &tools,
                     ),
@@ -1649,7 +1710,7 @@ async fn run_turn_inner(
     // afterwards has to look at the file again.
     tool_ctx
         .seen_files
-        .forget_after_compaction(last_compaction(&session));
+        .forget_after_compaction(last_compaction(session));
 
     tool_ctx.session_id = session_id.to_string();
     // The model bound above is the one every result of this turn is
@@ -1737,7 +1798,7 @@ async fn run_turn_inner(
             && let Some(summary) = crate::compaction::compact_if_needed_locked(
                 provider.as_provider(),
                 &model,
-                &mut session,
+                session,
                 crate::compaction::CompactionOptions {
                     context_limit: limit,
                     threshold: config.compaction_threshold,
@@ -1755,12 +1816,12 @@ async fn run_turn_inner(
             // contents the model was working from.
             tool_ctx
                 .seen_files
-                .forget_after_compaction(last_compaction(&session));
+                .forget_after_compaction(last_compaction(session));
             events
                 .publish(
                     LoopEvent::Compacted {
                         context_tokens: crate::compaction::estimate_tokens_with_request(
-                            &session,
+                            session,
                             system_prompt,
                             &tools,
                         ),
@@ -2100,7 +2161,7 @@ async fn run_turn_inner(
             {
                 mid_stream_resumes += 1;
                 persist_partial_step(
-                    &mut session,
+                    session,
                     &mut events,
                     &cancel,
                     &model,
@@ -2147,7 +2208,7 @@ async fn run_turn_inner(
             // itself so failures stay diagnosable from the session log
             // (see meta/issues: provider decode errors were lost before).
             persist_failed_step(
-                &mut session,
+                session,
                 &mut events,
                 &cancel,
                 &model,

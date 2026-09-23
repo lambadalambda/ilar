@@ -774,6 +774,7 @@ fn restored_session_invocation_view_in(
                 lines.push(Line_::System(memory_recall_display(ids.len())));
             }
             ilar::session::SessionEvent::Compaction { .. } => {}
+            ilar::session::SessionEvent::TurnFinished { .. } => {}
         }
     }
     if liveness == Liveness::Settled {

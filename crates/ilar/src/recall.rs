@@ -123,7 +123,8 @@ pub fn entries(events: &[SessionEvent]) -> Vec<Entry> {
             | SessionEvent::ImageCutoff { .. }
             | SessionEvent::MemoryRecall { .. }
             | SessionEvent::Rewind { .. }
-            | SessionEvent::TurnEnded { .. } => {}
+            | SessionEvent::TurnEnded { .. }
+            | SessionEvent::TurnFinished { .. } => {}
         }
     }
     entries

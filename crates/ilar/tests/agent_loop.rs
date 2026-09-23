@@ -4283,3 +4283,58 @@ async fn a_turn_that_never_started_publishes_nothing() {
     assert!(outcome.is_err());
     assert!(rx.recv().await.is_none(), "an unstarted turn says nothing");
 }
+
+/// Every turn that started records how it ended and how long it
+/// worked, as its last event: a replay shows the footer the live view
+/// did without guessing where turns began.
+#[tokio::test]
+async fn a_started_turn_ends_its_log_with_how_it_finished() {
+    use ilar::session::TurnFinish;
+
+    async fn finish_of(provider: MockProvider, cancel: CancellationToken) -> TurnFinish {
+        let (store, session_id) = temp_session("build");
+        let (tx, _rx) = events_channel();
+        let _ = run_turn(
+            &provider,
+            &ToolRegistry::builtin(),
+            &store,
+            &session_id,
+            "hello",
+            &[],
+            None,
+            LoopConfig::default(),
+            tx,
+            cancel,
+            ToolContext::root(std::env::temp_dir()),
+            None,
+        )
+        .await;
+        let session = store.load(&session_id).unwrap();
+        match session.events().last() {
+            Some(SessionEvent::TurnFinished { ending, .. }) => *ending,
+            last => panic!("expected the turn's finish last, got {last:?}"),
+        }
+    }
+    let answer = || {
+        MockProvider::new(vec![vec![
+            ProviderEvent::TextDelta("hi".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ]])
+    };
+
+    assert_eq!(
+        finish_of(answer(), CancellationToken::new()).await,
+        TurnFinish::Done
+    );
+    let error = MockProvider::new(vec![vec![ProviderEvent::Error("api down".into())]]);
+    assert_eq!(
+        finish_of(error, CancellationToken::new()).await,
+        TurnFinish::Failed
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert_eq!(finish_of(answer(), cancelled).await, TurnFinish::Aborted);
+}
