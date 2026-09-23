@@ -967,14 +967,18 @@ impl SubagentSpawner {
 
     /// Run one subagent task; returns its final text as the tool output.
     pub async fn run_task(self: &Arc<Self>, input: TaskInput, ctx: &ToolContext) -> ToolOutput {
-        self.run_task_observed(input, ctx, None).await
+        self.run_task_observed(input, ctx, None, InStep::Yes).await
     }
 
+    /// `in_step` says whether a foreground run would hold a step of the
+    /// model's: every model call does; a resume the person started from
+    /// the task's own view runs beside the conversation and holds none.
     async fn run_task_observed(
         self: &Arc<Self>,
         input: TaskInput,
         ctx: &ToolContext,
         mut on_start: Option<ToolStartObserver>,
+        in_step: InStep,
     ) -> ToolOutput {
         if self.depth >= self.max_depth {
             return ToolOutput::error(format!(
@@ -1101,6 +1105,31 @@ impl SubagentSpawner {
             None
         };
         let child_workspace = ctx.workspace.scoped(&child_location);
+        // Blocked on *this* task, not on another job as well: behind a
+        // detached holder the wait would hold the model's step — and
+        // every message from the person — for as long as that job runs.
+        // The refusal the executor gives edit and bash, with the ways out
+        // a task has, and before anything is set up for a run that will
+        // not happen. Only an explicit false: a task the capacity demoted
+        // did leave background out. A holder inside a step (a sibling)
+        // ends with it, and is waited for as before.
+        if input.background == Some(false)
+            && in_step == InStep::Yes
+            && inherited_lease.is_none()
+            && workspace_access == WorkspaceAccess::Mutating
+            && let Some(holder) = child_workspace.detached_holder()
+        {
+            let worktree = if input.task_id.is_none() {
+                ", or give it a worktree of its own"
+            } else {
+                ""
+            };
+            return ToolOutput::error(format!(
+                "task: not run — this checkout is held by {holder} until it ends. Leave \
+                 background out to queue this behind it (the result arrives as a \
+                 notification){worktree}."
+            ));
+        }
         let system_prompt = match self.agent_system_prompt(agent, child_location.cwd()) {
             Ok(prompt) => prompt,
             Err(error) => {
@@ -1444,10 +1473,6 @@ impl SubagentSpawner {
                 // claimed again.
                 let mut child_steer = child_steer;
                 let _slot = _guard; // hold the concurrency slot for the run
-                // Its own write lease, not one it runs inside of: only
-                // then is this task the one a refused call is behind.
-                let owns_write_lease =
-                    inherited_lease.is_none() && workspace_access == WorkspaceAccess::Mutating;
                 // Nobody is waiting on a background task, so it stops the
                 // moment it is told to — including part-way through the
                 // revalidation, which may be a git call.
@@ -1464,12 +1489,17 @@ impl SubagentSpawner {
                         // panel row, and a mutable one queued behind
                         // another read there as working.
                         WaitAnnouncement::Panel(&running_task),
+                        Some(Holder::Detached(format!(
+                            "task \"{description}\" (task_id {session_id})"
+                        ))),
                     ) => outcome,
                     () = task_cancel.cancelled() => LeaseOutcome::Cancelled,
                 };
+                let mut holder = None;
                 let never_ran = match acquired {
-                    LeaseOutcome::Acquired(lease) => {
+                    LeaseOutcome::Acquired(lease, mark) => {
                         child_ctx.workspace_lease = Some(lease);
+                        holder = mark;
                         None
                     }
                     LeaseOutcome::Cancelled => Some(TaskOutcome::Cancelled),
@@ -1491,9 +1521,6 @@ impl SubagentSpawner {
                     ));
                     return;
                 }
-                let _holder = owns_write_lease.then(|| {
-                    workspace.hold_as(format!("task \"{description}\" (task_id {session_id})"))
-                });
                 // Deliberately not a child of `task_cancel`: stopping the
                 // task must go through the select below, which cancels
                 // this token itself and then waits out the graceful
@@ -1569,6 +1596,10 @@ impl SubagentSpawner {
                 // The event channel closes with the turn; the watcher ends
                 // with it.
                 drop(turn);
+                // The lease went with the turn; its name goes too, before
+                // the ending's file work, so nothing is refused behind a
+                // holder that no longer holds anything.
+                drop(holder);
                 let _ = watcher.await;
                 let outcome = match outcome {
                     Some(result) => TaskOutcome::from_turn(result),
@@ -1654,9 +1685,12 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
         // message typed into its view — since then it sits outside any
         // step of the model's and is what a refused call is behind; a
         // model's own foreground task only ever has siblings that wait.
-        let owns_write_lease =
-            inherited_lease.is_none() && workspace_access == WorkspaceAccess::Mutating;
-        let lease = match acquire_task_lease(
+        let label = format!("task \"{}\" (task_id {session_id})", input.description);
+        let holder = match in_step {
+            InStep::Yes => Holder::InStep(label),
+            InStep::No => Holder::Detached(label),
+        };
+        let (lease, _holder) = match acquire_task_lease(
             &child_workspace,
             workspace_access,
             inherited_lease,
@@ -1667,22 +1701,17 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
             waiting_notice
                 .as_ref()
                 .map_or(WaitAnnouncement::Silent, WaitAnnouncement::Row),
+            Some(holder),
         )
         .await
         {
-            LeaseOutcome::Acquired(lease) => lease,
+            LeaseOutcome::Acquired(lease, mark) => (lease, mark),
             LeaseOutcome::Cancelled => {
                 return ToolOutput::error("subagent cancelled while waiting for workspace");
             }
             LeaseOutcome::Failed(failure) => return ToolOutput::error(failure.message()),
         };
         child_ctx.workspace_lease = Some(lease);
-        let _holder = owns_write_lease.then(|| {
-            child_workspace.hold_as(format!(
-                "task \"{}\" (task_id {session_id})",
-                input.description
-            ))
-        });
         if let Some(on_start) = on_start.take() {
             on_start();
         }
@@ -1802,7 +1831,8 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
             background: Some(false),
             ..input
         };
-        self.message_task_outcome(input, ctx, None).await
+        self.message_task_outcome(input, ctx, None, InStep::No)
+            .await
     }
 
     async fn message_task_observed(
@@ -1811,7 +1841,7 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
         ctx: &ToolContext,
         on_start: Option<ToolStartObserver>,
     ) -> ToolOutput {
-        self.message_task_outcome(input, ctx, on_start)
+        self.message_task_outcome(input, ctx, on_start, InStep::Yes)
             .await
             .into_tool_output()
     }
@@ -1821,6 +1851,7 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
         input: TaskMessageInput,
         ctx: &ToolContext,
         mut on_start: Option<ToolStartObserver>,
+        in_step: InStep,
     ) -> TaskMessage {
         let text = input.message.trim().to_string();
         if text.is_empty() {
@@ -1918,6 +1949,7 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
                 },
                 ctx,
                 on_start,
+                in_step,
             )
             .await;
         // A declined resume is not a lost message, and the model must
@@ -2777,7 +2809,12 @@ fn persisted_worktree(
 
 /// A task's workspace lease, or why the task never started.
 enum LeaseOutcome {
-    Acquired(Arc<crate::tools::WorkspaceLease>),
+    /// With the holder's mark, when one was asked for and the lease is
+    /// the run's own.
+    Acquired(
+        Arc<crate::tools::WorkspaceLease>,
+        Option<crate::tools::HolderMark>,
+    ),
     Cancelled,
     Failed(LeaseFailure),
 }
@@ -2856,7 +2893,11 @@ async fn acquire_task_lease(
     location: &crate::tools::WorkspaceLocation,
     cancel: &tokio_util::sync::CancellationToken,
     waiting: WaitAnnouncement<'_>,
+    holder: Option<Holder>,
 ) -> LeaseOutcome {
+    // A lease this run holds as its own, not one it runs inside of: only
+    // then is it the one a refused call is behind.
+    let owned = inherited.is_none() && access == WorkspaceAccess::Mutating;
     let lease = match inherited {
         Some(lease) => lease,
         None if cross_workspace_nested => match workspace.try_acquire_lease(access) {
@@ -2882,11 +2923,25 @@ async fn acquire_task_lease(
             }
         },
     };
+    // Marked the moment the lease is taken, before the revalidation below
+    // (a git call): a foreground task checking in that window must see a
+    // detached holder, or it waits out the whole run.
+    let mark = holder.filter(|_| owned).map(|holder| match holder {
+        Holder::Detached(label) => workspace.hold_as(label),
+        Holder::InStep(label) => workspace.hold_in_step_as(label),
+    });
     match revalidate_after_lease(parent_location, location).await {
-        Ok(revalidated) if &revalidated == location => LeaseOutcome::Acquired(lease),
+        Ok(revalidated) if &revalidated == location => LeaseOutcome::Acquired(lease, mark),
         Ok(_) => LeaseOutcome::Failed(LeaseFailure::Changed(None)),
         Err(error) => LeaseOutcome::Failed(LeaseFailure::Changed(Some(error))),
     }
+}
+
+/// Who a run's lease is held by, in words, and whether that run holds a
+/// step of the model's (see [`crate::tools::WorkspaceScheduler::hold_as`]).
+enum Holder {
+    Detached(String),
+    InStep(String),
 }
 
 /// How a child's turn ended, in the terms both task paths share. The
@@ -3089,6 +3144,13 @@ fn with_queued_note(mut notification: Notification, note: &str) -> Notification 
         };
     }
     notification
+}
+
+/// Whether a foreground run holds a step of the model's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InStep {
+    Yes,
+    No,
 }
 
 /// A background task's word to its parent, in the envelope the parent
@@ -3720,7 +3782,7 @@ impl Tool for TaskTool {
                     "type": ["string", "null"],
                     "description": "Reasoning variant for the chosen model (see the models tool). Omit for the model's default."
                 },
-                "background": {"type": "boolean", "description": "Whether the task runs detached. Omitted, it does: every task runs in the background and reports back as a notification that starts a follow-up turn, freeing you to keep working and the person to reach you meanwhile. Pass false only when you are blocked on the result for this turn's very next step. Pass false for a review whose findings gate what you do next: detached, they arrive a turn later. A mutable task without a workspace of its own holds your checkout's write lease until it reports, so your edit, write, bash, service start and sudo calls are refused until then; give it a worktree if you want to keep editing. Do not poll a detached task: its completion finds you as a notification, and task_message corrects its course mid-flight."}
+                "background": {"type": "boolean", "description": "Whether the task runs detached. Omitted, it does: every task runs in the background and reports back as a notification that starts a follow-up turn, freeing you to keep working and the person to reach you meanwhile. Pass false only when you are blocked on the result for this turn's very next step; a mutable task passed false while another detached job holds its checkout is refused rather than left waiting. Pass false for a review whose findings gate what you do next: detached, they arrive a turn later. A mutable task without a workspace of its own holds your checkout's write lease until it reports, so your edit, write, bash, service start and sudo calls are refused until then; give it a worktree if you want to keep editing. Do not poll a detached task: its completion finds you as a notification, and task_message corrects its course mid-flight."}
                 ,"workspace": {
                     "type": ["object", "null"],
                     "description": format!("Sibling Git worktree to run this task in. Set null or omit to use the current checkout — right for every read-only agent, and for a mutable agent unless you already hold this checkout, want independent mutable tasks to run in parallel, or want to keep editing while one runs. cwd must already be a registered worktree of this repository, because ilar validates the path and never creates one: {WORKTREE_CORRECTION}. This is a cooperative scheduling domain, not a sandbox: tasks in separate worktrees run at the same time and their results are yours to merge afterwards."),
@@ -3759,7 +3821,9 @@ impl Tool for TaskTool {
                 Ok(v) => v,
                 Err(error) => return error,
             };
-            spawner.run_task_observed(input, &ctx, Some(on_start)).await
+            spawner
+                .run_task_observed(input, &ctx, Some(on_start), InStep::Yes)
+                .await
         })
     }
 }
@@ -3823,7 +3887,7 @@ impl Tool for TaskMessageTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "How a finished task's resume runs; a running task is steered either way. Omitted, it detaches, like every task: the answer arrives as a completion notification and you keep working. Pass false only when you are blocked on the answer for your very next step; this call then returns it."
+                    "description": "How a finished task's resume runs; a running task is steered either way. Omitted, it detaches, like every task: the answer arrives as a completion notification and you keep working. Pass false only when you are blocked on the answer for your very next step; this call then returns it — unless another detached job holds the task's checkout, which refuses it rather than leaving you waiting."
                 }
             },
             "required": ["task_id", "message"]
@@ -4377,6 +4441,7 @@ mod tests {
                     waiting
                         .as_ref()
                         .map_or(WaitAnnouncement::Silent, WaitAnnouncement::Row),
+                    None,
                 )
                 .await
             }
@@ -4388,7 +4453,7 @@ mod tests {
         )
         .await
         .expect("a free workspace should not block");
-        assert!(matches!(free, LeaseOutcome::Acquired(_)));
+        assert!(matches!(free, LeaseOutcome::Acquired(..)));
         assert!(
             !tails.lock().unwrap().contains_key("free-1"),
             "announced a wait that never happened"

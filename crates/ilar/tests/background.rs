@@ -495,6 +495,98 @@ async fn a_mutable_task_defaults_to_the_background_and_names_the_held_checkout()
     spawner.shutdown().await;
 }
 
+/// `background: false` is the model saying it is blocked on *this*
+/// task, not that it will wait out another job too: behind a detached
+/// holder of its checkout it is refused at once, naming the holder, the
+/// way edit and bash are. Left detached, the same task queues behind
+/// the holder and blocks nothing.
+#[tokio::test]
+async fn a_foreground_task_behind_a_detached_holder_is_refused_at_once() {
+    let (store, session_id) = temp_store();
+    let spawner = patient_spawner(
+        Arc::new(DelayedText {
+            text: "done",
+            delay_ms: 10,
+        }),
+        &store,
+    );
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = background_tool_context(session_id.clone(), spawner.clone(), dir.path());
+    let marker = dir.path().join("job-started");
+    registry
+        .get("bash")
+        .unwrap()
+        .run(
+            serde_json::json!({
+                "command": format!("touch {}; sleep 5", marker.display()),
+                "run_in_background": true
+            }),
+            ctx.clone(),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the job holds the checkout");
+
+    let task = registry.get("task").unwrap();
+    let started = std::time::Instant::now();
+    let refused = task
+        .run(
+            serde_json::json!({
+                "description": "apply the fix",
+                "prompt": "edit things",
+                "subagent_type": "explore",
+                "background": false,
+            }),
+            ctx.clone(),
+        )
+        .await;
+    assert!(refused.is_error, "{}", refused.content);
+    assert!(
+        refused
+            .content
+            .contains("held by the background job \"bash: touch"),
+        "{}",
+        refused.content
+    );
+    assert!(
+        refused.content.contains("Leave background out"),
+        "{}",
+        refused.content
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the step waited for the job: {:?}",
+        started.elapsed()
+    );
+    // Refused before anything was set up: no empty task left listed.
+    assert!(
+        store.children_of(&session_id).is_empty(),
+        "a refused task left a session behind"
+    );
+
+    let queued = task
+        .run(
+            serde_json::json!({
+                "description": "apply the fix",
+                "prompt": "edit things",
+                "subagent_type": "explore",
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!queued.is_error, "{}", queued.content);
+    spawner.abort_all();
+    spawner.shutdown().await;
+}
+
 /// A follow-up to a finished task is a task like any other: it resumes
 /// detached unless told otherwise, and the answer comes back as the
 /// completion notification instead of holding the parent's step.

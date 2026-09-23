@@ -80,10 +80,13 @@ Reads are advisory — a running explore never delays the parent's own edits or
 builds — while two mutable tasks in one checkout remain impossible, and the
 edit gate catches stale writes on the mutating side. A mutating call — `bash`,
 `service`, `edit`/`write` — whose checkout another job holds is refused at
-once rather than holding the step until that job ends. The wait that remains
-is a mutable task behind another one, and a task waiting in the foreground
-names itself in the tool row: "waiting for the workspace — a mutable task
-holds it".
+once rather than holding the step until that job ends — and so is a mutable
+task passed `background: false`, which names the holder and the two ways out:
+leave `background` out to queue behind it, or give the task a worktree. The
+waits that remain: a detached task behind any holder, a foreground task behind
+a sibling in its own step, and a resume you started from a task's view. A task
+waiting in the foreground names itself in the tool row: "waiting for the
+workspace — a mutable task holds it".
 (A detached task has no tool row to write that into — it is nobody's
 blocked call — so it says it on its agents-panel row instead:
 `· waiting for the workspace`, until the lease is its.)

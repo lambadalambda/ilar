@@ -278,14 +278,23 @@ pub struct WorkspaceScheduler {
     /// Who holds each workspace's write lease, in words, for the call
     /// that is refused because of it. Keyed like `locks` and shared the
     /// same way; the number tells one holder's mark from the next.
-    holders: Arc<std::sync::Mutex<HashMap<WorkspaceId, (u64, String)>>>,
+    holders: Arc<std::sync::Mutex<HashMap<WorkspaceId, HolderEntry>>>,
     id: WorkspaceId,
+}
+
+/// One holder's entry: its mark, its name, and whether it runs outside
+/// any step of the model's — a background task or job — rather than
+/// inside one, where waiting for it costs the step nothing extra.
+struct HolderEntry {
+    mark: u64,
+    label: String,
+    detached: bool,
 }
 
 /// A holder's name on a workspace, for as long as this lives. Taken
 /// right after the write lease and dropped with it.
 pub struct HolderMark {
-    holders: Arc<std::sync::Mutex<HashMap<WorkspaceId, (u64, String)>>>,
+    holders: Arc<std::sync::Mutex<HashMap<WorkspaceId, HolderEntry>>>,
     id: WorkspaceId,
     mark: u64,
 }
@@ -301,7 +310,7 @@ impl Drop for HolderMark {
         // name, and a late drop must not erase it.
         if holders
             .get(&self.id)
-            .is_some_and(|(mark, _)| *mark == self.mark)
+            .is_some_and(|entry| entry.mark == self.mark)
         {
             holders.remove(&self.id);
         }
@@ -356,16 +365,30 @@ impl WorkspaceScheduler {
         }
     }
 
-    /// Put `holder` on this workspace until the mark drops. For a detached
+    /// Put `holder` on this workspace until the mark drops: a detached
     /// holder of the write lease — a background task or job — so a call
     /// refused behind it can say what it is waiting on.
     pub fn hold_as(&self, holder: impl Into<String>) -> HolderMark {
+        self.mark(holder.into(), true)
+    }
+
+    /// The same for a holder inside a step — a foreground task — which
+    /// a caller may wait for: it ends with the step that started it.
+    pub fn hold_in_step_as(&self, holder: impl Into<String>) -> HolderMark {
+        self.mark(holder.into(), false)
+    }
+
+    fn mark(&self, label: String, detached: bool) -> HolderMark {
         static NEXT_MARK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let mark = NEXT_MARK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.holders
-            .lock()
-            .unwrap()
-            .insert(self.id.clone(), (mark, holder.into()));
+        self.holders.lock().unwrap().insert(
+            self.id.clone(),
+            HolderEntry {
+                mark,
+                label,
+                detached,
+            },
+        );
         HolderMark {
             holders: self.holders.clone(),
             id: self.id.clone(),
@@ -379,7 +402,18 @@ impl WorkspaceScheduler {
             .lock()
             .unwrap()
             .get(&self.id)
-            .map(|(_, holder)| holder.clone())
+            .map(|entry| entry.label.clone())
+    }
+
+    /// The holder, if it is a detached one: waiting for it would hold a
+    /// step for as long as a job the model chose not to wait for.
+    pub fn detached_holder(&self) -> Option<String> {
+        self.holders
+            .lock()
+            .unwrap()
+            .get(&self.id)
+            .filter(|entry| entry.detached)
+            .map(|entry| entry.label.clone())
     }
 
     fn lock(&self) -> Arc<tokio::sync::RwLock<()>> {
