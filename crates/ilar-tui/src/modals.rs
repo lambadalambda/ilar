@@ -542,6 +542,7 @@ pub(crate) enum PaletteCommand {
     Session,
     Rewind,
     Links,
+    Agents,
     Usage,
     Compact,
     Context,
@@ -603,6 +604,13 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Open link…",
         shortcut: "^O",
         search_terms: "link url open browser web markdown",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Agents,
+        section: "General",
+        label: "Focus an agent…",
+        shortcut: "^G",
+        search_terms: "agent task subagent focus view message steer cancel",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Usage,
@@ -923,6 +931,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
         title: "A focused agent",
         bindings: &[
             binding!("click an agent's row", "its transcript over the screen"),
+            binding!("Ctrl-G", "pick an agent and open its view, no mouse needed"),
             binding!("", "the ● root row or a ⚙ job closes the view"),
             binding!("↑↓ / PgUp / PgDn / wheel", "scroll the view"),
             binding!("Home / End", "top / tail — the root needs Ctrl-Home/End"),
@@ -1800,10 +1809,19 @@ impl Picker for SessionSearch {
     }
 }
 
+/// What a [`LinkPicker`] picks: a link to open, or an agent whose
+/// view to open — the same filtered list of label and target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickPurpose {
+    Links,
+    Agents,
+}
+
 pub(crate) struct LinkPicker {
     links: Vec<crate::links::LinkEntry>,
     query: String,
     nav: ListNav,
+    purpose: PickPurpose,
 }
 
 impl LinkPicker {
@@ -1812,7 +1830,25 @@ impl LinkPicker {
             links,
             query: String::new(),
             nav: ListNav::default(),
+            purpose: PickPurpose::Links,
         }
+    }
+
+    /// The running agents, each chosen by its session id.
+    pub(crate) fn agents(agents: Vec<crate::links::LinkEntry>) -> Self {
+        Self {
+            purpose: PickPurpose::Agents,
+            ..Self::new(agents)
+        }
+    }
+
+    pub(crate) fn purpose(&self) -> PickPurpose {
+        self.purpose
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.links.len()
     }
 
     fn filtered(&self) -> Vec<&crate::links::LinkEntry> {
@@ -1871,13 +1907,19 @@ impl Picker for LinkPicker {
 
 pub(crate) fn render_link_picker(frame: &mut Frame, picker: &LinkPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 80, 16);
-    let Some(inner) = modal_frame(
-        frame,
-        area,
-        " links ",
-        theme::MARKUP,
-        " filter · Enter opens in browser · Esc close ",
-    ) else {
+    let (title, hint, empty) = match picker.purpose {
+        PickPurpose::Links => (
+            " links ",
+            " filter · Enter opens in browser · Esc close ",
+            "no links in this transcript",
+        ),
+        PickPurpose::Agents => (
+            " agents ",
+            " filter · Enter opens its view · Esc close ",
+            "no agents running",
+        ),
+    };
+    let Some(inner) = modal_frame(frame, area, title, theme::MARKUP, hint) else {
         return ModalHit::default();
     };
     let width = inner.width as usize;
@@ -1887,7 +1929,7 @@ pub(crate) fn render_link_picker(frame: &mut Frame, picker: &LinkPicker) -> Moda
         inner,
         &picker.query,
         if picker.links.is_empty() {
-            "no links in this transcript"
+            empty
         } else {
             "no matches"
         },

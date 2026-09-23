@@ -2866,6 +2866,33 @@ fn ring_terminal_bell_if_idle(
 /// replay used to freeze the UI for the length of its log. Returns
 /// whether the child is streaming, which the seed needs — or `None`
 /// when the view was already on that agent and there is nothing to do.
+/// Put an agent's view in front and start loading its transcript — the
+/// one way in, from a panel click and from the agent picker alike.
+fn focus_agent(
+    app: &mut App,
+    store: &SessionStore,
+    session_id: &str,
+    focus_seed: &mut Option<FocusSeedTask>,
+) {
+    // `None`: the view was already on that agent, and re-seeding it
+    // would replace a live tail with a settled replay.
+    let Some(streaming) = open_agent_focus(app, store, session_id) else {
+        return;
+    };
+    let store = store.clone();
+    let seed_id = session_id.to_string();
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = cancel.clone();
+    // Assigning drops whatever seed was in flight, which stops it.
+    *focus_seed = Some(FocusSeedTask {
+        session: session_id.to_string(),
+        handle: tokio::task::spawn_blocking(move || {
+            seed_agent_focus(&store, &seed_id, streaming, &flag)
+        }),
+        cancel,
+    });
+}
+
 fn open_agent_focus(app: &mut App, store: &SessionStore, session_id: &str) -> Option<bool> {
     // A second click on the row already in front is not a navigation:
     // closing and reopening would round-trip the drafts, stashing what
@@ -3190,7 +3217,7 @@ fn switch_blocked(
         // short: this string is also used as a notice line, where an
         // 80-column terminal would truncate the second key away.
         Some(format!(
-            "{background_agents} background task(s) running; Ctrl-Q cancels all, Ctrl-G one"
+            "{background_agents} background task(s) running; Ctrl-Q cancels all, Ctrl-G picks one"
         ))
     } else if deliveries > 0 {
         Some("a task result is being delivered; wait a moment".into())
@@ -4969,6 +4996,12 @@ async fn run_app(
                                 PickerAction::Dismiss => {
                                     app.link_picker = None;
                                 }
+                                PickerAction::Choose(session_id)
+                                    if picker.purpose() == modals::PickPurpose::Agents =>
+                                {
+                                    app.link_picker = None;
+                                    focus_agent(app, store, &session_id, &mut focus_seed);
+                                }
                                 PickerAction::Choose(url) => {
                                     app.link_picker = None;
                                     match links::open_in_browser(&url) {
@@ -5461,6 +5494,12 @@ async fn run_app(
                     (KeyCode::Char('o'), true) => {
                         app.open_link_picker();
                     }
+                    // Inside an agent's view Ctrl-G cancels that agent;
+                    // out here it is the way in, for a keyboard and a
+                    // terminal too narrow for the agents panel.
+                    (KeyCode::Char('g'), true) => {
+                        app.open_agent_picker();
+                    }
                     // Read-only, like the link picker: no busy guard.
                     (KeyCode::Char('t'), true) => {
                         app.todos_visible = true;
@@ -5628,27 +5667,7 @@ async fn run_app(
                                     focus_seed = None;
                                 }
                                 Some(SidebarAction::Focus(AgentTarget::Focus(id))) => {
-                                    // `None`: the view was already on
-                                    // that agent, and re-seeding it
-                                    // would replace a live tail with a
-                                    // settled replay.
-                                    if let Some(streaming) = open_agent_focus(app, store, &id) {
-                                        let store = store.clone();
-                                        let seed_id = id.clone();
-                                        let cancel = std::sync::Arc::new(
-                                            std::sync::atomic::AtomicBool::new(false),
-                                        );
-                                        let flag = cancel.clone();
-                                        // Assigning drops whatever seed
-                                        // was in flight, which stops it.
-                                        focus_seed = Some(FocusSeedTask {
-                                            session: id,
-                                            handle: tokio::task::spawn_blocking(move || {
-                                                seed_agent_focus(&store, &seed_id, streaming, &flag)
-                                            }),
-                                            cancel,
-                                        });
-                                    }
+                                    focus_agent(app, store, &id, &mut focus_seed);
                                 }
                                 None if app.focus.is_none() => {
                                     app.begin_transcript_selection(mouse.column, mouse.row);

@@ -1254,6 +1254,26 @@ impl App {
 
     /// Open the link picker over everything currently in the
     /// transcript. Safe at any time: collection is read-only.
+    /// The running agents, for the keyboard: the panel's rows are
+    /// clickable only with a mouse on a terminal wide enough to show them.
+    pub(crate) fn open_agent_picker(&mut self) {
+        let agents: Vec<crate::links::LinkEntry> = self
+            .agents_view
+            .iter()
+            // A bash job has no session of its own to open.
+            .filter(|row| row.agent != ilar::subagent::JOB_AGENT)
+            .map(|row| crate::links::LinkEntry {
+                label: format!("{} · {}", row.agent, row.description),
+                url: row.session_id.clone(),
+            })
+            .collect();
+        if agents.is_empty() {
+            self.set_notice("no agents running", NoticeLevel::Info);
+            return;
+        }
+        self.link_picker = Some(LinkPicker::agents(agents));
+    }
+
     pub(crate) fn open_link_picker(&mut self) {
         self.link_picker = Some(LinkPicker::new(crate::links::collect_links(&self.lines)));
     }
@@ -3246,6 +3266,9 @@ pub(crate) fn activate_palette_command(
         }
         PaletteCommand::Links => {
             app.open_link_picker();
+        }
+        PaletteCommand::Agents => {
+            app.open_agent_picker();
         }
         PaletteCommand::Rewind => {
             // Turns are loaded by the caller (needs the store); the
@@ -5306,6 +5329,46 @@ mod tests {
         app.topic = Some("flaky auth test".into());
         let titled = screen(&mut app);
         assert!(titled.contains("ilar · flaky auth test"), "{titled}");
+    }
+
+    /// An agent's view had one way in: a click on its panel row, which
+    /// only a mouse and a terminal of 121 columns could make. The
+    /// picker lists the same agents — not the bash jobs, which have no
+    /// view — and with nothing running it says so instead of opening.
+    #[test]
+    fn the_agent_picker_is_the_keyboard_way_into_an_agents_view() {
+        let row = |session: &str, agent: &str, description: &str| AgentRow {
+            session_id: session.into(),
+            depth: 0,
+            description: description.into(),
+            agent: agent.into(),
+            background: true,
+            delivering: false,
+            foreign_parent: None,
+            elapsed: std::time::Duration::from_secs(5),
+            waiting: false,
+            quiet: None,
+        };
+        let mut app = App::new();
+        app.open_agent_picker();
+        assert!(app.link_picker.is_none(), "an empty picker opened");
+        assert!(
+            app.notice
+                .as_ref()
+                .is_some_and(|notice| notice.text.contains("no agents")),
+            "{:?}",
+            app.notice
+        );
+
+        app.agents_view = vec![
+            row("child-a", "explore", "survey the parser"),
+            row("root", ilar::subagent::JOB_AGENT, "bash: cargo test"),
+            row("child-b", "build", "fix the lexer"),
+        ];
+        app.open_agent_picker();
+        let picker = app.link_picker.as_ref().expect("the picker");
+        assert_eq!(picker.purpose(), crate::modals::PickPurpose::Agents);
+        assert_eq!(picker.len(), 2, "a job has no view to open");
     }
 
     #[test]
