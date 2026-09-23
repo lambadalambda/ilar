@@ -108,7 +108,9 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 25 — The step does not wait
 
-- [ ] [A slow call does not hold the step](issues/a-slow-call-does-not-hold-the-step.md) — *measured: bash rarely holds a step; the holds are task_message resumes and the write lease — needs a decision*
+- [ ] [A slow call does not hold the step](issues/a-slow-call-does-not-hold-the-step.md) — *measured: bash rarely holds a step; the holds are the two below*
+  - [ ] [A message to a finished task runs detached](issues/a-message-to-a-finished-task-runs-detached.md)
+  - [ ] [A held checkout answers at once](issues/a-held-checkout-answers-at-once.md)
 
 ## Milestone 22 — Memory in every directory
 

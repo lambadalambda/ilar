@@ -406,9 +406,11 @@ impl OutputTailSink {
     }
 }
 
-/// The one wait a caller can still hit now that reads are advisory: a
-/// mutating tool, or a mutable task, behind a mutable task that holds
-/// the same checkout. Every waiter says so with this sentence, on the
+/// The wait a caller can still hit now that reads are advisory and a
+/// mutating tool is refused rather than held behind another job: a
+/// mutable task behind another one in the same checkout (and, should a
+/// concurrent mutating tool ever exist, one behind a sibling of its own
+/// step). Every waiter says so with this sentence, on the
 /// same channel a running tool reports its output tail on — silence
 /// there reads as a hang, and docs/agents-and-skills.md promises the
 /// row names itself.

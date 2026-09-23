@@ -1336,7 +1336,7 @@ fn task_schema_explains_the_workspace_decision_before_the_first_call() {
     );
     assert!(
         description.contains(
-            "holds that lease, so your own edit, write and bash calls wait until it reports"
+            "holds that lease, so your own edit, write and bash calls are refused until it reports"
         ),
         "{description}"
     );

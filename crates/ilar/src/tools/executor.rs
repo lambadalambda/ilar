@@ -41,6 +41,7 @@ struct Running {
     id: String,
     name: String,
     concurrency: ToolConcurrency,
+    access: WorkspaceAccess,
 }
 
 /// What an unknown tool name is told: the names it could have used.
@@ -53,6 +54,20 @@ fn unknown_tool_refusal(name: &str, known: &[&'static str]) -> String {
     format!(
         "no such tool: {name}; this session has: {}",
         known.join(", ")
+    )
+}
+
+/// What a mutating call behind a detached holder is told instead of
+/// waiting: the step would hold until that job reports, and a message
+/// from the person would wait with it.
+fn workspace_held_refusal(name: &str) -> String {
+    format!(
+        "{name}: not run — this checkout is held by another job of this session until it ends: a \
+         background task that may edit, a background bash, or a task the person resumed from \
+         its own view. Do not retry at once: read, glob and grep still work, a background \
+         job's completion reaches you as a notification, and the tasks tool shows what is \
+         still running. If you need this call, end your turn and make it once the checkout is \
+         free."
     )
 }
 
@@ -178,15 +193,25 @@ where
                 });
                 continue;
             }
+            let access = tool.workspace_access();
+            // The one holder worth waiting for is a mutator of this very
+            // step, which finishes inside it. Anything else holding the
+            // checkout is outside the step — a background task or bash —
+            // and the model chose not to wait for that. No built-in
+            // mutator reaches the sibling wait today (the ones that take
+            // this branch are barriers); it is kept for a concurrent one.
+            let waits_for_sibling = running_meta
+                .iter()
+                .any(|running| running.access == WorkspaceAccess::Mutating);
             running_meta.push(Running {
                 idx,
                 id: call.id.clone(),
                 name: call.name.clone(),
                 concurrency,
+                access,
             });
             let manages_workspace_access = tool.manages_workspace_access();
             let accepts_executor_workspace_lease = tool.accepts_executor_workspace_lease();
-            let access = tool.workspace_access();
             let mut call_ctx = ctx.clone();
             call_ctx.call_id = Some(call.id.clone());
             let secrets = call_ctx.secrets.clone();
@@ -211,21 +236,27 @@ where
                             tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Absent => {
-                            // Same wait, same notice as the plain-permit
+                            // Same rule, same notice as the plain-permit
                             // branch below: edit/write must not sit on a
-                            // silent row while a mutable task holds the
+                            // silent row while a sibling holds the
                             // checkout.
                             let lease = match call_ctx.workspace.try_acquire_lease(access) {
-                                Some(lease) => lease,
-                                None => {
+                                Some(lease) => Some(lease),
+                                None if waits_for_sibling => {
                                     WorkspaceWaitNotice::announce(
                                         WorkspaceWaitNotice::from_context(&call_ctx).as_ref(),
                                     );
-                                    call_ctx.workspace.acquire_lease(access).await
+                                    Some(call_ctx.workspace.acquire_lease(access).await)
                                 }
+                                None => None,
                             };
-                            call_ctx.workspace_lease = Some(lease);
-                            tool.run_observed(input, call_ctx, start).await
+                            match lease {
+                                Some(lease) => {
+                                    call_ctx.workspace_lease = Some(lease);
+                                    tool.run_observed(input, call_ctx, start).await
+                                }
+                                None => ToolOutput::error(workspace_held_refusal(tool.name())),
+                            }
                         }
                         WorkspaceCoverage::Incompatible => ToolOutput::error(format!(
                             "{}: workspace access is not covered by its inherited lease",
@@ -240,18 +271,22 @@ where
                             tool.run_observed(input, call_ctx, start).await
                         }
                         WorkspaceCoverage::Absent => {
-                            // The only wait left is writer-vs-writer; say
-                            // so, or "queued" reads as a hang.
-                            let _permit = match call_ctx.workspace.try_acquire(access) {
-                                Some(permit) => permit,
-                                None => {
+                            // The only wait left is on a sibling writer;
+                            // say so, or "queued" reads as a hang.
+                            let permit = match call_ctx.workspace.try_acquire(access) {
+                                Some(permit) => Some(permit),
+                                None if waits_for_sibling => {
                                     WorkspaceWaitNotice::announce(
                                         WorkspaceWaitNotice::from_context(&call_ctx).as_ref(),
                                     );
-                                    call_ctx.workspace.acquire(access).await
+                                    Some(call_ctx.workspace.acquire(access).await)
                                 }
+                                None => None,
                             };
-                            tool.run_observed(input, call_ctx, start).await
+                            match permit {
+                                Some(_permit) => tool.run_observed(input, call_ctx, start).await,
+                                None => ToolOutput::error(workspace_held_refusal(tool.name())),
+                            }
                         }
                         WorkspaceCoverage::Incompatible => ToolOutput::error(format!(
                             "{}: workspace access is not covered by its inherited lease",
@@ -637,48 +672,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn managed_tool_is_observed_only_after_its_workspace_lease_is_acquired() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ctx = ToolContext::root(dir.path().to_path_buf());
-        let scheduler = ctx.workspace.clone();
-        let held = scheduler.acquire_lease(WorkspaceAccess::Mutating).await;
-        ctx.workspace = scheduler;
-        let tool: Arc<dyn Tool> = Arc::new(ManagedLeaseTool);
-        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
-        let execution = tokio::spawn(execute_calls_observed(
-            vec![ToolCall {
-                id: "managed-1".into(),
-                name: "managed".into(),
-                input: serde_json::json!({}),
-            }],
-            move |_| Some(tool.clone()),
-            Vec::new(),
-            ctx,
-            CancellationToken::new(),
-            move |id, _| {
-                let _ = started_tx.send(id);
-            },
-            |_, _| {},
-        ));
-
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), started_rx.recv())
-                .await
-                .is_err(),
-            "managed tool was observed before workspace acquisition"
-        );
-        drop(held);
-        assert_eq!(started_rx.recv().await.as_deref(), Some("managed-1"));
-        assert!(
-            execution
-                .await
-                .unwrap()
-                .iter()
-                .all(|outcome| !outcome.output.is_error)
-        );
-    }
-
     struct PlainMutatingTool;
 
     impl Tool for PlainMutatingTool {
@@ -707,9 +700,113 @@ mod tests {
         }
     }
 
-    /// Run one mutating tool while a mutable task holds the checkout, and
-    /// return what its row said while it waited.
-    async fn row_while_waiting(tool: Arc<dyn Tool>) -> Option<String> {
+    /// Run one mutating tool while something outside the step holds the
+    /// checkout: a detached task or a background bash.
+    async fn run_behind_a_held_checkout(tool: Arc<dyn Tool>) -> (ToolOutput, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::root(dir.path().to_path_buf());
+        let _held = ctx.workspace.acquire_lease(WorkspaceAccess::Mutating).await;
+        let started = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = started.clone();
+        let outcomes = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            execute_calls_observed(
+                vec![ToolCall {
+                    id: "held-1".into(),
+                    name: tool.name().into(),
+                    input: serde_json::json!({}),
+                }],
+                move |_| Some(tool.clone()),
+                Vec::new(),
+                ctx,
+                CancellationToken::new(),
+                move |id, _| observed.lock().unwrap().push(id),
+                |_, _| {},
+            ),
+        )
+        .await
+        .expect("a call behind a held checkout answers at once instead of waiting");
+        let started = started.lock().unwrap().clone();
+        (outcomes[0].output.clone(), started)
+    }
+
+    /// Nothing in the step can hold the lease against a barrier, so the
+    /// holder is detached — and waiting for it is waiting for something
+    /// the model already chose not to wait for. Both branches, the
+    /// permit one (bash, service) and the lease one (edit, write).
+    #[tokio::test]
+    async fn a_held_checkout_refuses_at_once_and_runs_nothing() {
+        for tool in [
+            Arc::new(PlainMutatingTool) as Arc<dyn Tool>,
+            Arc::new(ManagedLeaseTool),
+        ] {
+            let name = tool.name();
+            let (output, started) = run_behind_a_held_checkout(tool).await;
+            assert!(output.is_error, "{name}: {}", output.content);
+            assert!(
+                output.content.starts_with(&format!("{name}: ")),
+                "{}",
+                output.content
+            );
+            assert!(output.content.contains("held"), "{}", output.content);
+            assert!(
+                output.content.contains("notification"),
+                "{}",
+                output.content
+            );
+            assert!(started.is_empty(), "{name} was observed starting");
+        }
+    }
+
+    /// A concurrent mutator of the step's own: the one holder worth
+    /// waiting for, since it finishes inside this step.
+    struct SiblingMutator {
+        name: &'static str,
+        managed: bool,
+        hold: std::time::Duration,
+    }
+
+    impl Tool for SiblingMutator {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn description(&self) -> &'static str {
+            "a concurrent mutator"
+        }
+
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::Concurrent
+        }
+
+        fn workspace_access(&self) -> WorkspaceAccess {
+            WorkspaceAccess::Mutating
+        }
+
+        fn manages_workspace_access(&self) -> bool {
+            self.managed
+        }
+
+        fn accepts_executor_workspace_lease(&self) -> bool {
+            self.managed
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn run(&self, _input: serde_json::Value, _ctx: ToolContext) -> super::super::ToolFuture {
+            let hold = self.hold;
+            Box::pin(async move {
+                tokio::time::sleep(hold).await;
+                ToolOutput::text("done")
+            })
+        }
+    }
+
+    /// Run a waiter beside a sibling that holds the checkout, and return
+    /// what the waiter's row said while it waited.
+    async fn row_behind_a_sibling(managed: bool) -> Option<String> {
         let dir = tempfile::tempdir().unwrap();
         let tails = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
             String,
@@ -718,57 +815,60 @@ mod tests {
         let (wake, _wake_rx) = tokio::sync::mpsc::channel(4);
         let mut ctx = ToolContext::root(dir.path().to_path_buf());
         ctx.output_tail = Some(super::super::OutputTailSink::new(tails.clone(), wake));
-        let held = ctx.workspace.acquire_lease(WorkspaceAccess::Mutating).await;
-        let execution = tokio::spawn(execute_calls_observed(
-            vec![ToolCall {
-                id: "waiter-1".into(),
-                name: tool.name().into(),
-                input: serde_json::json!({}),
-            }],
-            move |_| Some(tool.clone()),
+        let holder: Arc<dyn Tool> = Arc::new(SiblingMutator {
+            name: "holder",
+            managed: false,
+            hold: std::time::Duration::from_millis(150),
+        });
+        let waiter: Arc<dyn Tool> = Arc::new(SiblingMutator {
+            name: "waiter",
+            managed,
+            hold: std::time::Duration::ZERO,
+        });
+        let outcomes = execute_calls_observed(
+            vec![
+                ToolCall {
+                    id: "holder-1".into(),
+                    name: "holder".into(),
+                    input: serde_json::json!({}),
+                },
+                ToolCall {
+                    id: "waiter-1".into(),
+                    name: "waiter".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            move |name| {
+                Some(if name == "holder" {
+                    holder.clone()
+                } else {
+                    waiter.clone()
+                })
+            },
             Vec::new(),
             ctx,
             CancellationToken::new(),
             |_, _| {},
             |_, _| {},
-        ));
-
-        let mut reported = None;
-        for _ in 0..200 {
-            reported = tails.lock().unwrap().get("waiter-1").cloned();
-            if reported.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        )
+        .await;
+        for outcome in &outcomes {
+            assert!(!outcome.output.is_error, "{}", outcome.output.content);
         }
-        drop(held);
-        let outcomes = execution.await.unwrap();
-        assert!(
-            !outcomes[0].output.is_error,
-            "{}",
-            outcomes[0].output.content
-        );
-        reported
+        tails.lock().unwrap().get("waiter-1").cloned()
     }
 
     /// Both waiting branches say the same thing: a silent row reads as a
-    /// hang, and docs/agents-and-skills.md promises the row names itself
-    /// — for the permit branch (bash, service) and for the lease branch
-    /// (edit, write) alike.
+    /// hang, and docs/agents-and-skills.md promises the row names itself.
     #[tokio::test]
-    async fn every_workspace_wait_names_itself_in_the_tool_row() {
-        assert_eq!(
-            row_while_waiting(Arc::new(PlainMutatingTool))
-                .await
-                .as_deref(),
-            Some(super::super::WORKSPACE_WAIT_NOTICE)
-        );
-        assert_eq!(
-            row_while_waiting(Arc::new(ManagedLeaseTool))
-                .await
-                .as_deref(),
-            Some(super::super::WORKSPACE_WAIT_NOTICE)
-        );
+    async fn a_sibling_holding_the_checkout_is_waited_for_by_name() {
+        for managed in [false, true] {
+            assert_eq!(
+                row_behind_a_sibling(managed).await.as_deref(),
+                Some(super::super::WORKSPACE_WAIT_NOTICE),
+                "managed: {managed}"
+            );
+        }
     }
 
     #[tokio::test]

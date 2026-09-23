@@ -55,8 +55,10 @@ send mid-flight reach the parent — a foreground task blocks the parent's
 conversation until it returns — and lets `task_message` reach the task. A
 mutable task without a workspace of its own still runs in the parent's checkout
 and holds its write lease until it reports, so the parent's own `edit`, `write`
-and `bash` calls wait behind it (`read`, `glob` and `grep` do not); the task's
-started text says so, and a worktree of its own lifts it. `background: false`
+and `bash` calls are refused at once until then (`read`, `glob` and `grep` are
+not) — waiting would hold the parent's step, and your messages with it, for
+as long as the task runs. The task's started text says so, and a worktree of
+its own lifts it. `background: false`
 is for the call that is blocked on the answer for the turn's very next step,
 the way Codex's `wait_agent` is — a review before a commit being the usual
 one. A *defaulted*
@@ -76,10 +78,12 @@ collides; read-only work runs in place, sees everything (uncommitted changes
 included), blocks nothing, and accepts that the tree may shift while it looks.
 Reads are advisory — a running explore never delays the parent's own edits or
 builds — while two mutable tasks in one checkout remain impossible, and the
-edit gate catches stale writes on the mutating side. The one wait that can
-still happen — anything mutating while a same-checkout mutable task runs:
-`bash`, `service`, `edit`/`write`, or another mutable task — names itself in
-the tool row: "waiting for the workspace — a mutable task holds it".
+edit gate catches stale writes on the mutating side. A mutating call — `bash`,
+`service`, `edit`/`write` — whose checkout another job holds is refused at
+once rather than holding the step until that job ends. The wait that remains
+is a mutable task behind another one, and a task waiting in the foreground
+names itself in the tool row: "waiting for the workspace — a mutable task
+holds it".
 (A detached task has no tool row to write that into — it is nobody's
 blocked call — so it says it on its agents-panel row instead:
 `· waiting for the workspace`, until the lease is its.)

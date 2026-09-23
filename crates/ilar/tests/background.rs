@@ -473,6 +473,11 @@ async fn a_mutable_task_defaults_to_the_background_and_names_the_held_checkout()
         output.content
     );
     assert!(
+        output.content.contains("are refused until then"),
+        "{}",
+        output.content
+    );
+    assert!(
         started.elapsed() < Duration::from_millis(80),
         "defaulted mutable task blocked the caller: {:?}",
         started.elapsed()
@@ -1730,30 +1735,43 @@ async fn background_bash_holds_workspace_until_completion() {
     .await
     .expect("background Bash did not acquire the workspace");
 
-    let started = std::time::Instant::now();
-    let outcomes = ilar::tools::executor::execute_calls(
-        vec![ilar::tools::executor::ToolCall {
-            id: "write-after-background".into(),
-            name: "write".into(),
-            input: serde_json::json!({"path": "after.txt", "content": "foreground"}),
-        }],
-        |name| registry.get(name),
-        ctx,
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await;
+    // Refused at once rather than held: the step would otherwise sit
+    // until the job reports, and nothing the person says could reach
+    // the model meanwhile.
+    let write_after = || {
+        ilar::tools::executor::execute_calls(
+            vec![ilar::tools::executor::ToolCall {
+                id: "write-after-background".into(),
+                name: "write".into(),
+                input: serde_json::json!({"path": "after.txt", "content": "foreground"}),
+            }],
+            |name| registry.get(name),
+            ctx.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+    };
+    let refused = write_after().await;
+    assert!(refused[0].output.is_error, "{}", refused[0].output.content);
+    assert!(
+        refused[0].output.content.contains("held by another job"),
+        "{}",
+        refused[0].output.content
+    );
+    assert!(
+        !dir.path().join("after.txt").exists(),
+        "a refused write touched the checkout"
+    );
+
+    let notification = notifications.recv().await.unwrap();
+    assert!(notification.text.contains("background-finished"));
+    // The job lets go of the checkout before it reports, so the
+    // notification is a safe moment to retry.
+    let outcomes = write_after().await;
     assert!(
         !outcomes[0].output.is_error,
         "{}",
         outcomes[0].output.content
     );
-    assert!(
-        started.elapsed() >= Duration::from_millis(150),
-        "foreground mutation overlapped background Bash: {:?}",
-        started.elapsed()
-    );
-    let notification = notifications.recv().await.unwrap();
-    assert!(notification.text.contains("background-finished"));
 }
 
 #[tokio::test]
