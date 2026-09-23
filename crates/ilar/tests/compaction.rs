@@ -1497,6 +1497,9 @@ async fn running_services_ride_into_the_handover() {
     assert_eq!(requests.len(), 1);
     let instruction = format!("{:?}", requests[0].messages.last().unwrap());
     assert!(instruction.contains("## Services"), "{instruction}");
+    // Work running detached is carried like a service: its result will
+    // arrive, and a reader who forgot it redoes its scope.
+    assert!(instruction.contains("## Running"), "{instruction}");
     assert!(
         instruction.contains("Services running right now")
             && instruction.contains("web · npm run dev"),

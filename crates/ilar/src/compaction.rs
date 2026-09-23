@@ -54,6 +54,11 @@ when a section is empty.
 - [each service still running: name, command, what it is for and how to check it, or \
 \"(none)\" — the reader owns these processes and must not start them twice]
 
+## Running
+- [each background task or bash job still running: task_id or command, what it is doing, \
+whether it holds the checkout, or \"(none)\" — its result will arrive as a notification, and \
+the reader must neither redo its scope nor wait on it]
+
 ## Next Move
 1. [the immediate concrete action, or \"(none)\"]
 2. [the one after it, if known]

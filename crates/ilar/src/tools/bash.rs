@@ -470,7 +470,7 @@ impl Tool for BashTool {
             "properties": {
                 "command": {"type": "string", "description": "The shell command, run with sh -c in the project cwd"},
                 "timeout_ms": {"type": "integer", "description": format!("{TIMEOUT_MS_DESCRIPTION} A background run defaults to subagents.background_tool_timeout_ms instead (600000 unless configured).")},
-                "run_in_background": {"type": "boolean", "description": "Run detached and deliver the result as a notification"},
+                "run_in_background": {"type": "boolean", "description": "Run detached; the result arrives as a notification that starts a follow-up turn. Send it as the only call in its response. Until it reports, the job holds this checkout: your own edit, write, bash, service start and sudo calls are refused, while read, glob and grep still work."},
                 "preview_bytes": {"type": "integer", "description": PREVIEW_BYTES_DESCRIPTION},
                 "secrets": {"type": "array", "items": {"type": "string"}, "description": "Names of stored secrets (see the secrets tool) to set as environment variables of this command, e.g. [\"GITHUB_TOKEN\"] makes $GITHUB_TOKEN available. The user is asked before each use unless they granted it. Read the value from the variable; never print it."}
             },
