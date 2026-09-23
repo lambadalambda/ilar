@@ -1005,6 +1005,51 @@ async fn concurrency_cap_errors_with_guidance() {
     );
 }
 
+/// A child at the depth limit cannot delegate, so it is not handed the
+/// tools that would: about 12 KB of schema on every one of its requests,
+/// for calls that could only come back "nesting limit reached". One
+/// level short of the limit, it keeps them.
+#[tokio::test]
+async fn a_child_at_the_depth_limit_carries_no_task_tools() {
+    for (max_depth, delegates) in [(1, false), (2, true)] {
+        let (store, parent_id) = temp_store();
+        let provider = Arc::new(MockProvider::new(vec![vec![
+            ProviderEvent::TextDelta("done".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        ]]));
+        let registry = parent_registry(spawner(provider.clone(), &store, 10, max_depth));
+        let out = registry
+            .get("task")
+            .unwrap()
+            .run(
+                serde_json::json!({
+                    "description": "look",
+                    "prompt": "look around",
+                    "subagent_type": "explore",
+                    "background": false,
+                }),
+                task_context(&parent_id),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        let tools: Vec<String> = provider.requests()[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        for name in ["task", "tasks", "task_message"] {
+            assert_eq!(
+                tools.iter().any(|tool| tool == name),
+                delegates,
+                "max_depth {max_depth}: {name} in {tools:?}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn depth_cap_errors_with_guidance() {
     let (store, _session_id) = temp_store();

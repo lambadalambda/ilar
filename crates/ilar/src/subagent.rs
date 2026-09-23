@@ -929,7 +929,14 @@ impl SubagentSpawner {
         let registry = match agent.workspace_mode {
             AgentWorkspaceMode::ReadOnly => ToolRegistry::read_only(),
             AgentWorkspaceMode::Mutable => {
-                let registry = ToolRegistry::builtin().with_subagents(self.clone())?;
+                // At the depth limit a task call can only be refused, so
+                // the tools that make one are left off: their schema is a
+                // tenth of every request this agent sends.
+                let registry = if self.depth < self.max_depth {
+                    ToolRegistry::builtin().with_subagents(self.clone())?
+                } else {
+                    ToolRegistry::builtin()
+                };
                 let registry = match self.services.clone() {
                     Some(services) => registry.with_services(services)?,
                     None => registry,
