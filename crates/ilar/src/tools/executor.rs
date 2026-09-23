@@ -60,14 +60,16 @@ fn unknown_tool_refusal(name: &str, known: &[&'static str]) -> String {
 /// What a mutating call behind a detached holder is told instead of
 /// waiting: the step would hold until that job reports, and a message
 /// from the person would wait with it.
-fn workspace_held_refusal(name: &str) -> String {
+fn workspace_held_refusal(name: &str, holder: Option<&str>) -> String {
+    let holder = holder.unwrap_or(
+        "another job of this session (a background task that may edit, a background bash, or \
+         a task the person resumed from its own view)",
+    );
     format!(
-        "{name}: not run — this checkout is held by another job of this session until it ends: a \
-         background task that may edit, a background bash, or a task the person resumed from \
-         its own view. Do not retry at once: read, glob and grep still work, a background \
-         job's completion reaches you as a notification, and the tasks tool shows what is \
-         still running. If you need this call, end your turn and make it once the checkout is \
-         free."
+        "{name}: not run — this checkout is held by {holder} until it ends. Do not retry at \
+         once: read, glob and grep still work, a background task's or bash job's completion \
+         reaches you as a notification, and the tasks tool lists the tasks still running. If \
+         you need this call, end your turn and make it once the checkout is free."
     )
 }
 
@@ -255,7 +257,10 @@ where
                                     call_ctx.workspace_lease = Some(lease);
                                     tool.run_observed(input, call_ctx, start).await
                                 }
-                                None => ToolOutput::error(workspace_held_refusal(tool.name())),
+                                None => ToolOutput::error(workspace_held_refusal(
+                                    tool.name(),
+                                    call_ctx.workspace.holder().as_deref(),
+                                )),
                             }
                         }
                         WorkspaceCoverage::Incompatible => ToolOutput::error(format!(
@@ -285,7 +290,10 @@ where
                             };
                             match permit {
                                 Some(_permit) => tool.run_observed(input, call_ctx, start).await,
-                                None => ToolOutput::error(workspace_held_refusal(tool.name())),
+                                None => ToolOutput::error(workspace_held_refusal(
+                                    tool.name(),
+                                    call_ctx.workspace.holder().as_deref(),
+                                )),
                             }
                         }
                         WorkspaceCoverage::Incompatible => ToolOutput::error(format!(

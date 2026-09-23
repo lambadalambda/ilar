@@ -1828,8 +1828,13 @@ async fn background_bash_holds_workspace_until_completion() {
     };
     let refused = write_after().await;
     assert!(refused[0].output.is_error, "{}", refused[0].output.content);
+    // Named: `tasks` does not list a bash job, so "another job" would
+    // leave the model nowhere to look.
     assert!(
-        refused[0].output.content.contains("held by another job"),
+        refused[0]
+            .output
+            .content
+            .contains("held by the background job \"bash: touch"),
         "{}",
         refused[0].output.content
     );

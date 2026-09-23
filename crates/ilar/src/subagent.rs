@@ -12,7 +12,7 @@ use crate::provider::ProviderResolver;
 use crate::session::{ContentBlock, SessionMeta, SessionStore, TurnEnding, new_id};
 use crate::tools::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, ToolRegistry, ToolStartObserver,
-    WorkspaceAccess,
+    WorkspaceAccess, WorkspacePermit,
 };
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -1444,6 +1444,10 @@ impl SubagentSpawner {
                 // claimed again.
                 let mut child_steer = child_steer;
                 let _slot = _guard; // hold the concurrency slot for the run
+                // Its own write lease, not one it runs inside of: only
+                // then is this task the one a refused call is behind.
+                let owns_write_lease =
+                    inherited_lease.is_none() && workspace_access == WorkspaceAccess::Mutating;
                 // Nobody is waiting on a background task, so it stops the
                 // moment it is told to — including part-way through the
                 // revalidation, which may be a git call.
@@ -1487,6 +1491,9 @@ impl SubagentSpawner {
                     ));
                     return;
                 }
+                let _holder = owns_write_lease.then(|| {
+                    workspace.hold_as(format!("task \"{description}\" (task_id {session_id})"))
+                });
                 // Deliberately not a child of `task_cancel`: stopping the
                 // task must go through the select below, which cancels
                 // this token itself and then waits out the graceful
@@ -1643,6 +1650,12 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
         }
 
         let waiting_notice = crate::tools::WorkspaceWaitNotice::from_context(ctx);
+        // Marked whoever started it. It matters when the person did — a
+        // message typed into its view — since then it sits outside any
+        // step of the model's and is what a refused call is behind; a
+        // model's own foreground task only ever has siblings that wait.
+        let owns_write_lease =
+            inherited_lease.is_none() && workspace_access == WorkspaceAccess::Mutating;
         let lease = match acquire_task_lease(
             &child_workspace,
             workspace_access,
@@ -1664,6 +1677,12 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
             LeaseOutcome::Failed(failure) => return ToolOutput::error(failure.message()),
         };
         child_ctx.workspace_lease = Some(lease);
+        let _holder = owns_write_lease.then(|| {
+            child_workspace.hold_as(format!(
+                "task \"{}\" (task_id {session_id})",
+                input.description
+            ))
+        });
         if let Some(on_start) = on_start.take() {
             on_start();
         }
@@ -1999,9 +2018,12 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
                     quiet: None,
                     heartbeat: None,
                 });
+                let holder = format!("the background job \"{description}\"");
                 let outcome = tokio::select! {
                     outcome = tokio::time::timeout(timeout, async move {
-                        let _permit = workspace.acquire(access).await;
+                        let permit = workspace.acquire(access).await;
+                        let _holder = matches!(permit, WorkspacePermit::Mutating { .. })
+                            .then(|| workspace.hold_as(holder));
                         future.await
                     }) => Some(outcome),
                     () = task_cancel.cancelled() => None,
@@ -2169,6 +2191,12 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
                 return Ok(RouteOutcome::Requeue(notification));
             }
         };
+        let _holder = (workspace_access == WorkspaceAccess::Mutating).then(|| {
+            workspace.hold_as(format!(
+                "task {} while it takes the result of \"{}\"",
+                notification.parent_session_id, notification.description
+            ))
+        });
         // The lease may have been waited on for a while: re-derive the
         // workspace and make sure it is still the one that was resolved
         // before the wait.

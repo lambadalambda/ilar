@@ -275,7 +275,37 @@ async fn git_output(cwd: &std::path::Path, args: &[&str]) -> anyhow::Result<Vec<
 #[derive(Clone)]
 pub struct WorkspaceScheduler {
     locks: Arc<std::sync::Mutex<HashMap<WorkspaceId, Arc<tokio::sync::RwLock<()>>>>>,
+    /// Who holds each workspace's write lease, in words, for the call
+    /// that is refused because of it. Keyed like `locks` and shared the
+    /// same way; the number tells one holder's mark from the next.
+    holders: Arc<std::sync::Mutex<HashMap<WorkspaceId, (u64, String)>>>,
     id: WorkspaceId,
+}
+
+/// A holder's name on a workspace, for as long as this lives. Taken
+/// right after the write lease and dropped with it.
+pub struct HolderMark {
+    holders: Arc<std::sync::Mutex<HashMap<WorkspaceId, (u64, String)>>>,
+    id: WorkspaceId,
+    mark: u64,
+}
+
+impl Drop for HolderMark {
+    fn drop(&mut self) {
+        // Poison-blind: a panic in a drop while unwinding aborts.
+        let mut holders = self
+            .holders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Only its own: the next holder may already have written its
+        // name, and a late drop must not erase it.
+        if holders
+            .get(&self.id)
+            .is_some_and(|(mark, _)| *mark == self.mark)
+        {
+            holders.remove(&self.id);
+        }
+    }
 }
 
 pub enum WorkspacePermit {
@@ -305,6 +335,7 @@ impl WorkspaceScheduler {
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self {
             locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            holders: Arc::default(),
             id: WorkspaceId(PathBuf::from(format!("<ephemeral-{id}>"))),
         }
     }
@@ -312,6 +343,7 @@ impl WorkspaceScheduler {
     pub fn for_location(location: &WorkspaceLocation) -> Self {
         Self {
             locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            holders: Arc::default(),
             id: location.id.clone(),
         }
     }
@@ -319,8 +351,35 @@ impl WorkspaceScheduler {
     pub fn scoped(&self, location: &WorkspaceLocation) -> Self {
         Self {
             locks: self.locks.clone(),
+            holders: self.holders.clone(),
             id: location.id.clone(),
         }
+    }
+
+    /// Put `holder` on this workspace until the mark drops. For a detached
+    /// holder of the write lease — a background task or job — so a call
+    /// refused behind it can say what it is waiting on.
+    pub fn hold_as(&self, holder: impl Into<String>) -> HolderMark {
+        static NEXT_MARK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mark = NEXT_MARK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.holders
+            .lock()
+            .unwrap()
+            .insert(self.id.clone(), (mark, holder.into()));
+        HolderMark {
+            holders: self.holders.clone(),
+            id: self.id.clone(),
+            mark,
+        }
+    }
+
+    /// Who holds this workspace's write lease, when they said.
+    pub fn holder(&self) -> Option<String> {
+        self.holders
+            .lock()
+            .unwrap()
+            .get(&self.id)
+            .map(|(_, holder)| holder.clone())
     }
 
     fn lock(&self) -> Arc<tokio::sync::RwLock<()>> {
