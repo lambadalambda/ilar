@@ -269,6 +269,17 @@ impl Tool for ServiceTool {
         WorkspaceAccess::Mutating
     }
 
+    /// Only `start` runs a command in the checkout. Asking after a
+    /// service, reading its logs or stopping it touches none of it, and
+    /// must work while a background job holds the checkout — that is
+    /// exactly when a dev server's logs are worth reading.
+    fn workspace_access_for(&self, input: &serde_json::Value) -> WorkspaceAccess {
+        match input.get("action").and_then(serde_json::Value::as_str) {
+            Some("status" | "logs" | "stop") => WorkspaceAccess::None,
+            _ => WorkspaceAccess::Mutating,
+        }
+    }
+
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -555,6 +566,49 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         condition()
+    }
+
+    /// A held checkout refuses what would change it, and asking after a
+    /// service changes nothing: its status and logs are what the model
+    /// reaches for while a background build holds the checkout.
+    #[tokio::test]
+    async fn a_held_checkout_refuses_a_start_but_not_a_look() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::root(dir.path().to_path_buf());
+        let _held = ctx
+            .workspace
+            .acquire_lease(crate::tools::WorkspaceAccess::Mutating)
+            .await;
+        let tool: std::sync::Arc<dyn Tool> =
+            std::sync::Arc::new(ServiceTool::new(ServiceManager::new()));
+        let call = |id: &str, input: serde_json::Value| crate::tools::executor::ToolCall {
+            id: id.into(),
+            name: "service".into(),
+            input,
+        };
+        let outcomes = crate::tools::executor::execute_calls(
+            vec![
+                call("look", serde_json::json!({"action": "logs", "name": "web"})),
+                call(
+                    "start",
+                    serde_json::json!({"action": "start", "name": "web", "command": "true"}),
+                ),
+            ],
+            |_| Some(tool.clone()),
+            ctx,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+
+        let look = &outcomes[0].output.content;
+        assert!(!look.contains("held by another job"), "{look}");
+        let start = &outcomes[1].output;
+        assert!(start.is_error, "{}", start.content);
+        assert!(
+            start.content.contains("held by another job"),
+            "{}",
+            start.content
+        );
     }
 
     /// The module promises nothing outlives the session, and a service

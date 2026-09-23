@@ -193,7 +193,7 @@ where
                 });
                 continue;
             }
-            let access = tool.workspace_access();
+            let access = tool.workspace_access_for(&call.input);
             // The one holder worth waiting for is a mutator of this very
             // step, which finishes inside it. Anything else holding the
             // checkout is outside the step — a background task or bash —

@@ -1097,6 +1097,12 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     fn concurrency(&self) -> ToolConcurrency;
     fn workspace_access(&self) -> WorkspaceAccess;
+    /// The access this one call needs, for a tool whose actions differ:
+    /// reading a service's logs does not change the checkout, starting
+    /// one does. Defaults to the tool's.
+    fn workspace_access_for(&self, _input: &serde_json::Value) -> WorkspaceAccess {
+        self.workspace_access()
+    }
     fn supports_background(&self) -> bool {
         false
     }
