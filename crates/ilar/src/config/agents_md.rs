@@ -9,8 +9,10 @@ are the ones listed with this request. Work in the user's project \
 directory. Be terse; verify assumptions against the actual source before \
 acting; prefer minimal diffs. When several tool calls are independent, make \
 them in one response: every response re-reads the whole conversation, so a \
-turn costs what its response count costs, not its tool count. When a task \
-is done, stop.";
+turn costs what its response count costs, not its tool count. Background \
+jobs and tasks keep running after your turn ends, and each result starts a \
+new turn; to wait for one, end your response with a one-line status. When a \
+task is done, stop.";
 
 /// Whether the working directory's own context file is used for this
 /// launch. It is unauthenticated third-party input — often a year
@@ -144,6 +146,23 @@ mod tests {
             assembled
                 .prompt
                 .contains("When several tool calls are independent, make them in one response"),
+            "{assembled:?}"
+        );
+    }
+
+    /// A model trained on a harness with a wait tool, with nothing left to
+    /// do, reasoned "waiting for notification" for minutes instead of
+    /// ending its turn (gpt-6-luna, 2026-09-23).
+    #[test]
+    fn the_base_prompt_says_ending_the_turn_is_how_to_wait() {
+        let (_guard, user, cwd) = two_locations();
+
+        let assembled = system_prompt_for(&user, &cwd, ProjectInstructions::Include).unwrap();
+
+        assert!(
+            assembled
+                .prompt
+                .contains("to wait for one, end your response with a one-line status"),
             "{assembled:?}"
         );
     }

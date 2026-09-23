@@ -1699,7 +1699,9 @@ impl SubagentSpawner {
             return ToolOutput::text(format!(
                 "Background task started (task_id: {returned_session_id}). Completion \
 will trigger a separate follow-up turn. Do not sleep, poll, or check on it. Do not perform this \
-task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
+task's scope yourself; continue only clearly disjoint work. With none left, end your response \
+with a one-line status, not an answer: that is how you wait, and the task keeps running.\
+{holds_checkout}"
             ))
             .with_child_session(returned_session_id);
         }
@@ -2134,7 +2136,7 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
             let _ = registered_tx.send(());
         }
         ToolOutput::text(format!(
-            "Background job {job_id} started. You will be notified when it completes. Do not poll or sleep; continue other work or end your response."
+            "Background job {job_id} started. You will be notified when it completes. Do not poll or sleep; continue other work, or end your response with a one-line status: that is how you wait, and the job keeps running."
         ))
     }
 

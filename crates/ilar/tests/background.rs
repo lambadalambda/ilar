@@ -1270,6 +1270,11 @@ async fn background_bash_returns_job_id_and_notifies_once() {
         "{}",
         output.content
     );
+    assert!(
+        output.content.contains("that is how you wait"),
+        "{}",
+        output.content
+    );
     let job_id = output
         .content
         .split_whitespace()
@@ -2030,7 +2035,11 @@ async fn background_task_returns_immediately_and_notifies_once() {
         "{launch}"
     );
     assert!(launch.contains("Do not sleep, poll, or check"), "{launch}");
-    assert!(!launch.contains("end your response"), "{launch}");
+    // Ending the turn is how a model waits, but not with an early answer.
+    assert!(
+        launch.contains("end your response with a one-line status, not an answer"),
+        "{launch}"
+    );
 
     // Exactly one notification arrives with the child's answer.
     let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
