@@ -442,6 +442,26 @@ mod tests {
         assert_eq!(sent.media, vec![dir.path().join("selfie.png")]);
     }
 
+    /// Told only in the description, a model sent its reply and then
+    /// wrote the same answer again as final text nobody saw — 30 turns
+    /// of 40 in one day. The result says so where the next step is
+    /// decided.
+    #[tokio::test]
+    async fn a_sent_message_says_the_final_text_is_not_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let board =
+            crate::status::StatusBoard::new(Default::default(), false, std::time::Duration::ZERO);
+        let (tool, _out) = tool_on(dir.path(), "fake:12", board);
+        let out = send(&tool, dir.path(), serde_json::json!({"text": "here you go"})).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.starts_with("sent to fake:12"), "{}", out.content);
+        assert!(
+            out.content.contains("your final text is not shown"),
+            "{}",
+            out.content
+        );
+    }
+
     #[tokio::test]
     async fn a_reply_takes_its_own_chats_status_line_down_and_no_others() {
         let dir = tempfile::tempdir().unwrap();
