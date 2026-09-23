@@ -3419,7 +3419,9 @@ fn center_on_match(text: &str, needle: &str, max_chars: usize) -> String {
 /// The topic alone: a tab label is where the title has to fit, and a
 /// prefix there only pushes the part worth reading off its end.
 fn terminal_title(topic: Option<&str>) -> String {
-    topic.unwrap_or("ilar").into()
+    // Printable only, for a topic stored before `clean_topic` said so:
+    // ESC or BEL inside the title escape ends it early.
+    crate::text::safe_text(topic.unwrap_or("ilar"))
 }
 
 /// Best-effort OSC title update; a terminal that ignores the sequence
@@ -6311,6 +6313,11 @@ mod tests {
     fn the_window_title_is_the_topic_or_just_ilar() {
         assert_eq!(terminal_title(None), "ilar");
         assert_eq!(terminal_title(Some("GM1 firmware dig")), "GM1 firmware dig");
+        assert_eq!(
+            terminal_title(Some("dig\u{7}\u{1b}]0;x")),
+            "dig]0;x",
+            "a control character reached the title escape"
+        );
     }
 
     /// The meter must not show the whole window while compaction is

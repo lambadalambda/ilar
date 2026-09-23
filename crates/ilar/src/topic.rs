@@ -38,7 +38,14 @@ pub fn clean_topic(raw: &str) -> Option<String> {
     let trimmed = first
         .trim_matches(|character: char| WRAPPERS.contains(&character) || character.is_whitespace());
     let trimmed = trimmed.trim_end_matches(['.', '!', ':', ';']).trim();
-    let collapsed = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    // No control characters: a topic ends up inside the terminal's
+    // title escape, where ESC or BEL ends it early.
+    // A space, not nothing: a tab between two words is still a gap.
+    let printable: String = trimmed
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let collapsed = printable.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
         return None;
     }
@@ -173,6 +180,17 @@ pub async fn title_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A topic goes into the terminal's title escape and the title bar;
+    /// a control character from the model (ESC, BEL) would end the
+    /// escape early or print garbage.
+    #[test]
+    fn a_topic_carries_no_control_characters() {
+        assert_eq!(
+            clean_topic("Fix the\u{1b}]0;owned\u{7} parser").as_deref(),
+            Some("Fix the ]0;owned parser")
+        );
+    }
 
     #[test]
     fn a_topic_is_a_label_or_it_is_nothing() {
