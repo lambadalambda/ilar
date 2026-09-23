@@ -474,3 +474,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [A room is not the person's console](issues/a-room-is-not-the-persons-console.md)
 - [x] [GPT-6 Sol and Luna](issues/gpt-6-sol-and-luna.md)
 - [x] [A foreground task does not wait out a detached one](issues/a-foreground-task-does-not-wait-out-a-detached-one.md)
+- [x] [The fixed prefix sheds weight](issues/the-fixed-prefix-sheds-weight.md)

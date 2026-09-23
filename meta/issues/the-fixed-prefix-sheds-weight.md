@@ -31,3 +31,15 @@ said three times.
 ## Notes
 
 - Source: UX sweep 2026-09-23 (model words pass). Size: S-M.
+
+## Done (2026-09-23)
+
+`9b14419`, `e161629`, `6cd240f`. `--print-prompt` for the root, tools
+only: 32,499 → about 25,500 bytes (`task` 7,611 → ~4,900,
+`task_message` 3,379 → 2,071, `question` 4,866 → 1,878). A build child
+at `max_depth = 1`: 27.6 KB → 15.8 KB, since it no longer carries the
+task trio. A rule-by-rule review of the old and new texts found no
+rule dropped that changes behaviour; three wordings were restored
+("independent" mutable tasks, "other mutating tools", disjoint work
+meanwhile). Left for a decision: a child whose `max_depth` was lowered
+under it keeps its children but loses `task_message`.
