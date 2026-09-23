@@ -26,7 +26,13 @@ const IMAGE_FOLLOWS_HINT: &str = "the image itself follows";
 pub fn describe(display_path: &str, head: &[u8], total_bytes: u64) -> Option<String> {
     let kind =
         image_kind(head).or_else(|| looks_binary(head).then(|| "binary data".to_string()))?;
-    Some(line(display_path, &kind, total_bytes, NO_RETRY_HINT))
+    Some(line(
+        "binary file",
+        display_path,
+        &kind,
+        total_bytes,
+        NO_RETRY_HINT,
+    ))
 }
 
 /// The [`describe`] line for an image whose bytes the result actually
@@ -38,7 +44,10 @@ pub(crate) fn describe_attached_image(
     head: &[u8],
     total_bytes: u64,
 ) -> Option<String> {
+    // Not "binary file": that is what a refusal says, and a model that
+    // learned it means "cannot see" took a seen image for a refused one.
     Some(line(
+        "image",
         display_path,
         &image_kind(head)?,
         total_bytes,
@@ -46,8 +55,8 @@ pub(crate) fn describe_attached_image(
     ))
 }
 
-fn line(display_path: &str, kind: &str, total_bytes: u64, hint: &str) -> String {
-    format!("(binary file: {display_path} — {kind}, {total_bytes} bytes; {hint})")
+fn line(label: &str, display_path: &str, kind: &str, total_bytes: u64, hint: &str) -> String {
+    format!("({label}: {display_path} — {kind}, {total_bytes} bytes; {hint})")
 }
 
 /// Magic-byte image formats, with dimensions where they are a cheap
@@ -165,12 +174,15 @@ mod tests {
         assert!(!looks_binary(&head));
     }
 
+    /// A seen image never calls itself a binary file: a model that once
+    /// learned "binary file" means "I cannot see this" read the word on
+    /// an image it was looking at and went to borrow somebody's eyes.
     #[test]
     fn only_images_get_the_attached_image_hint() {
         let described = describe_attached_image("a.png", &png(48, 32), 289).unwrap();
         assert_eq!(
             described,
-            "(binary file: a.png — PNG image, 48x32, 289 bytes; the image itself follows)"
+            "(image: a.png — PNG image, 48x32, 289 bytes; the image itself follows)"
         );
         // Generic binary has no image to attach.
         assert!(describe_attached_image("blob.bin", &[0_u8; 64], 64).is_none());
