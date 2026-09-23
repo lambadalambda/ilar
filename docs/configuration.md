@@ -364,14 +364,14 @@ an OpenAI API key is not required in this mode.
 
    ```toml
    [general]
-   model = "openai/gpt-5.6-sol"
+   model = "openai/gpt-6-sol"
 
    [providers.openai]
    auth = "chatgpt"
    ```
 
    ChatGPT uses its Codex model catalog rather than the standard API-key model
-   catalog. `openai/gpt-5.6-sol` is one supported example; the in-app model
+   catalog. `openai/gpt-6-sol` is one supported example; the in-app model
    picker lists the models available for the active authentication mode. Leave
    `providers.openai.base_url` unset to use the built-in ChatGPT backend.
 

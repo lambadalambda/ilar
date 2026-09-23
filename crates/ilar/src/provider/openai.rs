@@ -1202,7 +1202,6 @@ mod tests {
         assert!(supports("openai/gpt-5.6-sol"));
         assert!(supports("openai/gpt-5.2"));
         assert!(supports("openai/o3"));
-        assert!(!supports("openai/gpt-5.2-chat-latest"));
         assert!(!supports("openai/gpt-4o"));
     }
 

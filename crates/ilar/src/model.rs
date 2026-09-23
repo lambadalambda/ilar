@@ -144,17 +144,7 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ("openai", "gpt-5-pro", pricing!(15.0, 120.0, None, None)),
     ("openai", "gpt-5.1", pricing!(1.25, 10.0, Some(0.125), None)),
     ("openai", "gpt-5.2", pricing!(1.75, 14.0, Some(0.175), None)),
-    (
-        "openai",
-        "gpt-5.2-chat-latest",
-        pricing!(1.75, 14.0, Some(0.175), None),
-    ),
     ("openai", "gpt-5.2-pro", pricing!(21.0, 168.0, None, None)),
-    (
-        "openai",
-        "gpt-5.3-chat-latest",
-        pricing!(1.75, 14.0, Some(0.175), None),
-    ),
     (
         "openai",
         "gpt-5.3-codex",
@@ -602,10 +592,6 @@ const OPENAI_GPT52_VARIANTS: &[ModelVariant] = &[
 const OPENAI_PRO_VARIANTS: &[ModelVariant] = &[ModelVariant {
     id: "high",
     name: "High",
-}];
-const OPENAI_CHAT_VARIANTS: &[ModelVariant] = &[ModelVariant {
-    id: "medium",
-    name: "Medium",
 }];
 const OPENAI_VERSIONED_PRO_VARIANTS: &[ModelVariant] = &[
     ModelVariant {
@@ -1103,15 +1089,6 @@ static CATALOG: &[ModelInfo] = &[
     .reasoning(OPENAI_GPT52_VARIANTS),
     model!(
         "openai",
-        "gpt-5.3-chat-latest",
-        "GPT-5.3 Chat (latest)",
-        128_000,
-        16_384,
-        OpenAi
-    )
-    .vision(),
-    model!(
-        "openai",
         "gpt-5.2-pro",
         "GPT-5.2 Pro",
         400_000,
@@ -1123,16 +1100,6 @@ static CATALOG: &[ModelInfo] = &[
     model!("openai", "gpt-5.2", "GPT-5.2", 400_000, 128_000, OpenAi)
         .vision()
         .reasoning(OPENAI_GPT52_VARIANTS),
-    model!(
-        "openai",
-        "gpt-5.2-chat-latest",
-        "GPT-5.2 Chat",
-        128_000,
-        16_384,
-        OpenAi
-    )
-    .vision()
-    .effort(OPENAI_CHAT_VARIANTS),
     model!("openai", "gpt-5.1", "GPT-5.1", 400_000, 128_000, OpenAi)
         .vision()
         .reasoning(OPENAI_GPT51_VARIANTS),
@@ -1899,11 +1866,11 @@ pub fn catalog() -> &'static [ModelInfo] {
 /// Provider prefix every configured model is addressed under.
 pub const CUSTOM_PROVIDER: &str = "custom";
 
-/// The model `ilar login` points a fresh ChatGPT account at. Not simply
-/// the first row a ChatGPT account can reach: `gpt-6-astra` sits behind
+/// The model `ilar login` points a fresh ChatGPT account at: one every
+/// plan reaches. Not simply the newest row — `gpt-6-astra` sits behind
 /// an access program, and lines that only work for some subscriptions
-/// are worse than none.
-pub const CHATGPT_SUGGESTED_MODEL: &str = "openai/gpt-5.6-sol";
+/// are worse than none. `gpt-6-sol` is what Codex upgrades 5.6 users to.
+pub const CHATGPT_SUGGESTED_MODEL: &str = "openai/gpt-6-sol";
 
 /// A `[models.<name>]` entry as the catalog needs to see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2113,6 +2080,8 @@ mod tests {
         use super::*;
         let model = find(CHATGPT_SUGGESTED_MODEL).expect("the suggested model is in the catalog");
         assert_eq!(model.access, ModelAccess::OpenAiBoth);
+        // What Codex now suggests a 5.6 user upgrade to.
+        assert_eq!(CHATGPT_SUGGESTED_MODEL, "openai/gpt-6-sol");
     }
 
     #[test]
@@ -2322,8 +2291,9 @@ mod tests {
         assert_eq!(ids("openai/gpt-5-pro"), vec!["high"]);
         assert_eq!(ids("openai/o3"), vec!["low", "medium", "high"]);
         assert_eq!(ids("openai/o3-pro"), vec!["low", "medium", "high"]);
-        assert_eq!(ids("openai/gpt-5.2-chat-latest"), vec!["medium"]);
-        assert!(ids("openai/gpt-5.3-chat-latest").is_empty());
+        // Deprecated upstream (models.dev), so out of the catalog.
+        assert!(find("openai/gpt-5.2-chat-latest").is_none());
+        assert!(find("openai/gpt-5.3-chat-latest").is_none());
         assert!(ids("openai/gpt-4.1").is_empty());
         assert!(ids("zai/glm-5.2").is_empty());
     }

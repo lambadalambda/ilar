@@ -49,3 +49,10 @@ Rows, prices and the four corrections in `5e9469b`. Live on Zen:
 answered "ok" on tenco. Not probed: the `openai` rows over an API key
 or a ChatGPT login — no key on the boxes, and the Mac's binary
 predates the rows. The two open decisions in the notes stand.
+
+## Follow-up (2026-09-23)
+
+The user decided both open points: `ilar login` suggests
+`openai/gpt-6-sol`, and the deprecated `gpt-5.2-chat-latest` and
+`gpt-5.3-chat-latest` rows and prices are gone. A session on one of
+them no longer resumes on it; it says so, like any unconfigured model.
