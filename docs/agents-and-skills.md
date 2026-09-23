@@ -62,7 +62,8 @@ its own lifts it. `background: false`
 is for the call that is blocked on the answer for the turn's very next step,
 the way Codex's `wait_agent` is — a review before a commit being the usual
 one. A *defaulted*
-background task that cannot detach because background capacity is full runs in
+background task that cannot detach because too many background tasks and jobs are
+running or waiting to be delivered runs in
 the foreground instead of failing, and its result says so; an explicit
 `background: true` there is still an error.
 

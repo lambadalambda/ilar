@@ -1940,8 +1940,8 @@ fn next_notification(
 ///
 /// Nothing is dropped: the surplus stays where it was, and a full
 /// channel is a state the spawner already handles — an explicit
-/// `background: true` is refused with "capacity is full; retry after a
-/// notification is handled", and a defaulted one runs in the turn
+/// `background: true` is refused with "too many background tasks and
+/// jobs are running or waiting to be delivered", and a defaulted one runs in the turn
 /// instead. Back-pressure into a path with a message beats a queue
 /// that grows for as long as a session stays paused.
 ///

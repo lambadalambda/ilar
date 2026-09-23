@@ -86,12 +86,14 @@ mind — record what matters and where to look, rather than trying to preserve e
 - Do not mention summarizing, compaction, or context limits.";
 
 /// Appended when the conversation already carries a summary. ilar keeps
-/// only the newest one, so anything this summary leaves out is gone —
-/// the model deserves to know that before it decides what to drop.
+/// only the newest one in view, so anything this summary leaves out
+/// drops out of sight — searchable, but no longer read — and the model
+/// deserves to know that before it decides what to drop.
 const SUMMARY_CARRY_FORWARD: &str = "
 
 The conversation opens with a <compaction-summary> covering everything before it. That \
-summary is discarded once yours exists: anything you do not carry forward is lost. Keep its \
+summary is replaced by yours: anything you do not carry forward drops out of sight, where only \
+a history search finds it. Keep its \
 objectives, constraints, user directives, decisions and parallel workstreams even where the \
 later conversation never mentions them, dropping only what is finished and no longer needed. \
 Where the two disagree the later conversation wins: state the corrected fact and drop the \
@@ -695,10 +697,7 @@ mod tests {
         assert!(instruction.contains("## Not Carried"), "{instruction}");
         assert!(instruction.contains("## Plan"), "{instruction}");
         // No prior summary here, so no carry-forward clause.
-        assert!(
-            !instruction.contains("discarded once yours exists"),
-            "{instruction}"
-        );
+        assert!(!instruction.contains("replaced by yours"), "{instruction}");
     }
 
     /// A summarizer once carried "stop working" into the handover and
@@ -729,8 +728,10 @@ mod tests {
 
         let instruction = text_of(summarizer_messages(&transcript, &[]).last().unwrap());
 
+        assert!(instruction.contains("replaced by yours"), "{instruction}");
+        // The same promise as the template's: out of sight, not gone.
         assert!(
-            instruction.contains("discarded once yours exists"),
+            !instruction.contains("carry forward is lost"),
             "{instruction}"
         );
     }

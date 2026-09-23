@@ -407,7 +407,7 @@ async fn a_read_only_task_defaults_to_background() {
 
     assert!(!output.is_error, "{}", output.content);
     assert!(
-        output.content.contains("Deferred background task started"),
+        output.content.contains("Background task started"),
         "{}",
         output.content
     );
@@ -463,7 +463,7 @@ async fn a_mutable_task_defaults_to_the_background_and_names_the_held_checkout()
 
     assert!(!output.is_error, "{}", output.content);
     assert!(
-        output.content.contains("Deferred background task started"),
+        output.content.contains("Background task started"),
         "{}",
         output.content
     );
@@ -640,7 +640,7 @@ async fn a_message_to_a_finished_task_resumes_it_detached() {
 
     assert!(!output.is_error, "{}", output.content);
     assert!(
-        output.content.contains("Deferred background task started"),
+        output.content.contains("Background task started"),
         "{}",
         output.content
     );
@@ -700,7 +700,7 @@ async fn an_explicit_foreground_beats_the_default_for_a_mutable_agent() {
     );
     assert!(output.content.contains("(task_id:"), "{}", output.content);
     assert!(
-        !output.content.contains("Deferred background task"),
+        !output.content.contains("Background task started"),
         "{}",
         output.content
     );
@@ -742,7 +742,7 @@ async fn an_explicit_foreground_beats_the_read_only_default() {
         output.content
     );
     assert!(
-        !output.content.contains("Deferred background task"),
+        !output.content.contains("Background task started"),
         "{}",
         output.content
     );
@@ -781,7 +781,7 @@ async fn an_explicit_background_is_the_default_said_out_loud() {
 
     assert!(!output.is_error, "{}", output.content);
     assert!(
-        output.content.contains("Deferred background task started"),
+        output.content.contains("Background task started"),
         "{}",
         output.content
     );
@@ -837,7 +837,7 @@ async fn a_defaulted_background_task_runs_in_the_foreground_at_capacity() {
         output.content
     );
     assert!(
-        !output.content.contains("Deferred background task"),
+        !output.content.contains("Background task started"),
         "{}",
         output.content
     );
@@ -889,7 +889,9 @@ async fn an_explicit_background_task_still_fails_at_capacity() {
 
     assert!(output.is_error, "{}", output.content);
     assert!(
-        output.content.contains("background task capacity is full"),
+        output
+            .content
+            .contains("too many background tasks and jobs"),
         "{}",
         output.content
     );
@@ -933,7 +935,7 @@ async fn a_leased_parent_detaches_a_defaulted_read_only_task() {
 
     assert!(!output.is_error, "{}", output.content);
     assert!(
-        output.content.contains("Deferred background task started"),
+        output.content.contains("Background task started"),
         "{}",
         output.content
     );
@@ -1206,7 +1208,7 @@ async fn leased_child_detaches_a_background_reader() {
 
     assert!(!output.is_error, "{}", output.content);
     assert!(
-        output.content.contains("Deferred background task started"),
+        output.content.contains("Background task started"),
         "{}",
         output.content
     );

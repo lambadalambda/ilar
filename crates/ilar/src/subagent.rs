@@ -458,7 +458,11 @@ impl ChildSteers {
     fn queue(&self, session_id: &str, text: String) {
         let mut steers = lock_unpoisoned(&self.steers);
         let entry = self.entry(&mut steers, session_id);
-        entry.pending.push(text);
+        // The same words twice are one message sent twice — a model
+        // unsure the first was kept — and the child would read both.
+        if !entry.pending.contains(&text) {
+            entry.pending.push(text);
+        }
         self.mirror(session_id, entry);
     }
 
@@ -1074,7 +1078,7 @@ impl SubagentSpawner {
                 Ok(permit) => Some(permit),
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) if background_explicit => {
                     return ToolOutput::error(
-                        "background task capacity is full; retry after a notification is handled",
+                        "too many background tasks and jobs are running or waiting to be delivered: run this in the foreground, or end your turn and start it once a notification has arrived",
                     );
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -1149,7 +1153,7 @@ impl SubagentSpawner {
                 Some(claim) => Some(claim),
                 None => {
                     return ToolOutput::error(format!(
-                        "task session {id:?} is already active; wait for it to finish before resuming"
+                        "task {id} is running right now: a task_message to it is read at its next step or next resume"
                     ));
                 }
             },
@@ -1195,9 +1199,22 @@ impl SubagentSpawner {
                             let restored = if persisted == &ctx.location {
                                 ctx.location.clone()
                             } else if input.workspace.is_none() {
-                                return ToolOutput::error(format!(
-                                    "resuming task session {id:?}: workspace differs from its parent; provide its explicit workspace"
-                                ));
+                                // Name the worktree, or say plainly there is
+                                // none to name: pointing at task_message
+                                // for a checkout it cannot find either
+                                // would send the model round in a loop.
+                                return ToolOutput::error(match persisted.isolation() {
+                                    crate::tools::WorkspaceIsolation::GitWorktree { .. } => {
+                                        format!(
+                                            "resuming task {id:?}: it ran in its own worktree, {} — pass it as workspace, or use task_message, which finds it from the task's metadata",
+                                            persisted.cwd().display()
+                                        )
+                                    }
+                                    _ => format!(
+                                        "resuming task {id:?}: it ran in another checkout, {}, and cannot be resumed from this one; start a new task here instead",
+                                        persisted.cwd().display()
+                                    ),
+                                });
                             } else {
                                 match crate::tools::WorkspaceLocation::revalidate(
                                     &ctx.location,
@@ -1680,7 +1697,7 @@ impl SubagentSpawner {
                 ""
             };
             return ToolOutput::text(format!(
-                "Deferred background task started (task_id: {returned_session_id}). Completion \
+                "Background task started (task_id: {returned_session_id}). Completion \
 will trigger a separate follow-up turn. Do not sleep, poll, or check on it. Do not perform this \
 task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
             ))
@@ -1967,7 +1984,8 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
         let output = if still_queued {
             output.with_appended_text(
                 "\n\n(Your message was not delivered by this call, but it is not lost: it is \
-                 queued and will be delivered when this task is next resumed.)",
+                 queued and read when this task is next resumed. When you resume it, send a \
+                 short follow-up, not this text again.)",
             )
         } else {
             output
@@ -1992,7 +2010,7 @@ task's scope yourself; continue only clearly disjoint work.{holds_checkout}"
             Ok(permit) => permit,
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 return ToolOutput::error(
-                    "background task capacity is full; retry after a notification is handled",
+                    "too many background tasks and jobs are running or waiting to be delivered: run this in the foreground, or end your turn and start it once a notification has arrived",
                 );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -2981,15 +2999,16 @@ impl TaskOutcome {
     /// `None` for a clean finish, whose headline is the child's own
     /// final text.
     ///
-    /// The verb set is fixed here and nowhere else: *aborted* for a
-    /// turn that gave up, *cancelled* for a stop someone asked for,
+    /// The verb set is fixed here and nowhere else: *cancelled* for a
+    /// stop someone asked for (an aborted turn is one),
     /// *failed* for everything the task did to itself, *stalled* for
     /// the watchdog. `task` for the what, in every one of them.
     fn headline(&self, description: &str, stall_timeout: std::time::Duration) -> Option<String> {
         Some(match self {
             Self::Completed => return None,
-            Self::Aborted => format!("Task \"{description}\" was aborted."),
-            Self::Cancelled => format!("Task \"{description}\" was cancelled."),
+            // A turn aborts only when its token is cancelled: one event,
+            // one word, whichever path saw it.
+            Self::Aborted | Self::Cancelled => format!("Task \"{description}\" was cancelled."),
             Self::MaxIterations => {
                 format!("Task \"{description}\" failed: it reached its iteration limit.")
             }
@@ -3006,8 +3025,7 @@ impl TaskOutcome {
     fn ending(&self) -> Option<TurnEnding> {
         Some(match self {
             Self::Completed => return None,
-            Self::Aborted => TurnEnding::Aborted,
-            Self::Cancelled => TurnEnding::Cancelled,
+            Self::Aborted | Self::Cancelled => TurnEnding::Cancelled,
             Self::MaxIterations | Self::Failed(_) => TurnEnding::Failed,
             Self::Stalled => TurnEnding::Stalled,
         })
@@ -3130,12 +3148,14 @@ fn queued_note_to(pending: usize, task: &str) -> String {
     match pending {
         0 => String::new(),
         1 => format!(
-            "\n\n(A message to {task} is still queued, not lost: it is delivered when that task \
-             is next resumed.)"
+            "\n\n(A message to {task} is still queued, not lost: it is read when that task is \
+             next resumed — a task_message to it, or a task call with its task_id. Do not send \
+             it again.)"
         ),
         n => format!(
-            "\n\n({n} messages to {task} are still queued, not lost: they are delivered when \
-             that task is next resumed.)"
+            "\n\n({n} messages to {task} are still queued, not lost: they are read when that \
+             task is next resumed — a task_message to it, or a task call with its task_id. Do \
+             not send them again.)"
         ),
     }
 }
@@ -3384,10 +3404,15 @@ impl Drop for ReservedNotification {
                 &self.parent_session_id,
                 &self.description,
                 &format!(
-                    "Task \"{}\" ended abnormally without reporting a result — most \
+                    "Task \"{}\"{} ended abnormally without reporting a result — most \
                      likely a panic in the task. Its session log holds whatever it finished; \
-                     resume it with the task tool to continue, or treat it as failed.{}",
+                     task_message resumes it to continue, or treat it as failed.{}",
                     self.description,
+                    // Every other ending names the id; this one has to
+                    // as well, or "resume it" asks for one made up.
+                    session
+                        .as_ref()
+                        .map_or(String::new(), |(id, _)| format!(" (task_id: {id})")),
                     queued_note(
                         session
                             .as_ref()
@@ -3545,8 +3570,10 @@ pub struct TaskInput {
     pub subagent_type: String,
     #[serde(default, deserialize_with = "deserialize_optional_text")]
     pub task_id: Option<String>,
-    /// Run detached; completion arrives as a notification.
-    #[serde(default)]
+    /// Run detached; completion arrives as a notification. bash calls
+    /// the same thing `run_in_background`, and a model that carries the
+    /// name over must not have its `false` silently ignored.
+    #[serde(default, alias = "run_in_background")]
     pub background: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_optional_workspace")]
     pub workspace: Option<TaskWorkspaceInput>,
@@ -3649,7 +3676,7 @@ impl TaskMessage {
             .with_child_session(task_id),
             Self::Held { task_id } => ToolOutput::text(format!(
                 "Task {task_id} is busy with a completion of its own and has no live channel; \
-                 your message is held and delivered at its next resume."
+                 your message is held and read at its next resume. Do not send it again."
             ))
             .with_child_session(task_id),
             Self::Answered { output, .. } => output,
@@ -3668,7 +3695,7 @@ pub struct TaskMessageInput {
     pub workspace: Option<TaskWorkspaceInput>,
     /// How a finished task's resume runs, with the task tool's default:
     /// omitted, detached. A running task is steered either way.
-    #[serde(default)]
+    #[serde(default, alias = "run_in_background")]
     pub background: Option<bool>,
 }
 
@@ -4008,7 +4035,8 @@ impl Tool for TasksTool {
         "List the subagent tasks this session has spawned: id, agent, \
          model, how it stands, how many of your messages it has not read \
          yet (pending), and what it said. A task is running, finished, \
-         cancelled, failed, stalled or aborted; only a finished one has \
+         cancelled, failed or stalled (older logs also say aborted, the \
+         same as cancelled); only a finished one has \
          an answer, shown as `result:` — a stopped task's last words are \
          shown as `partial:` and are not findings. A finished task's \
          result reaches you once, as a notification; `result not \
@@ -4017,7 +4045,7 @@ impl Tool for TasksTool {
          to ask for it again. Pass an id to task_message to talk to one — a running \
          task is steered at its next step, a finished one is resumed \
          with its context intact — or back as the task tool's task_id to \
-         give a finished task a fresh scope."
+         ask a finished task a follow-up on the same scope."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -4189,7 +4217,7 @@ mod tests {
         assert_eq!(headline(TaskOutcome::Completed), None);
         assert_eq!(
             headline(TaskOutcome::Aborted).as_deref(),
-            Some("Task \"survey the API\" was aborted.")
+            Some("Task \"survey the API\" was cancelled.")
         );
         assert_eq!(
             headline(TaskOutcome::Cancelled).as_deref(),
@@ -4557,6 +4585,17 @@ mod tests {
         plain.queue("child", "held in memory".into());
         assert_eq!(plain.pending("child"), 1);
         assert_eq!(ChildSteers::default().pending("child"), 0);
+    }
+
+    /// The same words queued twice are one message sent twice — a model
+    /// unsure the first was kept — and the child would read both.
+    #[test]
+    fn a_message_queued_twice_is_read_once() {
+        let steers = ChildSteers::default();
+        steers.queue("child", "also the tests".into());
+        steers.queue("child", "also the tests".into());
+        steers.queue("child", "and the docs".into());
+        assert_eq!(steers.pending("child"), 2);
     }
 
     /// The undelivered rule at its own level: a run that never started

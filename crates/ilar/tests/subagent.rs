@@ -1653,7 +1653,8 @@ async fn foreground_subagent_abort_is_error() {
     let output = running.await.unwrap();
 
     assert!(output.is_error, "{}", output.content);
-    assert!(output.content.contains("aborted"), "{}", output.content);
+    // One word for one event: the turn aborts because it was cancelled.
+    assert!(output.content.contains("cancelled"), "{}", output.content);
 }
 
 #[tokio::test]
@@ -1800,8 +1801,12 @@ async fn resumed_subagent_rejects_an_already_active_session() {
         )
         .await;
     assert!(second.is_error, "{}", second.content);
+    // Not "wait for it", which invites polling: the verb that reaches
+    // it now, and where its result will come.
     assert!(
-        second.content.contains("already active"),
+        second
+            .content
+            .contains("is running right now: a task_message to it is read"),
         "{}",
         second.content
     );
@@ -2007,8 +2012,16 @@ async fn isolated_resume_requires_an_explicit_workspace() {
         .await;
 
     assert!(output.is_error);
+    // Names the worktree to pass, and the verb that needs nothing.
     assert!(
-        output.content.contains("explicit workspace"),
+        output.content.contains("pass it as workspace"),
+        "{}",
+        output.content
+    );
+    let name = worktree.file_name().unwrap().to_string_lossy().to_string();
+    assert!(output.content.contains(&name), "{}", output.content);
+    assert!(
+        output.content.contains("task_message"),
         "{}",
         output.content
     );

@@ -195,7 +195,9 @@ pub enum SessionEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnEnding {
-    /// The turn gave up on its own token: its caller's turn ended.
+    /// Legacy: read from older logs, no longer written — a task whose
+    /// turn aborts on its token is recorded as `Cancelled`, the one
+    /// word for the one event.
     Aborted,
     /// A stop someone asked for.
     Cancelled,
