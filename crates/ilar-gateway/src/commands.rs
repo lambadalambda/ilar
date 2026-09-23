@@ -33,6 +33,8 @@ pub enum Command {
     /// Replace this chat's conversation with one handover summary.
     Compact,
     Help,
+    /// Telegram's first message from anyone: a greeting, not an error.
+    Start,
     /// What the review staged and has not been approved.
     Pending,
     /// Apply a staged plan by id, or `all`; with neither, list and ask.
@@ -95,13 +97,13 @@ impl Command {
             Command::Model { save: true, .. } => {
                 ("model … --save", "changes the default model for every chat")
             }
-            Command::Unlock(_) => ("unlock", password),
-            Command::Password(_) => ("password", password),
             // For good, and for every chat: not a room member's call.
             Command::Grant {
                 grant: ilar::secrets::Grant::Always,
                 ..
             } => ("grant always", "allows a secret for every chat from now on"),
+            Command::Unlock(_) => ("unlock", password),
+            Command::Password(_) => ("password", password),
             _ => return None,
         })
     }
@@ -131,8 +133,26 @@ pub fn parse(text: &str) -> Option<Command> {
     let mut parts = rest.splitn(2, char::is_whitespace);
     let name = parts.next()?.trim();
     let argument = parts.next().map(str::trim).filter(|s| !s.is_empty());
-    if name.is_empty() {
-        return None;
+    // A command's name is a word, as Telegram's are: anything else after
+    // the slash — `/etc/hosts is broken` — is something the person is
+    // telling the model, not a command it has never heard of.
+    let word = name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !word {
+        // Except a near-miss of a command that takes a password, with
+        // something after it — `/un-lock hunter2` must not reach the
+        // model with the password in it.
+        let letters: String = name
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        return argument
+            .and_then(|_| mistyped_secret(&letters))
+            .map(|meant| Command::MistypedSecret {
+                typed: name.to_string(),
+                meant,
+            });
     }
     // Case-blind: a phone capitalises the first word of a message, and
     // "/Help" is the same ask as "/help".
@@ -166,6 +186,7 @@ pub fn parse(text: &str) -> Option<Command> {
         ("unlock", None) => Command::Usage(UNLOCK_USAGE),
         ("compact", _) => Command::Compact,
         ("help", _) => Command::Help,
+        ("start", _) => Command::Start,
         ("pending", _) => Command::Pending,
         // No argument is not "all": Telegram sends a menu entry, and the
         // `/approve` in a staging message, as the bare word on one tap.
@@ -220,6 +241,11 @@ fn split_ask(argument: &str) -> (&str, Option<String>) {
     }
 }
 
+/// `[once|session|always]`, and nothing else: the approval question
+/// takes a span and no password. A word that reads like a misspelt span
+/// says so — `/grant sesion hunter2` used to grant once with the
+/// password "sesion hunter2" — and anything else is pointed at the
+/// prompt the password belongs in.
 fn parse_grant(argument: &str) -> Result<ilar::secrets::Grant, String> {
     use ilar::secrets::Grant;
     let argument = argument.trim();
@@ -246,11 +272,6 @@ fn parse_grant(argument: &str) -> Result<ilar::secrets::Grant, String> {
         return Err(PASSWORD_AFTER_THE_YES.to_string());
     }
     Ok(grant)
-/// `[once|session|always]`, and nothing else: the approval question
-/// takes a span and no password. A word that reads like a misspelt span
-/// says so — `/grant sesion hunter2` used to grant once with the
-/// password "sesion hunter2" — and anything else is pointed at the
-/// prompt the password belongs in.
 }
 
 /// What a password given with `/grant` is told. The ask it would answer
@@ -449,6 +470,16 @@ mod tests {
                 ask: Some("ab12cd".into())
             })
         );
+        // Not the buttons' form: a password with a `#` in front is still
+        // a password in the wrong place, and comes back out of the chat.
+        for typed in ["/grant #hunter2", "/grant always #pw", "/grant #ABC123"] {
+            let command = parse(typed).unwrap();
+            assert!(command.carries_a_secret(), "{typed}: {command:?}");
+        }
+        assert_eq!(
+            parse("/deny because #tag"),
+            Some(Command::Deny { ask: None })
+        );
         assert_eq!(parse("/grant session "), typed(Grant::Session));
         assert_eq!(parse("/deny"), Some(Command::Deny { ask: None }));
         assert_eq!(
@@ -475,16 +506,6 @@ mod tests {
     #[test]
     fn a_password_on_grant_is_refused_and_a_misspelt_span_is_named() {
         let Some(Command::Misread(message)) = parse("/grant sesion hunter2") else {
-        // Not the buttons' form: a password with a `#` in front is still
-        // a password in the wrong place, and comes back out of the chat.
-        for typed in ["/grant #hunter2", "/grant always #pw", "/grant #ABC123"] {
-            let command = parse(typed).unwrap();
-            assert!(command.carries_a_secret(), "{typed}: {command:?}");
-        }
-        assert_eq!(
-            parse("/deny because #tag"),
-            Some(Command::Deny { ask: None })
-        );
             panic!("a typo read as a password");
         };
         assert!(message.contains("sesion?"), "{message}");
@@ -537,6 +558,22 @@ mod tests {
         assert_eq!(parse("/"), None);
         assert_eq!(parse("what about /new?"), None);
         assert_eq!(parse("1/2 done"), None);
+        // A path is a message, not a command: "/etc/hosts" never
+        // reached the model, only the help did.
+        assert_eq!(parse("/etc/hosts is broken, can you look?"), None);
+        assert_eq!(parse("/tmp"), Some(Command::Unknown("tmp".into())));
+        assert_eq!(parse("/usr/bin/env"), None);
+        assert_eq!(parse("/…"), None);
+        // But not a password with a hyphen in the wrong word before it.
+        assert!(matches!(
+            parse("/un-lock hunter2"),
+            Some(Command::MistypedSecret {
+                meant: "unlock",
+                ..
+            })
+        ));
+        // Telegram's first message.
+        assert_eq!(parse("/start"), Some(Command::Start));
     }
 
     /// A misspelt `/unlock` or `/password` unlocks nothing and leaves
@@ -610,6 +647,20 @@ mod tests {
         assert!(HELP.contains("/abort (or /stop)"), "{HELP}");
         assert!(HELP.contains("/password <pw>"), "{HELP}");
         assert!(HELP.contains("/cost (or /usage)"), "{HELP}");
+    }
+
+    /// The group menu leaves off exactly what a room is refused: one list
+    /// is the menu's, the other the gate's, and nothing else ties them.
+    #[test]
+    fn the_group_menu_and_the_room_gate_agree() {
+        let offered: Vec<&str> = group_menu().map(|(name, _)| name).collect();
+        for (name, _) in MENU {
+            // An argument, since bare `/unlock` is its usage line.
+            let refused = parse(&format!("/{name} x"))
+                .and_then(|command| command.private_only())
+                .is_some();
+            assert_eq!(!refused, offered.contains(name), "/{name}");
+        }
     }
 
     #[test]

@@ -788,6 +788,25 @@ impl Gateway {
         }
     }
 
+    /// Open the seat of a chat the routes still know, for a console
+    /// command that reads it: seats live in memory, so after a restart
+    /// every chat had "no session" until it next said something, though
+    /// its session was on disk and named in the routes.
+    async fn reopen_known_seat(&self, key: &str, message: &Inbound) {
+        if self.driver.seat_by_key(key).is_some()
+            || self.routes.snapshot().session_for(key).is_none()
+        {
+            return;
+        }
+        if let Err(error) = self
+            .driver
+            .seat(key, &message.channel, &message.chat_id, message.is_group)
+            .await
+        {
+            log(&format!("{key}: cannot reopen the session: {error:#}"));
+        }
+    }
+
     /// `/status`: what this chat's seat is and is doing. Nothing is
     /// opened for it — a chat that has not spoken has nothing to show.
     fn status_reply(&self, key: &str) -> String {
@@ -810,7 +829,12 @@ impl Gateway {
             .spawner
             .undelivered_results(&seat.runtime.session_id)
             .len();
-        let mut lines = vec![format!("Model: {model}"), format!("Turn: {turn}")];
+        let mut lines = vec![
+            format!("Model: {model}"),
+            format!("Turn: {turn}"),
+            // What `ilar --view` takes to watch this chat from a terminal.
+            format!("Session: {}", seat.runtime.session_id),
+        ];
         lines.push(match (running, held) {
             (0, 0) => "Subagents: none".to_string(),
             (n, 0) => format!("Subagents: {n} running"),
@@ -1082,6 +1106,11 @@ impl Gateway {
         }
         match command {
             Command::Help => commands::HELP.to_string(),
+            // Every Telegram chat opens with a START tap, and it used to be
+            // answered "No command /start." with the whole help under it.
+            Command::Start => "Hello. Write to me as you would to a person; /help lists the \
+                               commands."
+                .to_string(),
             Command::Pending => self.pending_listing(),
             // Bare: which one? Acting on all of them is one tap away on
             // Telegram, and not something to do by accident.
@@ -1125,6 +1154,7 @@ impl Gateway {
             // still standing, and the person is waiting on it. The help
             // goes under it as it does under any unknown command — the
             // guess may be wrong, and then the list is what was wanted.
+            // In a room "send it again" would be refused: say where to.
             Command::MistypedSecret { typed, meant } => format!(
                 "No command /{typed} — did you mean /{meant}? Nothing ran; send it again{}. {}\n{}",
                 if message.is_group {
@@ -1159,7 +1189,6 @@ impl Gateway {
                     Ok(Outcome::Compacted {
                         summary,
                         context_tokens,
-            // In a room "send it again" would be refused: say where to.
                     }) => {
                         log(&format!("{key}: compacted from the chat"));
                         self.note_handover(&seat, &summary);
@@ -1191,10 +1220,19 @@ impl Gateway {
                 format!("{verdict} {}", password_advice(taken_back))
             }
             Command::Usage(usage) => usage.to_string(),
-            Command::Status => self.status_reply(key),
-            Command::Cost => self.cost_reply(key),
+            Command::Status => {
+                self.reopen_known_seat(key, message).await;
+                self.status_reply(key)
+            }
+            Command::Cost => {
+                self.reopen_known_seat(key, message).await;
+                self.cost_reply(key)
+            }
             Command::Cron { remove } => self.cron_reply(key, message.is_group, remove.as_deref()),
-            Command::Tasks => self.tasks_reply(key),
+            Command::Tasks => {
+                self.reopen_known_seat(key, message).await;
+                self.tasks_reply(key)
+            }
             Command::Whoami => format!(
                 "Sender {} in chat {} on {} — allow_from takes the sender; the session key is {key}.",
                 message.sender_id, message.chat_id, message.channel

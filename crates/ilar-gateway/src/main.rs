@@ -124,12 +124,22 @@ fn channels_from(
                 let settings: DeltaChatConfig = table
                     .try_into()
                     .context("parsing [channels.deltachat] in ilar.toml")?;
+                ilar_gateway::config::check_allowlist(
+                    "deltachat",
+                    &settings.allow_from,
+                    settings.allow_anyone,
+                )?;
                 channels.push(DeltaChat::new(settings, &gateway.home(config)));
             }
             "telegram" => {
                 let settings: ilar_gateway::telegram::TelegramConfig = table
                     .try_into()
                     .context("parsing [channels.telegram] in ilar.toml")?;
+                ilar_gateway::config::check_allowlist(
+                    "telegram",
+                    &settings.allow_from,
+                    settings.allow_anyone,
+                )?;
                 channels.push(ilar_gateway::telegram::Telegram::new(
                     settings,
                     &gateway.home(config),

@@ -12,7 +12,7 @@ pub mod api;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -175,11 +175,11 @@ impl Telegram {
             }
         }
         if self.config.allow_from.is_empty() {
-            if !self.config.allow_anyone {
-                bail!(
-                    "[channels.telegram] has no allow_from; list the user ids or usernames that may talk, or set allow_anyone = true"
-                );
-            }
+            crate::config::check_allowlist(
+                "telegram",
+                &self.config.allow_from,
+                self.config.allow_anyone,
+            )?;
             log("telegram: allow_anyone — whoever writes gets an answer");
         }
         log(&format!("telegram: @{username} is listening"));
@@ -238,7 +238,13 @@ impl Telegram {
         // lets the rest go by without a word.
         if is_group && self.config.group_mention_only {
             let mentioned = text != raw.trim();
-            let command = raw.trim_start().starts_with('/');
+            // Ours only: `strip_mention` took our own `@name` off a
+            // command, so one still carrying an `@` is another bot's.
+            let command = text.starts_with('/')
+                && !text
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|first| first.contains('@'));
             let replied_to = message
                 .pointer("/reply_to_message/from/id")
                 .and_then(Value::as_i64)
@@ -1436,6 +1442,8 @@ mod tests {
                 group(4, "/status@ilar_bot", false),
                 group(5, "/status", false),
                 group(6, "nobody asked you", false),
+                // Another bot's command is that bot's business.
+                group(8, "/help@other_bot", false),
             ]))
             .await
             .unwrap();

@@ -1153,6 +1153,37 @@ async fn slash_new_starts_a_fresh_session_and_slash_model_lists_and_switches() {
     gateway.cancel();
 }
 
+/// The console reads the chat's session, and a restart does not lose
+/// it: the routes still name it. `/cost` used to say "No session open
+/// for this chat yet" after every `/restart` or deploy.
+#[tokio::test]
+async fn the_console_reads_the_session_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (before, fake) = gateway(dir.path(), vec![says_costing("one", 1200, 30)]);
+    fake.inject("hi", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    let session = session_of(dir.path(), "fake:chat-1");
+    before.cancel();
+
+    let (after, fake) = gateway(dir.path(), vec![]);
+    fake.inject("/cost", "chat-1", "alice").await;
+    fake.inject("/status", "chat-1", "alice").await;
+    let sent = fake.wait_for_sent(2, WAIT).await;
+    assert!(!sent[0].text.contains("No session"), "{}", sent[0].text);
+    assert!(
+        sent[0].text.contains("1,200") || sent[0].text.contains("1200"),
+        "{}",
+        sent[0].text
+    );
+    // And the id, for `ilar --view` on the chat.
+    assert!(sent[1].text.contains(&session), "{}", sent[1].text);
+    // A chat that never spoke still has nothing to show.
+    fake.inject("/cost", "chat-2", "bob").await;
+    let sent = fake.wait_for_sent(3, WAIT).await;
+    assert!(sent[2].text.contains("No session"), "{}", sent[2].text);
+    after.cancel();
+}
+
 #[tokio::test]
 async fn a_model_switch_outlives_a_restart_and_save_sets_the_default() {
     let dir = tempfile::tempdir().unwrap();
@@ -1884,6 +1915,7 @@ async fn a_room_cannot_reach_past_itself() {
         "/model zai/glm-4.7 --save",
         "/unlock hunter2",
         "/password hunter2",
+        "/grant always",
     ];
     for (n, command) in reached.iter().enumerate() {
         fake.inject_in_group(command, "room-1", "alice").await;
@@ -1915,7 +1947,6 @@ async fn a_skill_the_assistant_writes_is_listed_next_session_and_loads_now() {
         dir.path(),
         vec![
             calls(
-        "/grant always",
                 "skill_manage",
                 serde_json::json!({
                     "action": "create", "name": "deploy-check",

@@ -180,11 +180,11 @@ impl DeltaChat {
             Err(error) => log(&format!("deltachat: no invite: {error:#}")),
         }
         if self.config.allow_from.is_empty() {
-            if !self.config.allow_anyone {
-                bail!(
-                    "[channels.deltachat] has no allow_from; list the addresses that may talk, or set allow_anyone = true"
-                );
-            }
+            crate::config::check_allowlist(
+                "deltachat",
+                &self.config.allow_from,
+                self.config.allow_anyone,
+            )?;
             log("deltachat: allow_anyone — whoever writes gets an answer");
         }
         Ok(account as u32)

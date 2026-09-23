@@ -191,6 +191,23 @@ pub fn channel_table(config: &ilar::config::Config, name: &str) -> Option<toml::
         .and_then(|value| value.as_table().cloned())
 }
 
+/// A channel that would answer nobody, or anybody without being told
+/// to: refused at start, where the process can stop on it, rather than
+/// in the channel's run, where the gateway restarts it every few
+/// seconds for as long as it is up.
+pub fn check_allowlist(
+    channel: &str,
+    allow_from: &[String],
+    allow_anyone: bool,
+) -> anyhow::Result<()> {
+    if allow_from.is_empty() && !allow_anyone {
+        anyhow::bail!(
+            "[channels.{channel}] has no allow_from; list who may talk, or set allow_anyone = true"
+        );
+    }
+    Ok(())
+}
+
 /// Every configured channel by name.
 pub fn channel_names(config: &ilar::config::Config) -> Vec<String> {
     config
@@ -202,6 +219,18 @@ pub fn channel_names(config: &ilar::config::Config) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_channel_that_answers_nobody_does_not_start() {
+        let refused = super::check_allowlist("telegram", &[], false).unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("[channels.telegram] has no allow_from")
+        );
+        assert!(super::check_allowlist("telegram", &[], true).is_ok());
+        assert!(super::check_allowlist("telegram", &["@me".into()], false).is_ok());
+    }
+
     use super::*;
 
     #[test]
