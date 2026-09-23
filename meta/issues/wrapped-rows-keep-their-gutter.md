@@ -118,3 +118,11 @@ the person looking at a conversation the summary replaced.
 Left: `done` flipping to `×` a frame later, which still wants a fourth
 `ToolState` across 85 match arms for a one-frame icon change on a row
 whose words already say "no result recorded". Judgement, not defect.
+
+## Added by the 2026-09-23 sweep
+
+Markdown continuation rows lose their marker on wrap, seen live at 132
+and 80 columns: list items return to the list margin, blockquotes and
+code blocks lose `│`, diff lines lose `+`/`-` (the background stays),
+JSON args lose their indent. markdown.rs:140-160, text.rs:56
+`wrap_markdown_line`, transcript.rs ~2558.

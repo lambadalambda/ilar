@@ -110,6 +110,18 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 (all complete — see issues_archive.md)
 
+## Milestone 26 — Sweep 2026-09-23
+
+- [ ] [UX sweep 2026-09-23](issues/ux-sweep-2026-09-23.md) — index
+- [ ] [Background by default: the loose ends](issues/background-by-default-loose-ends.md)
+- [ ] [A room is not the person's console](issues/a-room-is-not-the-persons-console.md)
+- [ ] [The chat front door](issues/the-chat-front-door.md)
+- [ ] [Words a model acts on, again](issues/words-a-model-acts-on-again.md)
+- [ ] [The fixed prefix sheds weight](issues/the-fixed-prefix-sheds-weight.md)
+- [ ] [TUI frictions, 2026-09-23](issues/tui-frictions-2026-09-23.md)
+- [ ] [Chat words, 2026-09-23](issues/chat-words-2026-09-23.md)
+- [ ] [The docs catch up, 2026-09-23](issues/the-docs-catch-up-2026-09-23.md)
+
 ## Milestone 22 — Memory in every directory
 
 (all complete — see issues_archive.md)
