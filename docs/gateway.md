@@ -2,11 +2,10 @@
 
 ilar as an always-on assistant: a process that listens on messaging
 channels, runs each chat as its own ilar session on the library
-runtime, and sends the answer back. Milestone 21 in `meta/issues.md`;
-this page grows with it.
+runtime, and sends the answer back.
 
 ```sh
-ilar-gateway                       # listen on the configured channels
+ilar-gateway                       # listen on the configured channels (also: ilar-gateway run)
 ilar-gateway notify "build green"  # a message from a script, to the last private chat
 ilar-gateway notify --to deltachat:12 --source ci "…"
 ilar-gateway invite                # the Delta Chat invite link to add the bot with
@@ -39,7 +38,7 @@ It restarts on failure. After editing `ilar.toml` or `SOUL.md`,
 `systemctl --user restart ilar-gateway`: configuration is read at
 start, and a chat's prompt when its session opens. The last private
 chat is told on the way (never a room): "⏹ ilar-gateway stopping", then
-"▶ ilar-gateway 0.2.0 (f3cd7a7) started · default model …" with the commit
+"▶ ilar-gateway 0.3.0 (f3cd7a7) started · default model …" with the commit
 the binary was built from, so a deploy is visible where you are
 looking. `gateway.announce = false` keeps it quiet. Delta Chat's
 account survives restarts; the invite is logged at each start and
@@ -137,8 +136,9 @@ unless privacy mode is turned off in BotFather; `/new@yourbot` and
 
 ### Delta Chat
 
-The adapter spawns `deltachat-rpc-server` (`pip install
-deltachat-rpc-server`, or any build on PATH) and speaks its JSON-RPC
+The adapter spawns `deltachat-rpc-server` (`pipx install
+deltachat-rpc-server` — a plain `pip install` is refused on current
+Debian and Ubuntu — or any build on PATH, or `rpc_server`) and speaks its JSON-RPC
 over stdio; no bridge, no Python at run time.
 
 | Key | Default | Meaning |
@@ -246,8 +246,8 @@ person who tapped.
 
 ## The home
 
-Everything of the assistant's lives in one directory, `gateway.home`,
-`~/.local/state/ilar/gateway/` unless set otherwise:
+The assistant's own things live in one directory, `gateway.home`,
+`<state dir>/gateway/` unless set otherwise:
 
 | | |
 |---|---|
@@ -258,6 +258,13 @@ Everything of the assistant's lives in one directory, `gateway.home`,
 | `routes.json`, `cron.json`, `inbox/` | Chats, jobs, notifications. |
 | `model` | The default for new chats, when `/model … --save` set one. |
 | `deltachat/` | The channel's account, and `invite.txt`. |
+| `telegram/` | Attachments fetched from Telegram. |
+| `pending/` | Memory the review staged for `/approve`. |
+
+The chats' sessions and the outbox of undelivered subagent results are
+not there: they live in the core state directory beside a terminal
+session's (`<state dir>/sessions/`, `<state dir>/outbox/`), so a backup
+of the home alone does not hold the conversations.
 
 Providers, keys and the `[gateway]` table itself stay in `ilar.toml`:
 those are configuration; the home is the agent's own state, which it

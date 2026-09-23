@@ -49,8 +49,9 @@ generate without the server ever joining the writing process.
 
 ## The page
 
-Three files compiled into the binary — an HTML shell, a stylesheet and
-about 650 lines of hand-written JavaScript. No build step, no
+Files compiled into the binary — an HTML shell, a stylesheet, about
+2,000 lines of hand-written JavaScript, and the vendored libraries under
+`assets/vendor/`. No build step, no
 node_modules, no CDN and no webfont: `ilar serve` works on a plane. The
 server API is the durable artifact here; the page is deliberately
 replaceable.

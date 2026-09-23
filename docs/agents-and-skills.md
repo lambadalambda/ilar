@@ -9,7 +9,9 @@ prompts you invoke yourself.
 Custom agents are Markdown files in
 `${ILAR_CONFIG_DIR:-~/.config/ilar}/agents/` and `./.ilar/agents/`. Project
 definitions override user definitions with the same filename, and user
-definitions override built-ins. Agent frontmatter supports `description`,
+definitions override built-ins. Agent frontmatter is TOML between `---`
+lines (`key = "value"`, not YAML's `key: value`; a file that does not parse
+stops the session and names the file). It supports `description`,
 `model`, and `disabled`; for subagents it also supports `read_only` and `tools`
 (an allowlist of tool names; unknown names are a load-time error, and the list
 intersects with the read-only set when `read_only = true`). Tool restriction is

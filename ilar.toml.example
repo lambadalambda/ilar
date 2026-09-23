@@ -21,6 +21,13 @@ theme = "carbon"
 # is shown ghosted and Enter resumes it. Set false to always start on a
 # blank session.
 # resume_offer = true
+# Memory across sessions, one store per project (see docs/sessions.md):
+# the whole thing, the notes a prompt matches, the opening index.
+# memory = true
+# memory_recall = true
+# memory_index = true
+# How much of a chat-wire model's thinking goes back to it: all, turn, off.
+# replay_thinking = "all"
 
 [providers.openai]
 # api_key from ILAR_OPENAI_API_KEY (env) by default; can be set here.
@@ -75,10 +82,19 @@ theme = "carbon"
 # # error at startup.
 # options = { temperature = 0.7, top_p = 0.9, min_p = 0.05 }
 
+# A server whose models are listed at /models, each reachable as
+# <name>/<id> — one section for all of them (docs/configuration.md).
+# [endpoints.lemonade]
+# base_url = "http://127.0.0.1:13305/api/v1"
+
 [agent]
 # Max provider calls per user turn — a runaway-loop backstop, not a
 # working limit. Long-thinking models need hundreds on big tasks.
 # max_iterations = 1000
+# The sudo tool: one command as root, after you have read it and said yes.
+# sudo = false
+# Most tokens one response may produce; 0 sends no cap.
+# max_output_tokens = 32768
 
 [compaction]
 # Summarize when transcript exceeds this fraction of context window.
@@ -109,7 +125,7 @@ background_tool_timeout_ms = 600000
 # sections are user-scoped — a project file cannot set them. Every key
 # and its default is in docs/gateway.md.
 # [gateway]
-# home = "~/.local/state/ilar/gateway"   # SOUL.md, memory, skills, routes
+# home = "/srv/ilar-gateway"              # default <state dir>/gateway; ~ is not expanded
 # model = "zai/glm-4.7"                   # what a fresh chat starts on
 # tools.safe_mode = false                 # true: no bash, write, edit, service, image_gen, sudo
 # tools.deny = []                         # tools no chat may use
@@ -123,9 +139,12 @@ background_tool_timeout_ms = 600000
 # token = "123456:ABC…"                   # from BotFather
 # allow_from = ["@yourname", "123456789"] # usernames or numeric ids
 # ack_reaction = "👀"
+# group_mention_only = true              # in a group, answer only what is said to the bot
 
 # [channels.deltachat]
 # setup_qr = "DCACCOUNT:https://nine.testrun.org/new"   # a fresh chatmail identity …
-# # addr = "bot@example.org"; password = "…"           # … or an existing account
+# # … or an existing account:
+# # addr = "bot@example.org"
+# # password = "…"
 # display_name = "ilar"
 # allow_from = ["you@example.org"]

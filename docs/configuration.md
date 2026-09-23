@@ -3,7 +3,11 @@
 The user configuration is `${ILAR_CONFIG_DIR:-~/.config/ilar}/ilar.toml`; see
 [`ilar.toml.example`](../ilar.toml.example). `./ilar.toml` and
 `./.ilar/ilar.toml` layer project settings over it, in that order. Nested
-sections merge by field. These settings are user-scoped and are not
+sections merge by field. Every file is read strictly: an unknown key or a
+value of the wrong type stops startup with the file, the key and what was
+expected. That includes a project file in a cloned repository: a typo there
+keeps `ilar` from starting in that directory until the file is fixed or moved
+aside (`--no-project-instructions` skips `AGENTS.md`, not `ilar.toml`). These settings are user-scoped and are not
 overridden by project files:
 
 - `general.theme` and `general.project_instructions`;
@@ -68,6 +72,7 @@ Environment variables:
 | `ILAR_OPENCODE_API_KEY` | Fallback OpenCode key, for both Zen and Go. |
 | `ILAR_TAVILY_API_KEY` | Switches web search to the Tavily API (recommended). |
 | `ILAR_EXA_API_KEY` | Authenticates the default Exa web search backend. |
+| `ILAR_SERVE_TOKEN`, `ILAR_SERVE_POLL_MS` | For `ilar serve` only; see [serve](serve.md). |
 
 A provider key may also live in the [secret store](secrets.md) under
 its variable's name (`ilar secret set ILAR_OPENAI_API_KEY`); the TOML
@@ -210,7 +215,7 @@ A server that lists what it serves — Lemonade, llama.cpp, vLLM, LM
 Studio, anything answering `GET /models` in the OpenAI shape — can be
 one `[endpoints.<name>]` section instead of a `[models.*]` section per
 model. Its models are discovered when configuration loads and appear
-as `<name>/<id>`: in the picker, in `/model`, as an agent's `model`.
+as `<name>/<id>`: in the model picker (F2), in the gateway's `/model`, as an agent's `model`.
 
 ```toml
 [endpoints.lemonade]

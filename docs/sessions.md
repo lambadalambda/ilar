@@ -296,7 +296,16 @@ stopped: the step cap was reached before an answer — ilar exec --session a1b2c
 ```
 
 That line is text mode only: under `--json` the outcome already rides
-`turn_done`. A turn that failed outright prints `error: …` instead.
+`turn_done`. A turn that failed outright prints `error: …` on stderr,
+and under `--json` also `{"type":"error","message":"…"}` on stdout.
+
+The `--json` events, one object per line, each with a `type`: `session`
+(`id`), `notice` (`text`), `turn_started`, `text` and `thinking`
+(`text`, streamed in pieces), `tool_started` (`id`, `name`),
+`tool_input` (`id`, `arguments`), `tool_finished`, `subagent`,
+`retry`, `step_interrupted`, `compacted` (`summary`), `turn_done`
+(`outcome`), and `error` (`message`). A run with follow-up turns — see
+above — carries several `turn_started` … `turn_done` spans.
 
 Settings this launch could not honour — a project file's user-scoped table,
 a reasoning variant the model does not have, an `--agent` on a resumed
