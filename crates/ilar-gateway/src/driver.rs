@@ -520,7 +520,7 @@ impl Driver {
                 .begin(&seat.key, &seat.channel, &seat.chat_id)
                 .await
         };
-        let status = claim.as_ref().map(crate::status::Claim::lines);
+        let status = claim.as_ref();
         let mut narrator = crate::status::Narrator::default();
         let mut watch = crate::skills::SkillWatch::default();
         let skills = self.wiring.skills.clone();
@@ -535,10 +535,10 @@ impl Driver {
                     undelivered.remove(at);
                 }
             }
-            if let Some(status) = &status
-                && let Some(line) = narrator.observe(event)
+            if let Some(status) = status
+                && let Some(text) = narrator.observe(event)
             {
-                let _ = status.send(line);
+                status.say(crate::status::Update::of(text, event));
             }
         };
         let (steer_tx, steer_rx) = steer_channel();
