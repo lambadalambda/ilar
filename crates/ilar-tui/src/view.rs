@@ -284,18 +284,18 @@ impl App {
             .then_some((self.stream_received - self.stream_step_base) / 4);
         let compact_latest_usage = match (self.latest_usage, live_out) {
             (Some(latest), Some(out)) => Some(format!(
-                "i{}/o~{} {} {percent}",
+                "i{}/o~{} {} ctx {percent}",
                 format_tokens_compact(latest.input_tokens),
                 format_tokens_compact(out),
                 Self::cache_hit_display(&latest)
             )),
             (Some(latest), None) => Some(format!(
-                "i{}/o{} {} {percent}",
+                "i{}/o{} {} ctx {percent}",
                 format_tokens_compact(latest.input_tokens),
                 format_tokens_compact(latest.output_tokens),
                 Self::cache_hit_display(&latest)
             )),
-            (None, Some(out)) => Some(format!("o~{} {percent}", format_tokens_compact(out))),
+            (None, Some(out)) => Some(format!("o~{} ctx {percent}", format_tokens_compact(out))),
             (None, None) => None,
         };
         if width < 64 {

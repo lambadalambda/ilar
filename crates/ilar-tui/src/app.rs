@@ -440,9 +440,22 @@ fn is_notification_envelope(text: &str) -> bool {
     text.starts_with("<task-notification>") || text.starts_with("<tool-notification>")
 }
 
-/// The collapsed headline a queued task/tool result wears in the
-/// pending manager — the same first line its transcript row would
-/// show. `None` for an ordinary message.
+/// A file named after what the session was about, and which session:
+/// the topic alone let two sessions on one subject overwrite each
+/// other's, while the session's own next one replaces its last.
+fn artifact_name(app: &App, prefix: &str, extension: &str) -> String {
+    let id: String = app.session_id.chars().take(8).collect();
+    match app
+        .topic
+        .as_deref()
+        .map(topic_slug)
+        .filter(|slug| !slug.is_empty())
+    {
+        Some(slug) => format!("{prefix}-{slug}-{id}.{extension}"),
+        None => format!("{prefix}-{id}.{extension}"),
+    }
+}
+
 /// A topic as a filename stem: lowercase words joined by dashes, at
 /// most forty characters, nothing a shell or a filesystem objects to.
 pub(crate) fn topic_slug(topic: &str) -> String {
@@ -474,6 +487,9 @@ pub(crate) fn notification_headline(text: &str) -> Option<String> {
         .map(|display| display.lines().next().unwrap_or_default().to_string())
 }
 
+/// The collapsed headline a queued task/tool result wears in the
+/// pending manager — the same first line its transcript row would
+/// show. `None` for an ordinary message.
 pub(crate) fn queued_result_headline(message: &ilar::agent::Steer) -> Option<String> {
     notification_headline(&message.text)
 }
@@ -792,6 +808,13 @@ pub(crate) fn windowed_rate(
 }
 
 impl App {
+    /// The same, without the welcome line — for a surface whose keys are
+    /// not the ones it names.
+    pub(crate) fn without_greeting(mut self) -> Self {
+        self.lines.clear();
+        self
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             lines: vec![Line_::System(
@@ -3326,15 +3349,7 @@ pub(crate) fn activate_palette_command(
         }
         PaletteCommand::Context => app.open_context_picker(),
         PaletteCommand::Export => {
-            // Named after the topic when there is one: a file called by
-            // what the session was about, not by eight hex digits.
-            let stem = app
-                .topic
-                .as_deref()
-                .map(topic_slug)
-                .filter(|slug| !slug.is_empty())
-                .unwrap_or_else(|| app.session_id.chars().take(8).collect());
-            let path = app.cwd.join(format!("ilar-transcript-{stem}.md"));
+            let path = app.cwd.join(artifact_name(app, "ilar-transcript", "md"));
             let (exported, whole) = export_lines(app);
             let markdown = transcript_markdown(&app.session_id, &exported);
             match std::fs::write(&path, markdown) {
@@ -3358,13 +3373,7 @@ pub(crate) fn activate_palette_command(
             }
         }
         PaletteCommand::Share => {
-            let stem = app
-                .topic
-                .as_deref()
-                .map(topic_slug)
-                .filter(|slug| !slug.is_empty())
-                .unwrap_or_else(|| app.session_id.chars().take(8).collect());
-            let path = app.cwd.join(format!("ilar-session-{stem}.html"));
+            let path = app.cwd.join(artifact_name(app, "ilar-session", "html"));
             let Some(store) = app.store.clone() else {
                 app.set_notice("this session has no log to share yet", NoticeLevel::Info);
                 return;
@@ -3383,7 +3392,8 @@ pub(crate) fn activate_palette_command(
             {
                 Ok(()) => {
                     app.push_transcript_line(Line_::System(format!(
-                        "session shared to {} — one file, opens offline",
+                        "session written to {} — one HTML file that opens offline; nothing was \
+                         uploaded",
                         path.display()
                     )));
                 }
@@ -6626,6 +6636,8 @@ mod tests {
         assert!(narrow.contains("high"), "{narrow}");
         assert!(narrow.contains("i300/o50"), "{narrow}");
         assert!(narrow.contains("cache 82%"), "{narrow}");
+        // The last figure is the context's, and says so.
+        assert!(narrow.contains("ctx "), "{narrow}");
         for width in [64, 72, 77] {
             let boundary = rendered_text(&app.status_line(width));
             assert!(boundary.contains("gpt-5.6"), "width {width}: {boundary}");

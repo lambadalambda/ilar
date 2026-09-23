@@ -482,6 +482,14 @@ file that was already there. **Ctrl-F** searches it, **Ctrl-O** opens any link i
 contains, mouse drag selects and copies, and the palette's "Export
 transcript" writes the session as a Markdown file.
 
+The palette's "Share transcript" writes the whole session as one HTML
+file that opens offline in any browser, the same view `ilar serve` would
+render, with stored secrets cut out. Nothing is uploaded: the file is
+yours to send. Both files go in the working directory, named after the
+topic and the session (`ilar-session-<topic>-<id>.html`), so a second
+share of the same session replaces the first and another session's never
+does. They are ordinary files in your checkout, so mind `git add -A`.
+
 ilar holds the mouse for as long as it runs, which is what its own
 selection needs and which takes the terminal's away. Hold **Shift**
 while dragging to get the terminal's selection back; that one belongs

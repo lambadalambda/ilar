@@ -28,7 +28,9 @@ pub(crate) async fn run(config: &Config, id: &str, theme: crate::theme::ThemeId)
     let cwd = reader.meta().and_then(|meta| meta.cwd.clone());
     drop(reader);
     let (mut terminal, session) = crate::TerminalSession::start()?;
-    let mut app = App::new();
+    // Not the TUI's greeting: Enter, Ctrl-J and Ctrl-P are all refused
+    // here, and the line pushed below says what does work.
+    let mut app = App::new().without_greeting();
     // The read-only prompt shows no footer and there is no help
     // overlay here, so nothing reads this today — but an App whose
     // terminal capabilities are a lie is a trap for whoever adds F1.
@@ -78,6 +80,10 @@ pub(crate) async fn run(config: &Config, id: &str, theme: crate::theme::ThemeId)
                         ViewKey::Refuse => app.set_notice(
                             "read-only view: open the session without --view to talk to it",
                             NoticeLevel::Warning,
+                        ),
+                        ViewKey::Help => app.set_notice(
+                            "read-only view: ↑↓ PgUp/PgDn Home/End or the wheel scroll · Ctrl-L repaints · q or Esc leaves",
+                            NoticeLevel::Info,
                         ),
                         ViewKey::Ignore => {}
                     }
@@ -133,6 +139,8 @@ enum ViewKey {
     ToTail,
     Repaint,
     Refuse,
+    /// What the view's keys are, since it has no help overlay.
+    Help,
     /// Not a keystroke anybody made: a bare modifier, or a key the
     /// terminal reported without a code.
     Ignore,
@@ -152,6 +160,8 @@ fn view_key(code: KeyCode, control: bool) -> ViewKey {
         // The one root binding that still means something without a
         // runtime: a screen the terminal has scribbled over.
         (KeyCode::Char('l'), true) => ViewKey::Repaint,
+        // F1 is where help lives everywhere else; here it is one line.
+        (KeyCode::F(1), _) => ViewKey::Help,
         (KeyCode::Modifier(_) | KeyCode::Null, _) => ViewKey::Ignore,
         _ => ViewKey::Refuse,
     }
@@ -218,10 +228,11 @@ mod tests {
         assert_eq!(view_key(KeyCode::Home, false), ViewKey::ToTop);
         assert_eq!(view_key(KeyCode::End, false), ViewKey::ToTail);
         assert_eq!(view_key(KeyCode::Char('l'), true), ViewKey::Repaint);
+        // F1 is where help lives everywhere else, and here it says so.
+        assert_eq!(view_key(KeyCode::F(1), false), ViewKey::Help);
         for (code, control) in [
             (KeyCode::Char('h'), false),
             (KeyCode::Enter, false),
-            (KeyCode::F(1), false),
             (KeyCode::Char('f'), true),
             (KeyCode::Char('t'), true),
             (KeyCode::Tab, false),
