@@ -604,6 +604,9 @@ pub(crate) struct App {
     pub(crate) goal: Option<(String, u32)>,
     /// Selection inside the inline slash-completion popup.
     pub(crate) slash_selected: usize,
+    /// The query `slash_selected` was chosen in; any other query starts
+    /// from the top (see [`App::slash_selection`]).
+    slash_selected_for: String,
     pub(crate) question_modal: Option<QuestionModal>,
     /// A tool's ask for a stored secret, waiting on the person.
     pub(crate) grant_modal: Option<GrantModal>,
@@ -837,6 +840,7 @@ impl App {
             pending_steers: Vec::new(),
             goal: None,
             slash_selected: 0,
+            slash_selected_for: String::new(),
             question_modal: None,
             grant_modal: None,
             password_modal: None,
@@ -1027,6 +1031,16 @@ impl App {
 
     /// Give the visible slash-completion popup first refusal on its
     /// navigation and acceptance keys. Returns whether it consumed the key.
+    /// The popup's selected row: the one chosen for this very query, or
+    /// the top one once the query has been edited since.
+    pub(crate) fn slash_selection(&self) -> usize {
+        if self.slash_selected_for == self.input.text() {
+            self.slash_selected
+        } else {
+            0
+        }
+    }
+
     fn handle_slash_completion_key(&mut self, key: KeyEvent) -> bool {
         if key
             .modifiers
@@ -1043,7 +1057,8 @@ impl App {
             return false;
         }
 
-        self.slash_selected = self.slash_selected.min(candidates.len() - 1);
+        self.slash_selected = self.slash_selection().min(candidates.len() - 1);
+        self.slash_selected_for = self.input.text().to_string();
         match key.code {
             KeyCode::Up => {
                 self.slash_selected =
@@ -4675,6 +4690,32 @@ mod tests {
             app.search_matches, wide_matches,
             "the resize left the match on the row it used to be on"
         );
+    }
+
+    /// A selection belongs to the query it was made in: arrow to the
+    /// third row of `/`, edit the query, and Tab used to complete that
+    /// third row of a list that had changed under it — a command the
+    /// popup no longer showed first, or at all.
+    #[test]
+    fn editing_the_query_puts_the_slash_selection_back_on_top() {
+        let mut app = App::new();
+        app.skills = vec![
+            ("deploy".to_string(), "Deploy things".to_string()),
+            ("greptile".to_string(), "Review comments".to_string()),
+        ];
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.input = InputBuffer::from("/");
+        assert!(app.handle_prompt_navigation_key(plain(KeyCode::Down)));
+        assert!(app.handle_prompt_navigation_key(plain(KeyCode::Down)));
+        assert_eq!(app.slash_selection(), 2);
+
+        app.input = InputBuffer::from("/d");
+        assert_eq!(app.slash_selection(), 0, "the edit kept a stale row");
+        let first = slash_candidates(app.input.text(), &app.slash_inventory())[0]
+            .0
+            .clone();
+        assert!(app.handle_prompt_navigation_key(plain(KeyCode::Tab)));
+        assert_eq!(app.input.text(), format!("/{first} "));
     }
 
     #[test]

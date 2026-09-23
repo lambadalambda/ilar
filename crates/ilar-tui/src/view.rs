@@ -1228,7 +1228,7 @@ impl App {
                     );
                 let inner = block.inner(popup);
                 frame.render_widget(block, popup);
-                let selected = self.slash_selected.min(candidates.len() - 1);
+                let selected = self.slash_selection().min(candidates.len() - 1);
                 let lines: Vec<Line<'static>> = candidates
                     .iter()
                     .enumerate()
