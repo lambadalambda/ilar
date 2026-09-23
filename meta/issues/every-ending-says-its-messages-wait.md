@@ -36,3 +36,17 @@ about:
 ## Notes
 
 - Source: review of the queued note, 2026-09-23. Size: S.
+
+## Done (2026-09-23)
+
+A propagated hop now ends with the queued line for the session it ran
+in, and names that session by id — the hop's headline is about the
+nested task, so "this task" would point at the wrong one. The
+abnormal-ending guard learns its task's session and counts too.
+
+Replacements stay without it, from the review: their session could
+not be restored, so "delivered when next resumed" may not hold, and a
+replayed replacement has to match the first byte for byte, which a
+count taken twice need not. The earlier lease-wait test also stopped
+cancelling everything at once: freeing the occupant's lease in the
+same instant could let the resume start its turn instead.
