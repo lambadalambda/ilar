@@ -3170,8 +3170,55 @@ fn notification_lines(
     output
 }
 
+/// The row a finished turn leaves: how long it worked, how it ended
+/// and when, and what it left running. Scrolling back, it is what says
+/// when each thing happened; a turn from another day says which.
+pub(crate) fn turn_footer(
+    worked: std::time::Duration,
+    ending: &str,
+    at: chrono::DateTime<chrono::Local>,
+    now: chrono::DateTime<chrono::Local>,
+    background: usize,
+) -> String {
+    let when = if at.date_naive() == now.date_naive() {
+        at.format("%H:%M")
+    } else {
+        at.format("%b %-d %H:%M")
+    };
+    let mut footer = format!("worked {} · {ending} {when}", format_elapsed(worked));
+    if background > 0 {
+        footer.push_str(&format!(
+            " · {} still running",
+            ilar::text::plural(background, "background task")
+        ));
+    }
+    footer
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_turn_footer_says_how_long_how_it_ended_when_and_what_still_runs() {
+        use chrono::TimeZone as _;
+        let at = chrono::Local
+            .with_ymd_and_hms(2026, 9, 23, 13, 51, 20)
+            .unwrap();
+        let long = std::time::Duration::from_secs(217);
+        assert_eq!(
+            super::turn_footer(long, "done", at, at, 0),
+            "worked 3m 37s · done 13:51"
+        );
+        assert_eq!(
+            super::turn_footer(long, "aborted", at, at, 1),
+            "worked 3m 37s · aborted 13:51 · 1 background task still running"
+        );
+        let next_week = at + chrono::Duration::days(7);
+        assert_eq!(
+            super::turn_footer(std::time::Duration::from_secs(4), "done", at, next_week, 2),
+            "worked 4s · done Sep 23 13:51 · 2 background tasks still running"
+        );
+    }
+
     /// A wrapped row keeps its gutter: continuation rows sit under the
     /// label, not at column 0, and none of them overflows.
     /// A row is cut from the right, so whichever of the command and

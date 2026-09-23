@@ -568,6 +568,8 @@ pub(crate) struct App {
     /// ended): what a compaction may shed payloads behind without
     /// touching rows a running turn still owns.
     turn_boundary: usize,
+    /// When the running turn started, for the footer its finish leaves.
+    turn_started: Option<std::time::Instant>,
     /// Windowed transfer rate: anchor of the current >=1s window and the
     /// last completed window's bytes/sec.
     stream_rate_anchor: Option<(std::time::Instant, u64)>,
@@ -850,6 +852,7 @@ impl App {
             stream_last_data: None,
             stream_step_base: 0,
             turn_boundary: 0,
+            turn_started: None,
             stream_rate_anchor: None,
             stream_rate: None,
             turn_committed: false,
@@ -1699,6 +1702,7 @@ impl App {
                 self.cache_compact_fired = false;
                 self.turn_committed = true;
                 self.turn_boundary = self.lines.len();
+                self.turn_started = Some(std::time::Instant::now());
                 self.clear_transient_notice();
                 self.status = "thinking".into();
                 self.stream_received = 0;
@@ -2115,6 +2119,12 @@ impl App {
         // last event did — the point where it is longest is the worst
         // possible moment to throw the rendered rows away.
         let mut touched = None;
+        let ending = match &result {
+            Ok(TurnOutcome::Completed) => "done",
+            Ok(TurnOutcome::Aborted) => "aborted",
+            Ok(TurnOutcome::MaxIterations) => "stopped",
+            Err(_) => "failed",
+        };
         match result {
             Err(error) => {
                 // Closes the open rows and marks the whole transcript.
@@ -2160,6 +2170,18 @@ impl App {
                 );
             }
             Ok(_) => {}
+        }
+        if let Some(started) = self.turn_started.take() {
+            let now = chrono::Local::now();
+            self.lines
+                .push(Line_::System(crate::transcript::turn_footer(
+                    started.elapsed(),
+                    ending,
+                    now,
+                    now,
+                    self.background_running,
+                )));
+            touched.get_or_insert(self.lines.len() - 1);
         }
         self.touch_transcript(touched);
         self.busy = false;
@@ -6336,6 +6358,30 @@ mod tests {
             "{screen}"
         );
         assert!(!screen.contains("2 queued"), "{screen}");
+    }
+
+    /// Scrolling back, each turn says when it ended: the footer is a
+    /// row of its own, after whatever the turn itself left.
+    #[test]
+    fn a_finished_turn_leaves_a_footer_row() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::TurnStarted);
+        app.background_running = 1;
+        app.finish_turn(Err(anyhow::anyhow!("api down")));
+        let n = app.lines.len();
+        assert!(matches!(&app.lines[n - 2], Line_::System(text) if text.starts_with("error:")));
+        assert!(
+            matches!(&app.lines[n - 1], Line_::System(text)
+                if text.starts_with("worked ") && text.contains(" · failed ")
+                    && text.ends_with("1 background task still running")),
+            "{:?}",
+            app.lines.last()
+        );
+
+        // One footer per turn: a finish with no turn behind it says nothing.
+        let before = app.lines.len();
+        app.finish_turn(Ok(TurnOutcome::Completed));
+        assert_eq!(app.lines.len(), before);
     }
 
     #[test]
