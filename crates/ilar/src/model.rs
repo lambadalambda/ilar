@@ -344,6 +344,39 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         pricing!(0.05, 0.4, Some(0.005), None),
     ),
     ("opencode", "grok-4.6", pricing!(2.0, 6.0, Some(0.5), None)),
+    // The 2026-09-24 rows, at models.dev's base tier.
+    ("opencode", "grok-4.7", pricing!(1.4, 4.2, Some(0.35), None)),
+    (
+        "opencode",
+        "muse-spark-1.3",
+        pricing!(1.25, 4.25, Some(0.15), None),
+    ),
+    (
+        "opencode",
+        "qwen3.8-flash",
+        pricing!(0.15, 0.47, Some(0.016), Some(0.2)),
+    ),
+    (
+        "opencode",
+        "deepseek-v4.1-flash",
+        pricing!(0.3, 1.2, Some(0.006), None),
+    ),
+    (
+        "opencode",
+        "deepseek-v4-flash-vision-exp",
+        pricing!(0.14, 0.28, Some(0.028), None),
+    ),
+    ("opencode", "glm-5.3", pricing!(1.4, 4.4, Some(0.26), None)),
+    (
+        "opencode",
+        "glm-5.3-flash",
+        pricing!(0.15, 0.5, Some(0.03), None),
+    ),
+    (
+        "opencode",
+        "space-bunny-free",
+        pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
+    ),
     ("opencode", "grok-4.5", pricing!(2.0, 6.0, Some(0.3), None)),
     (
         "opencode",
@@ -449,6 +482,36 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "opencode-go",
         "grok-4.6",
         pricing!(2.0, 6.0, Some(0.5), None),
+    ),
+    (
+        "opencode-go",
+        "gpt-6-luna",
+        pricing!(0.1, 0.5, Some(0.01), Some(0.125)),
+    ),
+    (
+        "opencode-go",
+        "grok-4.7",
+        pricing!(2.0, 6.0, Some(0.5), None),
+    ),
+    (
+        "opencode-go",
+        "deepseek-v4.1-flash",
+        pricing!(0.15, 0.6, Some(0.003), None),
+    ),
+    (
+        "opencode-go",
+        "mimo-v2.6-flash",
+        pricing!(0.14, 0.28, Some(0.0028), None),
+    ),
+    (
+        "opencode-go",
+        "mimo-v2.6-pro",
+        pricing!(0.435, 0.87, Some(0.003625), None),
+    ),
+    (
+        "opencode-go",
+        "space-bunny-free",
+        pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
     ),
     (
         "opencode-go",
@@ -1440,6 +1503,89 @@ static CATALOG: &[ModelInfo] = &[
     )
     .vision()
     .reasoning(EFFORT_LOW_TO_XHIGH),
+    // Added 2026-09-24 from the live listings: models.dev's records,
+    // each probed with a small request on its wire. Grok's output is
+    // cut as for 4.6; Space Bunny's 512K reply to the 1M rows' 131K.
+    model!(
+        "opencode",
+        "grok-4.7",
+        "Grok 4.7",
+        500_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(EFFORT_LOW_TO_XHIGH),
+    model!(
+        "opencode",
+        "muse-spark-1.3",
+        "Muse Spark 1.3",
+        1_048_576,
+        131_072,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
+    model!(
+        "opencode",
+        "qwen3.8-flash",
+        "Qwen3.8 Flash",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(EFFORT_LOW_MEDIUM_XHIGH),
+    model!(
+        "opencode",
+        "deepseek-v4.1-flash",
+        "DeepSeek V4.1 Flash",
+        1_000_000,
+        384_000,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(ZAI_EFFORT_VARIANTS),
+    model!(
+        "opencode",
+        "deepseek-v4-flash-vision-exp",
+        "DeepSeek V4 Flash Vision Exp",
+        1_000_000,
+        384_000,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(ZAI_EFFORT_VARIANTS),
+    model!(
+        "opencode",
+        "glm-5.3",
+        "GLM-5.3",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    )
+    .effort(ZAI_EFFORT_VARIANTS),
+    model!(
+        "opencode",
+        "glm-5.3-flash",
+        "GLM-5.3-Flash",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(ZAI_EFFORT_VARIANTS),
+    model!(
+        "opencode",
+        "space-bunny-free",
+        "Space Bunny Free",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .input(524_288)
+    .vision()
+    .effort(EFFORT_LOW_TO_MAX),
     model!(
         "opencode",
         "grok-4.5",
@@ -1652,6 +1798,69 @@ static CATALOG: &[ModelInfo] = &[
     )
     .vision()
     .reasoning(EFFORT_LOW_TO_XHIGH),
+    // Added 2026-09-24, as the Zen rows of that day. Luna as its Zen
+    // row; MiMo V2.6 publishes no ladder. Go's minimax-m2.7 is listed
+    // but answered 503 while the Zen twin answered, so it is left out.
+    model!(
+        "opencode-go",
+        "gpt-6-luna",
+        "GPT-6 Luna",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_NONE_TO_MAX),
+    model!(
+        "opencode-go",
+        "grok-4.7",
+        "Grok 4.7",
+        500_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(EFFORT_LOW_TO_XHIGH),
+    model!(
+        "opencode-go",
+        "deepseek-v4.1-flash",
+        "DeepSeek V4.1 Flash",
+        1_000_000,
+        384_000,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(ZAI_EFFORT_VARIANTS),
+    model!(
+        "opencode-go",
+        "mimo-v2.6-flash",
+        "MiMo V2.6 Flash",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "mimo-v2.6-pro",
+        "MiMo V2.6 Pro",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .vision(),
+    model!(
+        "opencode-go",
+        "space-bunny-free",
+        "Space Bunny Free",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .input(524_288)
+    .vision()
+    .effort(EFFORT_LOW_TO_MAX),
     model!(
         "opencode-go",
         "muse-spark-1.3-contributor",
@@ -2114,6 +2323,39 @@ mod tests {
 
     use super::*;
 
+    /// The OpenCode rows added 2026-09-24, each on the wire that
+    /// answered a live probe, with models.dev's vision and ladder.
+    #[test]
+    fn the_september_24_opencode_rows_are_on_their_probed_wires() {
+        use ModelAccess::{OpenCodeChat as Chat, OpenCodeResponses as Responses};
+        let rows = [
+            ("opencode/grok-4.7", Responses, true, 4),
+            ("opencode/muse-spark-1.3", Responses, true, 5),
+            ("opencode/qwen3.8-flash", Chat, true, 3),
+            ("opencode/deepseek-v4.1-flash", Chat, true, 3),
+            ("opencode/deepseek-v4-flash-vision-exp", Chat, true, 3),
+            ("opencode/glm-5.3", Chat, false, 3),
+            ("opencode/glm-5.3-flash", Chat, true, 3),
+            ("opencode/space-bunny-free", Chat, true, 5),
+            ("opencode-go/gpt-6-luna", Responses, true, 6),
+            ("opencode-go/grok-4.7", Responses, true, 4),
+            ("opencode-go/deepseek-v4.1-flash", Chat, true, 3),
+            ("opencode-go/mimo-v2.6-flash", Chat, true, 0),
+            ("opencode-go/mimo-v2.6-pro", Chat, true, 0),
+            ("opencode-go/space-bunny-free", Chat, true, 5),
+        ];
+        for (id, access, vision, rungs) in rows {
+            let model = find(id).unwrap_or_else(|| panic!("{id} is cataloged"));
+            assert_eq!(model.access, access, "{id}");
+            assert_eq!(model.supports_vision(), vision, "{id}");
+            assert_eq!(model.variants().len(), rungs, "{id}");
+        }
+        // Listed, but unusable from here: free only inside OpenCode, or
+        // an upstream that answers 503 while its Zen twin answers.
+        assert!(find("opencode/mimo-v2.6-flash-free").is_none());
+        assert!(find("opencode-go/minimax-m2.7").is_none());
+    }
+
     /// Thinking goes back on the chat wire and nowhere else: every
     /// chat-completions row replays it, no Responses-wire or OpenAI row
     /// does, and a model nobody can find keeps its thinking local.
@@ -2315,11 +2557,10 @@ mod tests {
                 find(&format!("openai/{id}")).unwrap().access,
                 ModelAccess::OpenAiBoth
             );
-            assert!(
-                find(&format!("opencode-go/{id}")).is_none(),
-                "Go does not list {id}"
-            );
         }
+        // Go listed Luna two days later (2026-09-24); Sol it still does not.
+        assert!(find("opencode-go/gpt-6-luna").is_some());
+        assert!(find("opencode-go/gpt-6-sol").is_none());
         let price = |id: &str| {
             let p = pricing_for(id).unwrap_or_else(|| panic!("{id} has no price"));
             (p.input, p.output, p.cache_read, p.cache_write)
