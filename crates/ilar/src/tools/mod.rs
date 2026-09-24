@@ -727,6 +727,10 @@ pub struct ToolContext {
     /// (meta/issues/kernel-sandbox-for-tool-processes.md) is the only
     /// thing that can.
     pub withheld: Arc<[PathBuf]>,
+    /// Whether a steer — a person's message, or a result a front end
+    /// steered in — is waiting for this turn to read it. `None` for a
+    /// turn nothing can steer.
+    pub steers: Option<Arc<crate::agent::SteerSignal>>,
 }
 
 /// What a call naming a withheld path is told. One sentence, and not
@@ -905,6 +909,7 @@ impl ToolContext {
             heartbeat: None,
             secrets: None,
             withheld: Arc::from(Vec::new()),
+            steers: None,
         })
     }
 
@@ -1255,6 +1260,7 @@ impl ChildTool {
     pub const TASK: Self = Self("task");
     pub const TASKS: Self = Self("tasks");
     pub const TASK_MESSAGE: Self = Self("task_message");
+    pub const WAIT: Self = Self("wait");
     pub const SERVICE: Self = Self("service");
     pub const MODELS: Self = Self("models");
     pub const HISTORY: Self = Self("history");
@@ -1270,6 +1276,7 @@ impl ChildTool {
         Self::TASK,
         Self::TASKS,
         Self::TASK_MESSAGE,
+        Self::WAIT,
         Self::SERVICE,
         Self::MODELS,
         Self::HISTORY,
@@ -1566,7 +1573,11 @@ impl ToolRegistry {
         )?
         .with_child_tool(
             ChildTool::TASK_MESSAGE,
-            Arc::new(crate::subagent::TaskMessageTool::new(spawner)),
+            Arc::new(crate::subagent::TaskMessageTool::new(spawner.clone())),
+        )?
+        .with_child_tool(
+            ChildTool::WAIT,
+            Arc::new(crate::subagent::WaitTool::new(spawner)),
         )
     }
 

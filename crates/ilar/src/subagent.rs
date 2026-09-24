@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::agent::{
     LOOP_EVENT_CAPACITY, LoopConfig, LoopEvent, LoopEventSender, TurnOutcome, loop_event_channel,
@@ -1425,6 +1426,8 @@ impl SubagentSpawner {
             // its blocked caller's progress; the background branch
             // below replaces it with the watchdog of its own.
             heartbeat: ctx.heartbeat.clone(),
+            // The child's turn sets its own from the steers it takes.
+            steers: None,
         };
 
         if background {
@@ -1699,8 +1702,8 @@ impl SubagentSpawner {
             return ToolOutput::text(format!(
                 "Background task started (task_id: {returned_session_id}). Completion \
 will trigger a separate follow-up turn. Do not sleep, poll, or check on it. Do not perform this \
-task's scope yourself; continue only clearly disjoint work. With none left, end your response \
-with a one-line status, not an answer: that is how you wait, and the task keeps running.\
+task's scope yourself; continue only clearly disjoint work. With none left, call wait, or end \
+your response with a one-line status, not an answer; the task keeps running either way.\
 {holds_checkout}"
             ))
             .with_child_session(returned_session_id);
@@ -2021,7 +2024,25 @@ with a one-line status, not an answer: that is how you wait, and the task keeps 
         };
         let job_id = new_id();
         let notification_id = job_id.clone();
-        let panel = self.clone();
+        // On the panel while it runs, like a task: a job that shows only
+        // when it ends reads as a hang. Registered before the call
+        // returns, as a task's row is, so the job is on the panel and in
+        // `wait`'s view from the moment its start is reported.
+        let running = self.register_running(RunningTask {
+            session_id: parent_session_id.clone(),
+            parent_session_id: String::new(),
+            description: description.clone(),
+            agent: JOB_AGENT.into(),
+            background: true,
+            delivering: false,
+            started: std::time::Instant::now(),
+            // Registry-owned: assigned and maintained by
+            // `register_running` and the guard it hands back.
+            row: 0,
+            waiting: false,
+            quiet: None,
+            heartbeat: None,
+        });
         // Same shape as a background task: a child of the caller's
         // token, so one token stands for "this job should stop" — an
         // interrupted turn takes the job with it, and
@@ -2051,6 +2072,7 @@ with a one-line status, not an answer: that is how you wait, and the task keeps 
             )
             .for_job(notification_id.clone());
             let handle = tokio::spawn(async move {
+                let _running = running;
                 if registered_rx.await.is_err() {
                     // Never admitted; the error was reported synchronously.
                     reserved.disarm();
@@ -2061,23 +2083,6 @@ with a one-line status, not an answer: that is how you wait, and the task keeps 
                     id: task_registry_id,
                     registry: task_registry,
                 };
-                // On the panel while it runs, like a task: a job that
-                // shows only when it ends reads as a hang.
-                let _running = panel.register_running(RunningTask {
-                    session_id: parent_session_id.clone(),
-                    parent_session_id: String::new(),
-                    description: description.clone(),
-                    agent: JOB_AGENT.into(),
-                    background: true,
-                    delivering: false,
-                    started: std::time::Instant::now(),
-                    // Registry-owned: assigned and maintained by
-                    // `register_running` and the guard it hands back.
-                    row: 0,
-                    waiting: false,
-                    quiet: None,
-                    heartbeat: None,
-                });
                 let holder = format!("the background job \"{description}\"");
                 let outcome = tokio::select! {
                     outcome = tokio::time::timeout(timeout, async move {
@@ -2136,7 +2141,7 @@ with a one-line status, not an answer: that is how you wait, and the task keeps 
             let _ = registered_tx.send(());
         }
         ToolOutput::text(format!(
-            "Background job {job_id} started. You will be notified when it completes. Do not poll or sleep; continue other work, or end your response with a one-line status: that is how you wait, and the job keeps running."
+            "Background job {job_id} started. You will be notified when it completes. Do not poll or sleep; continue other work, or call wait, or end your response with a one-line status; the job keeps running either way."
         ))
     }
 
@@ -2358,6 +2363,8 @@ with a one-line status, not an answer: that is how you wait, and the task keeps 
                     // the work; a result arriving does not move it to
                     // another room.
                     withheld: self.withheld.clone(),
+                    // Set by the turn from its steers; this one has none.
+                    steers: None,
                 },
                 // No live channel: this turn is not the parent's to
                 // steer, so a message that arrives while it runs waits
@@ -4022,6 +4029,200 @@ pub struct TasksTool {
     spawner: Arc<SubagentSpawner>,
 }
 
+/// Waits inside the turn for this session's own background work. Models
+/// trained on a harness with a blocking wait (Codex's `wait_agent`) act
+/// out one they are denied: gpt-6-sol wrote sixty "still waiting" lines
+/// and gpt-6-luna reasoned for minutes, 2026-09-23/24. Like Codex's, it
+/// blocks until a task or job of this session finishes, a steer arrives
+/// or the timeout passes, and returns only what happened: the result
+/// itself arrives as a message, through the one delivery path that
+/// already counts each result exactly once.
+pub struct WaitTool {
+    spawner: Arc<SubagentSpawner>,
+}
+
+impl WaitTool {
+    pub fn new(spawner: Arc<SubagentSpawner>) -> Self {
+        Self { spawner }
+    }
+}
+
+/// Codex's bounds: a floor that keeps a wait called in a loop from
+/// spinning, and a ceiling past which a turn held open is forgotten.
+const WAIT_DEFAULT_MS: u64 = 30_000;
+const WAIT_MIN_MS: u64 = 10_000;
+const WAIT_MAX_MS: u64 = 3_600_000;
+/// How long a finished job's result has to be steered into the turn
+/// before the model is told it comes as the next turn instead: the TUI
+/// steers at its next frame, the gateway, exec and serve never do.
+const WAIT_STEER_GRACE: Duration = Duration::from_secs(2);
+/// How often the running rows are looked at; they hold no waker.
+const WAIT_POLL: Duration = Duration::from_millis(250);
+
+fn wait_timeout(requested_ms: Option<u64>) -> Duration {
+    Duration::from_millis(
+        requested_ms
+            .unwrap_or(WAIT_DEFAULT_MS)
+            .clamp(WAIT_MIN_MS, WAIT_MAX_MS),
+    )
+}
+
+/// What of `session_id`'s own detached work is running: its background
+/// tasks, and its bash jobs, which are filed under the session itself.
+fn own_background(spawner: &SubagentSpawner, session_id: &str) -> Vec<RunningTask> {
+    spawner
+        .running_tasks()
+        .into_iter()
+        .filter(|row| {
+            row.background
+                && !row.delivering
+                && (row.parent_session_id == session_id
+                    || (row.agent == JOB_AGENT && row.session_id == session_id))
+        })
+        .collect()
+}
+
+fn named<'a>(rows: impl IntoIterator<Item = &'a RunningTask>) -> String {
+    rows.into_iter()
+        .map(|row| format!("\"{}\"", row.description))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Which of `before` has finished since, named, and a sentence on what
+/// is still running (empty when nothing is).
+fn wait_progress(
+    spawner: &SubagentSpawner,
+    session_id: &str,
+    before: &[RunningTask],
+) -> (Option<String>, String) {
+    let still = own_background(spawner, session_id);
+    let finished: Vec<&RunningTask> = before
+        .iter()
+        .filter(|was| still.iter().all(|row| row.row != was.row))
+        .collect();
+    let finished = (!finished.is_empty()).then(|| named(finished));
+    let running = if still.is_empty() {
+        String::new()
+    } else {
+        format!(" Still running: {}.", named(&still))
+    };
+    (finished, running)
+}
+
+impl Tool for WaitTool {
+    fn name(&self) -> &'static str {
+        "wait"
+    }
+
+    fn description(&self) -> &'static str {
+        "Wait for your background tasks and jobs: returns when one of them \
+         finishes, when a new message arrives, or after timeout_ms \
+         (default 30000, at least 10000). It does not return results — a \
+         finished one arrives as a message, and the answer says whether in \
+         this turn or as your next. With nothing else to do while they run, \
+         call this rather than writing that you are waiting."
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Barrier
+    }
+
+    fn workspace_access(&self) -> WorkspaceAccess {
+        WorkspaceAccess::None
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "timeout_ms": {"type": "integer", "description": "Longest wait (10000 to 3600000)"}
+            }
+        })
+    }
+
+    fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
+        let spawner = self.spawner.clone();
+        Box::pin(async move {
+            let timeout = wait_timeout(input.get("timeout_ms").and_then(serde_json::Value::as_u64));
+            let before = own_background(&spawner, &ctx.session_id);
+            if before.is_empty() {
+                return ToolOutput::text(
+                    "Nothing of yours is running in the background, so there is nothing to \
+                     wait for.",
+                );
+            }
+            let steers = ctx.steers.clone();
+            // Never, for a turn nothing can steer.
+            let steered = || async {
+                match &steers {
+                    Some(signal) => signal.arrived().await,
+                    None => std::future::pending().await,
+                }
+            };
+            const FOLLOWS: &str = "Its result follows as the next message.";
+            let deadline = tokio::time::Instant::now() + timeout;
+            loop {
+                let (finished, running) = wait_progress(&spawner, &ctx.session_id, &before);
+                if let Some(finished) = finished {
+                    // Esc ends the short parts of a wait too.
+                    let follows = steers.is_some()
+                        && tokio::select! {
+                            () = ctx.cancel.cancelled() => {
+                                return ToolOutput::error("wait: cancelled");
+                            }
+                            arrived = tokio::time::timeout(WAIT_STEER_GRACE, steered()) => {
+                                arrived.is_ok()
+                            }
+                        };
+                    let next = if follows {
+                        FOLLOWS
+                    } else {
+                        "Its result arrives as your next turn: end your response now, with a \
+                         one-line status."
+                    };
+                    return ToolOutput::text(format!("Finished: {finished}. {next}{running}"));
+                }
+                tokio::select! {
+                    biased;
+                    () = ctx.cancel.cancelled() => return ToolOutput::error("wait: cancelled"),
+                    () = steered() => {
+                        // A result steered in by the front end is sent
+                        // just before its row goes: looked at again, it
+                        // is the result, not a person.
+                        tokio::select! {
+                            () = ctx.cancel.cancelled() => {
+                                return ToolOutput::error("wait: cancelled");
+                            }
+                            () = tokio::time::sleep(WAIT_POLL) => {}
+                        }
+                        let (finished, running) =
+                            wait_progress(&spawner, &ctx.session_id, &before);
+                        return ToolOutput::text(match finished {
+                            Some(finished) => format!("Finished: {finished}. {FOLLOWS}{running}"),
+                            None => format!(
+                                "Interrupted: a new message arrived, and follows.{running}"
+                            ),
+                        });
+                    }
+                    () = tokio::time::sleep_until(deadline) => {
+                        return ToolOutput::text(format!(
+                            "Timed out after {}s.{running} Call wait again, or end your \
+                             response: results also arrive as a new turn.",
+                            timeout.as_secs()
+                        ));
+                    }
+                    () = tokio::time::sleep(WAIT_POLL) => {}
+                }
+                // A child task that waits is working, not stalled.
+                if let Some(heartbeat) = &ctx.heartbeat {
+                    heartbeat.touch();
+                }
+            }
+        })
+    }
+}
+
 impl TasksTool {
     pub fn new(spawner: Arc<SubagentSpawner>) -> Self {
         Self { spawner }
@@ -4184,6 +4385,14 @@ impl Tool for TasksTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wait_keeps_codexs_bounds() {
+        assert_eq!(wait_timeout(None), Duration::from_secs(30));
+        assert_eq!(wait_timeout(Some(5)), Duration::from_secs(10));
+        assert_eq!(wait_timeout(Some(60_000)), Duration::from_secs(60));
+        assert_eq!(wait_timeout(Some(u64::MAX)), Duration::from_secs(3600));
+    }
 
     fn notification(description: &str) -> Notification {
         Notification {

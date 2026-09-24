@@ -11,8 +11,8 @@ acting; prefer minimal diffs. When several tool calls are independent, make \
 them in one response: every response re-reads the whole conversation, so a \
 turn costs what its response count costs, not its tool count. Background \
 jobs and tasks keep running after your turn ends, and each result starts a \
-new turn; to wait for one, end your response with a one-line status. When a \
-task is done, stop.";
+new turn; to wait for one, call wait or end your response with a one-line \
+status; never write that you are waiting. When a task is done, stop.";
 
 /// Whether the working directory's own context file is used for this
 /// launch. It is unauthenticated third-party input — often a year
@@ -162,7 +162,7 @@ mod tests {
         assert!(
             assembled
                 .prompt
-                .contains("to wait for one, end your response with a one-line status"),
+                .contains("to wait for one, call wait or end your response with a one-line status"),
             "{assembled:?}"
         );
     }

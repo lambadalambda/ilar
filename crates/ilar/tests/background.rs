@@ -1270,11 +1270,7 @@ async fn background_bash_returns_job_id_and_notifies_once() {
         "{}",
         output.content
     );
-    assert!(
-        output.content.contains("that is how you wait"),
-        "{}",
-        output.content
-    );
+    assert!(output.content.contains("call wait"), "{}", output.content);
     let job_id = output
         .content
         .split_whitespace()
@@ -2035,7 +2031,9 @@ async fn background_task_returns_immediately_and_notifies_once() {
         "{launch}"
     );
     assert!(launch.contains("Do not sleep, poll, or check"), "{launch}");
-    // Ending the turn is how a model waits, but not with an early answer.
+    // A model waits with the wait tool, or by ending its turn — but not
+    // with an early answer.
+    assert!(launch.contains("call wait"), "{launch}");
     assert!(
         launch.contains("end your response with a one-line status, not an answer"),
         "{launch}"
@@ -2617,6 +2615,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 heartbeat: None,
                 secrets: None,
                 withheld: std::sync::Arc::from(Vec::new()),
+                steers: None,
             },
         )
         .await;
@@ -4730,5 +4729,165 @@ async fn a_message_refused_by_the_concurrency_limit_waits_for_the_next_resume() 
         .await;
     assert!(!listing.content.contains("pending"), "{}", listing.content);
 
+    spawner.shutdown().await;
+}
+
+/// One call through the executor, as a turn would make it.
+async fn call_tool(
+    registry: &ToolRegistry,
+    ctx: ToolContext,
+    name: &str,
+    input: serde_json::Value,
+) -> ilar::tools::ToolOutput {
+    ilar::tools::executor::execute_calls(
+        vec![ilar::tools::executor::ToolCall {
+            id: format!("{name}-call"),
+            name: name.into(),
+            input,
+        }],
+        |name| registry.get(name),
+        ctx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .remove(0)
+    .output
+}
+
+/// With nothing of its own running, `wait` does not wait: a model that
+/// calls it by habit hears so at once rather than sitting out a timeout.
+#[tokio::test]
+async fn wait_with_nothing_running_answers_at_once() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref());
+
+    let started = std::time::Instant::now();
+    let out = call_tool(&registry, ctx, "wait", serde_json::json!({})).await;
+    assert!(!out.is_error, "{}", out.content);
+    assert!(
+        out.content.contains("nothing to wait for"),
+        "{}",
+        out.content
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    spawner.shutdown().await;
+}
+
+/// A job ends and nothing steers its result into this turn — the
+/// gateway, exec and serve deliver it as the next turn — so the model is
+/// told to end its response. `wait` never carries the result itself.
+#[tokio::test]
+async fn wait_returns_when_a_job_ends_and_says_where_its_result_goes() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let _notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref());
+
+    let started = call_tool(
+        &registry,
+        ctx.clone(),
+        "bash",
+        // The output, "wait-marker", is not spelled in the command: the
+        // job's name quotes the command, the result never shows.
+        serde_json::json!({"command": "sleep 0.3; printf %s%s wait -marker", "run_in_background": true}),
+    )
+    .await;
+    assert!(!started.is_error, "{}", started.content);
+    let out = tokio::time::timeout(
+        Duration::from_secs(10),
+        call_tool(&registry, ctx, "wait", serde_json::json!({})),
+    )
+    .await
+    .expect("wait returned when the job ended");
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.starts_with("Finished:"), "{}", out.content);
+    assert!(out.content.contains("end your response"), "{}", out.content);
+    assert!(!out.content.contains("wait-marker"), "{}", out.content);
+    spawner.shutdown().await;
+}
+
+/// The TUI steers a result into the running turn: `wait` says it
+/// follows, and the loop appends it at the next step.
+#[tokio::test]
+async fn wait_says_a_steered_result_follows() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let mut ctx =
+        background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref());
+    let (steer, steers) = ilar::agent::steer_channel();
+    ctx.steers = Some(steers.signal());
+    // The front end's part: a completion for the running turn is
+    // steered into it.
+    tokio::spawn(async move {
+        if let Some(notification) = notifications.recv().await {
+            let _ = steer.send(notification.text.into());
+        }
+    });
+
+    call_tool(
+        &registry,
+        ctx.clone(),
+        "bash",
+        serde_json::json!({"command": "sleep 0.3", "run_in_background": true}),
+    )
+    .await;
+    let out = tokio::time::timeout(
+        Duration::from_secs(10),
+        call_tool(&registry, ctx, "wait", serde_json::json!({})),
+    )
+    .await
+    .expect("wait returned");
+    assert!(out.content.starts_with("Finished:"), "{}", out.content);
+    assert!(out.content.contains("follows"), "{}", out.content);
+    drop(steers);
+    spawner.shutdown().await;
+}
+
+/// A person typing into the turn ends the wait at once: a turn held
+/// open must never make them wait out a timeout to be heard.
+#[tokio::test]
+async fn a_message_interrupts_a_wait() {
+    let (store, session_id) = temp_store();
+    let spawner = patient_spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let _notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap();
+    let mut ctx =
+        background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref());
+    let (steer, steers) = ilar::agent::steer_channel();
+    ctx.steers = Some(steers.signal());
+
+    call_tool(
+        &registry,
+        ctx.clone(),
+        "bash",
+        serde_json::json!({"command": "sleep 30", "run_in_background": true}),
+    )
+    .await;
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _ = steer.send("are you there?".into());
+    });
+    let out = tokio::time::timeout(
+        Duration::from_secs(5),
+        call_tool(&registry, ctx, "wait", serde_json::json!({})),
+    )
+    .await
+    .expect("the message ended the wait");
+    assert!(out.content.contains("new message"), "{}", out.content);
+    assert!(out.content.contains("Still running"), "{}", out.content);
+    drop(steers);
     spawner.shutdown().await;
 }

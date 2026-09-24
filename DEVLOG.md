@@ -1,5 +1,39 @@
 # DEVLOG
 
+## 2026-09-24 — A wait tool, shaped like Codex's
+
+Codex-trained models cannot wait by ending their turn. After starting a
+background review, gpt-6-sol wrote sixty "still waiting" lines over two
+minutes (1,900 output tokens) and stopped five seconds before the
+result came. gpt-6-luna reasoned "waiting for notification" for 2.5
+minutes until it was aborted. Codex gives them `wait_agent`, and its
+second version blocks on the mailbox, ends early when the user types,
+times out after 30 s (at least 10 s, at most an hour), and returns only
+what happened. The result itself arrives as a message.
+
+ilar's `wait` does the same. It blocks until one of the session's own
+background tasks or jobs finishes (its running row goes), a steer
+arrives, or the timeout passes. It never carries the result, so
+exactly-once delivery stays with the log. When a job finishes, `wait`
+gives the front end two seconds to steer its result into the turn (the
+TUI does). If nothing comes, the model is told the result arrives as
+its next turn (gateway, exec, serve). A steer arriving on its own is
+checked against the rows once more, because a result is sent just
+before its row goes.
+
+The steer channel became a pair of wrappers that count what was sent
+and taken; that count is what wakes a waiting tool. A job's running row
+is now registered before `bash` returns, as a task's always was, so
+the job is visible from the moment its start is reported. A
+background `bash` must be the only call in its response, so a model
+cannot put `wait` in the same response. The move mainly helps tests
+that call `wait` straight after `bash`.
+
+Esc during a `wait` cancels the turn, and with it the background work
+that turn started, as it always has. Ending the turn used to leave
+nothing for Esc to reach. Now a person pressing Esc to get the prompt
+back also stops a running build.
+
 ## 2026-09-23 — Each turn says when it finished
 
 After each turn the transcript has a muted footer, as Claude Code

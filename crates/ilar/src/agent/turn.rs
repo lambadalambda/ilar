@@ -2,6 +2,8 @@
 //! stops calling tools. Pure state machine — persists via the session
 //! store, publishes to the event channel, never touches a UI.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -117,13 +119,95 @@ impl From<&str> for Steer {
 /// response is cut as a runaway.
 pub const MAX_TOOL_INPUT_BYTES: u64 = 1024 * 1024;
 
-/// Unbounded on purpose: a steer that blocks the UI thread would defeat
-/// the point, and the volume is bounded by how fast a person types.
-pub type SteerSender = tokio::sync::mpsc::UnboundedSender<Steer>;
-pub type SteerReceiver = tokio::sync::mpsc::UnboundedReceiver<Steer>;
+/// Where messages for a running turn go.
+#[derive(Clone, Debug)]
+pub struct SteerSender {
+    /// Unbounded on purpose: a steer that blocks the UI thread would
+    /// defeat the point, and the volume is bounded by how fast a person
+    /// types.
+    tx: tokio::sync::mpsc::UnboundedSender<Steer>,
+    signal: Arc<SteerSignal>,
+}
+
+#[derive(Debug)]
+pub struct SteerReceiver {
+    rx: tokio::sync::mpsc::UnboundedReceiver<Steer>,
+    signal: Arc<SteerSignal>,
+}
+
+/// What a tool blocked inside the turn can know of its steers: whether
+/// one is waiting to be read. It is how a `wait` ends early when a person
+/// types, or when a front end steers a result in.
+#[derive(Debug, Default)]
+pub struct SteerSignal {
+    sent: std::sync::atomic::AtomicU64,
+    taken: std::sync::atomic::AtomicU64,
+    arrived: tokio::sync::Notify,
+}
+
+impl SteerSignal {
+    /// Whether a steer has been sent that the turn has not read yet.
+    pub fn pending(&self) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        self.sent.load(Acquire) > self.taken.load(Acquire)
+    }
+
+    /// Until [`Self::pending`].
+    pub async fn arrived(&self) {
+        loop {
+            let arrived = self.arrived.notified();
+            tokio::pin!(arrived);
+            arrived.as_mut().enable();
+            if self.pending() {
+                return;
+            }
+            arrived.await;
+        }
+    }
+}
+
+impl SteerSender {
+    pub fn send(&self, steer: Steer) -> Result<(), tokio::sync::mpsc::error::SendError<Steer>> {
+        self.tx.send(steer)?;
+        // Counted once it is in the channel: a failed send must not
+        // leave a steer pending that nobody can ever read.
+        self.signal
+            .sent
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.signal.arrived.notify_waiters();
+        Ok(())
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+}
+
+impl SteerReceiver {
+    pub fn try_recv(&mut self) -> Result<Steer, tokio::sync::mpsc::error::TryRecvError> {
+        let steer = self.rx.try_recv()?;
+        self.signal
+            .taken
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(steer)
+    }
+
+    /// The signal a tool in this turn waits on.
+    pub fn signal(&self) -> Arc<SteerSignal> {
+        self.signal.clone()
+    }
+}
 
 pub fn steer_channel() -> (SteerSender, SteerReceiver) {
-    tokio::sync::mpsc::unbounded_channel()
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let signal = Arc::new(SteerSignal::default());
+    (
+        SteerSender {
+            tx,
+            signal: signal.clone(),
+        },
+        SteerReceiver { rx, signal },
+    )
 }
 
 /// The session's most recent compaction, if it has ever been compacted.
@@ -1735,6 +1819,7 @@ async fn run_turn_steps(
     // parent's) is the one loaded here.
     tool_ctx.vision = crate::model::supports_vision(&model);
     tool_ctx.output_tail = Some(events.output_tail_sink());
+    tool_ctx.steers = steer.as_ref().map(SteerReceiver::signal);
 
     let mut iterations = 0;
     let mut mid_stream_resumes = 0;
