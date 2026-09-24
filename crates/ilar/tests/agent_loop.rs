@@ -1431,8 +1431,12 @@ async fn failed_tool_chain_resumes_without_replaying_prompt_or_tool() {
     assert!(format!("{resumed_messages:?}").contains("echo: once"));
 }
 
+/// A call id is a label the model writes, not a promise: Kimi numbers
+/// its calls per response, so a later response's "echo-1" is a new call.
+/// It runs, under an id of its own, because the log pairs results with
+/// calls by id — even one a compaction took out of the active window.
 #[tokio::test]
-async fn resumed_provider_cannot_replay_a_completed_tool_call_id() {
+async fn a_resumed_response_reusing_a_completed_call_id_runs_under_a_fresh_one() {
     let (store, session_id) = temp_session("build");
     let calls = Arc::new(Mutex::new(Vec::new()));
     let registry = registry_with(EchoTool {
@@ -1461,6 +1465,13 @@ async fn resumed_provider_cannot_replay_a_completed_tool_call_id() {
             tool_call_event("echo-1", "twice"),
             ProviderEvent::TurnComplete {
                 stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        vec![
+            ProviderEvent::TextDelta("done".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
                 usage: Default::default(),
             },
         ],
@@ -1498,7 +1509,7 @@ async fn resumed_provider_cannot_replay_a_completed_tool_call_id() {
         .unwrap();
     drop(session);
 
-    let error = resume_turn(
+    let outcome = resume_turn(
         &provider,
         &registry,
         &store,
@@ -1511,14 +1522,113 @@ async fn resumed_provider_cannot_replay_a_completed_tool_call_id() {
         None,
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert!(error.to_string().contains("duplicate tool call id"));
+    assert_eq!(outcome, TurnOutcome::Completed);
     let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0]["msg"], "once");
+    let said: Vec<_> = calls.iter().map(|call| call["msg"].clone()).collect();
+    assert_eq!(said, ["once", "twice"]);
     drop(calls);
-    store.load(&session_id).expect("session remains valid");
+    // "echo-1" is behind the compaction; its id was still taken.
+    let session = store.load(&session_id).expect("session remains valid");
+    let ids = call_ids(&session);
+    assert_eq!(ids.len(), 1, "{ids:?}");
+    assert!(ids[0].starts_with("echo-1-r"), "{ids:?}");
+}
+
+/// Every tool call id in the log, in order.
+fn call_ids(session: &ilar::session::SessionReader) -> Vec<String> {
+    session
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::AssistantMessage { content, .. } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|block| match block {
+            ContentBlock::ToolCall { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Kimi through OpenCode, 2026-09-24: `read_0 grep_1 grep_2`, then the
+/// next response's `grep_0 grep_1`. The second grep_1 ended the turn
+/// with "duplicate tool call id"; it is a new call and runs as one.
+#[tokio::test]
+async fn call_ids_numbered_per_response_do_not_end_the_turn() {
+    let (store, session_id) = temp_session("build");
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = registry_with(EchoTool {
+        calls: calls.clone(),
+    });
+    let step = |ids: &[&str]| {
+        let mut events = Vec::new();
+        for id in ids {
+            events.push(ProviderEvent::ToolCallStarted {
+                id: (*id).into(),
+                name: "echo".into(),
+                item_id: None,
+            });
+            events.push(ProviderEvent::ToolCallInputDelta {
+                id: (*id).into(),
+                delta: String::new(),
+            });
+            events.push(tool_call_event(id, id));
+        }
+        events.push(ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Default::default(),
+        });
+        events
+    };
+    let provider = MockProvider::new(vec![
+        step(&["echo_0", "echo_1"]),
+        step(&["echo_0", "echo_1"]),
+        vec![
+            ProviderEvent::TextDelta("done".into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+    ]);
+
+    let outcome = run_turn(
+        &provider,
+        &registry,
+        &store,
+        &session_id,
+        "search",
+        &[],
+        None,
+        LoopConfig::default(),
+        events_channel().0,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(calls.lock().unwrap().len(), 4);
+    let session = store.load(&session_id).unwrap();
+    let ids = call_ids(&session);
+    assert_eq!(ids[..2], ["echo_0", "echo_1"], "{ids:?}");
+    assert!(ids[2].starts_with("echo_0-r"), "{ids:?}");
+    assert!(ids[3].starts_with("echo_1-r"), "{ids:?}");
+    // Each result answers its call under the id it was logged with.
+    let answered: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answered, ids);
 }
 
 #[tokio::test]

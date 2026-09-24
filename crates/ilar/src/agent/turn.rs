@@ -138,6 +138,23 @@ fn last_compaction(session: &crate::session::Session) -> Option<&str> {
     })
 }
 
+/// The id a new call is logged under: the model's own, or — when the
+/// session already has it — `{id}-r` and a random suffix. Random, not
+/// counted: a count probes the log once per earlier use of the id, and
+/// a long session reuses `read_0` hundreds of times. Letters, digits,
+/// `-` and `_` only, which every wire's id pattern takes.
+fn free_call_id(
+    id: &str,
+    seen: &std::collections::HashSet<String>,
+    session: &crate::session::Session,
+) -> std::io::Result<String> {
+    let mut candidate = id.to_string();
+    while seen.contains(&candidate) || session.contains_tool_call_id(&candidate)? {
+        candidate = format!("{id}-r{}", &new_id().replace('-', "")[..8]);
+    }
+    Ok(candidate)
+}
+
 /// Take everything pending without waiting.
 fn drain_steers(steer: Option<&mut SteerReceiver>) -> Vec<Steer> {
     let mut pending = Vec::new();
@@ -1721,9 +1738,9 @@ async fn run_turn_steps(
 
     let mut iterations = 0;
     let mut mid_stream_resumes = 0;
-    // Provider-generated call ids are globally unique in a session. Keeping
-    // the completed ids reserved prevents a resumed model response from
-    // replaying an already-applied side effect (and keeps JSONL valid).
+    // Every call id the session has used: the log pairs results with
+    // calls by id, so each is logged once, and a model that numbers its
+    // calls per response (Kimi) has a reused one logged under a fresh id.
     let mut seen_tool_call_ids: std::collections::HashSet<String> = session
         .events()
         .iter()
@@ -1864,6 +1881,12 @@ async fn run_turn_steps(
             // A rate limit, with the server's own wait when it named one.
             let mut rate_limited: Option<Option<std::time::Duration>> = None;
             let mut received_response = false;
+            // This response's own call ids, and the ones logged under a
+            // fresh id because an earlier step had used them.
+            let mut response_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut renamed: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
 
             loop {
                 let next = tokio::select! {
@@ -1882,6 +1905,22 @@ async fn run_turn_steps(
                 ) {
                     received_response = true;
                 }
+                let event = match event {
+                    ProviderEvent::ToolCallInputDelta { id, delta } => {
+                        ProviderEvent::ToolCallInputDelta {
+                            id: renamed.get(&id).cloned().unwrap_or(id),
+                            delta,
+                        }
+                    }
+                    ProviderEvent::ToolCallCompleted { id, name, input } => {
+                        ProviderEvent::ToolCallCompleted {
+                            id: renamed.get(&id).cloned().unwrap_or(id),
+                            name,
+                            input,
+                        }
+                    }
+                    other => other,
+                };
                 match event {
                     ProviderEvent::TextDelta(t) => {
                         live.text(&t);
@@ -1926,34 +1965,35 @@ async fn run_turn_steps(
                         acc.push_reasoning(item);
                     }
                     ProviderEvent::ToolCallStarted { id, name, item_id } => {
-                        // The duplicate check reads the log, and a read
-                        // that fails is a failure of *this step*, not of
-                        // the process: raised with `?` it skipped
-                        // `persist_failed_step`, so the text the user had
-                        // already watched stream was never written, the
-                        // announced tools never closed, and no `TurnDone`
-                        // was published. Every sibling failure goes
-                        // through `errored`; so does this one.
-                        let duplicate = if seen_tool_call_ids.contains(&id) {
-                            Ok(true)
-                        } else {
-                            session.contains_tool_call_id(&id)
-                        };
-                        match duplicate {
-                            Ok(true) => {
-                                errored = Some(format!(
-                                    "duplicate tool call id {id:?} already exists in this session"
-                                ));
-                                break;
+                        // Twice in one response, the stream is ambiguous
+                        // about which call a delta belongs to.
+                        if !response_ids.insert(id.clone()) {
+                            errored =
+                                Some(format!("duplicate tool call id {id:?} in one response"));
+                            break;
+                        }
+                        // The check reads the log, and a read that fails
+                        // is a failure of *this step*, not of the process:
+                        // raised with `?` it skipped `persist_failed_step`,
+                        // so the text the user had already watched stream
+                        // was never written, the announced tools never
+                        // closed, and no `TurnDone` was published. Every
+                        // sibling failure goes through `errored`; so does
+                        // this one.
+                        let id = match free_call_id(&id, &seen_tool_call_ids, session) {
+                            Ok(free) => {
+                                if free != id {
+                                    renamed.insert(id, free.clone());
+                                }
+                                free
                             }
-                            Ok(false) => {}
                             Err(error) => {
                                 errored = Some(format!(
                                     "could not check tool call id {id:?} against the session: {error:#}"
                                 ));
                                 break;
                             }
-                        }
+                        };
                         if let Err(error) = acc.start_tool_call(id.clone(), name.clone(), item_id) {
                             errored = Some(error);
                             break;
