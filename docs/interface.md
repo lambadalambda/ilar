@@ -168,13 +168,12 @@ or a line of 60 characters or more goes to the stash instead, because
 Esc has no undo. A history entry recalled and left as it was is not
 stashed: it is in the history already.
 
-One thing does follow the turn down: the detached tasks *that turn*
-started, whose cancellation rides on the turn's own. Aborting therefore
-pauses notification delivery the way cancel-all does — the dying
-children's results are held, not delivered, so the abort does not
-immediately start a follow-up turn nobody asked for. They go out with
-your next message, and tasks from an earlier turn keep running
-untouched.
+Detached tasks and jobs do not follow the turn down. They belong to the
+session, so a build the model was waiting on keeps building. Stop them
+with cancel-all in the pending manager. Aborting does pause notification
+delivery, the way cancel-all does: results that arrive afterwards are
+held, so the abort does not start a follow-up turn nobody asked for. They
+go out with your next message.
 
 The palette (**Ctrl-P**) opens during a turn as well: the pending
 manager, help, the link picker, an export and the usage line all work

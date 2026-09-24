@@ -731,6 +731,10 @@ pub struct ToolContext {
     /// steered in — is waiting for this turn to read it. `None` for a
     /// turn nothing can steer.
     pub steers: Option<Arc<crate::agent::SteerSignal>>,
+    /// What this call's background work is stopped by, beyond cancel-all
+    /// and shutdown: the running task's token inside one, `None` in a
+    /// root session, whose work outlives the turn that started it.
+    pub detached_owner: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// What a call naming a withheld path is told. One sentence, and not
@@ -910,6 +914,7 @@ impl ToolContext {
             secrets: None,
             withheld: Arc::from(Vec::new()),
             steers: None,
+            detached_owner: None,
         })
     }
 

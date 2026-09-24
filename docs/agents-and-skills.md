@@ -69,12 +69,12 @@ running or waiting to be delivered runs in
 the foreground instead of failing, and its result says so; an explicit
 `background: true` there is still an error.
 
-"Free to keep working" lasts as long as the turn does: a detached task's
-cancellation is a child of the turn that spawned it, so aborting that turn
-(Esc, or cancel-all in the pending manager) stops its detached tasks too. The
-abort pauses notification delivery, so their `was cancelled` results are held
-until the next message instead of starting a turn on the spot. Tasks spawned by
-an earlier turn are not affected.
+A detached task belongs to the session, not to the turn that spawned it.
+Aborting the turn (Esc) leaves it running. This matters most while the model
+is in `wait`. Cancel-all in the pending manager stops every detached task, and
+stopping a task stops the jobs and tasks it started. An abort pauses
+notification delivery, so results that arrive after it are held until the next
+message and do not start a turn on the spot.
 
 Workspace rule, one sentence: mutable work runs in worktrees and never
 collides; read-only work runs in place, sees everything (uncommitted changes

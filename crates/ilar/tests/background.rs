@@ -1408,8 +1408,11 @@ async fn background_tool_must_be_the_only_call_in_a_step() {
     );
 }
 
+/// Background work belongs to the session, not to the turn that started
+/// it: Esc on a turn held open by `wait` must not stop the build it waits
+/// for. Cancel-all and the task's own cancel still stop it.
 #[tokio::test]
-async fn root_cancellation_stops_background_bash() {
+async fn background_bash_outlives_the_root_turn() {
     let (store, session_id) = temp_store();
     let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
     let mut notifications = spawner.subscribe();
@@ -1433,14 +1436,22 @@ async fn root_cancellation_stops_background_bash() {
         )
         .await;
     root_cancel.cancel();
-    let notification = notifications.recv().await.unwrap();
-    assert!(notification.text.contains("cancelled"));
-    tokio::time::sleep(Duration::from_millis(1100)).await;
-    assert!(!marker.exists());
+    let notification = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("the job reported")
+        .unwrap();
+    assert!(
+        notification.text.contains("completed"),
+        "{}",
+        notification.text
+    );
+    assert!(marker.exists());
 }
 
+/// A nested task outlives the root turn as its parent does, and
+/// cancel-all still reaches it after that parent has finished.
 #[tokio::test]
-async fn root_cancellation_reaches_nested_background_task_after_parent_finishes() {
+async fn cancel_all_reaches_a_nested_task_the_root_turn_does_not() {
     let (_repo, root, worktree) = repository_with_worktree();
     let (store, session_id) = temp_store();
     let provider = NestedBackgroundProvider {
@@ -1481,9 +1492,16 @@ async fn root_cancellation_reaches_nested_background_task_after_parent_finishes(
     assert!(!parent_finished.is_error, "{}", parent_finished.text);
 
     root_cancel.cancel();
-    let nested_cancelled = tokio::time::timeout(Duration::from_millis(200), notifications.recv())
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), notifications.recv())
+            .await
+            .is_err(),
+        "the root turn's end reached the nested task"
+    );
+    spawner.abort_all();
+    let nested_cancelled = tokio::time::timeout(Duration::from_secs(2), notifications.recv())
         .await
-        .expect("nested task should inherit root cancellation")
+        .expect("cancel-all reaches the nested task")
         .expect("nested cancellation notification should be present");
     assert!(nested_cancelled.is_error, "{}", nested_cancelled.text);
     assert_eq!(nested_cancelled.description, "nested pending");
@@ -2616,6 +2634,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 secrets: None,
                 withheld: std::sync::Arc::from(Vec::new()),
                 steers: None,
+                detached_owner: None,
             },
         )
         .await;

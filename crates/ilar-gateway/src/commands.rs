@@ -382,7 +382,7 @@ pub const MENU: &[(&str, &str)] = &[
 
 pub const HELP: &str = "/new — start a fresh chat (memory stays); a turn running here is cancelled\n\
 /model — list the models; /model <provider/model> switches; add --save to make it the default for new chats\n\
-/abort (or /stop) — cancel the turn running now; messages that were waiting run after it\n\
+/abort (or /stop) — cancel the turn running now and any background work; messages that were waiting run after it\n\
 /grant [session|always], /deny — answer a tool's ask for a stored secret or for root\n\
 /password <pw> — the sudo password, when sudo asks for one after a yes; the message is deleted afterwards\n\
 /unlock <master password> — open a sealed secret store for this gateway process; the password is taken back out of the chat where the channel allows it\n\

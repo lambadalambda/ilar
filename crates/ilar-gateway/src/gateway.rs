@@ -1328,13 +1328,19 @@ impl Gateway {
                 };
                 format!("{verdict} {}", password_advice(taken_back))
             }
-            Command::Abort => match self.driver.seat_by_key(key) {
-                Some(seat) if self.driver.abort(&seat) => {
-                    log(&format!("{key}: turn aborted from the chat"));
-                    "Aborting the running turn.".to_string()
+            Command::Abort => {
+                let (turn, background) = self
+                    .driver
+                    .seat_by_key(key)
+                    .map(|seat| self.driver.abort(&seat))
+                    .unwrap_or_default();
+                if turn || background > 0 {
+                    log(&format!(
+                        "{key}: aborted from the chat (turn: {turn}, background: {background})"
+                    ));
                 }
-                _ => "Nothing is running.".to_string(),
-            },
+                abort_reply(turn, background)
+            }
             Command::New => match self.driver.close(key).await {
                 // A room has no memory to keep, so it is not promised one.
                 Ok(()) if message.is_group => {
@@ -2118,9 +2124,32 @@ pub fn attachments(media: &[PathBuf]) -> (Vec<ImageContent>, String) {
     (images, notes)
 }
 
+/// What `/abort` says it stopped: the turn, the background work, both,
+/// or nothing — never "nothing" when it stopped a build.
+fn abort_reply(turn: bool, background: usize) -> String {
+    let work = ilar::text::plural(background, "background task");
+    match (turn, background) {
+        (false, 0) => "Nothing is running.".to_string(),
+        (true, 0) => "Aborting the running turn.".to_string(),
+        (false, _) => format!("Stopping {work}."),
+        (true, _) => format!("Aborting the running turn and stopping {work}."),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abort_says_what_it_stopped() {
+        assert_eq!(abort_reply(false, 0), "Nothing is running.");
+        assert_eq!(abort_reply(true, 0), "Aborting the running turn.");
+        assert_eq!(abort_reply(false, 1), "Stopping 1 background task.");
+        assert_eq!(
+            abort_reply(true, 2),
+            "Aborting the running turn and stopping 2 background tasks."
+        );
+    }
 
     /// A provider failure reads as what happened and what to do, with
     /// the raw cause under it for the operator.

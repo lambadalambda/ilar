@@ -622,9 +622,15 @@ impl Driver {
         outcome
     }
 
-    /// Cancel the turn running on the seat; `false` when none is.
-    pub fn abort(&self, seat: &Seat) -> bool {
-        match seat.turn_cancel.lock().unwrap().as_ref() {
+    /// Cancel the turn running on the seat, and the background work the
+    /// seat started: whether a turn was running, and how many tasks and
+    /// jobs were. Background work outlives a turn, but `/abort` is the
+    /// chat's one way to stop it: a dev server left running holds the
+    /// checkout's write lease for the length of its timeout.
+    pub fn abort(&self, seat: &Seat) -> (bool, usize) {
+        let background = seat.runtime.spawner.running_background();
+        seat.runtime.spawner.abort_all();
+        let turn = match seat.turn_cancel.lock().unwrap().as_ref() {
             Some(cancel) => {
                 seat.aborted_from_chat
                     .store(true, std::sync::atomic::Ordering::Release);
@@ -632,7 +638,8 @@ impl Driver {
                 true
             }
             None => false,
-        }
+        };
+        (turn, background)
     }
 
     /// What the seat is doing, for `/status`.

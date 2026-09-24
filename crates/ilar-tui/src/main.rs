@@ -3178,31 +3178,29 @@ fn unknown_subtask_agent(agent: &str, available: &[&str]) -> Option<String> {
     ))
 }
 
-/// What Esc says when it aborts a turn. A detached task's cancellation
-/// token is a child of the turn's, so aborting the turn stops the tasks
-/// that turn started; their results are held rather than delivered,
-/// because the abort pauses notifications the way cancel-all does.
-/// `detached` is the count of background tasks running at all — a
-/// superset of the ones this turn owns — so the notice never names a
-/// number, only the rule.
+/// What Esc says when it aborts a turn. Detached tasks and jobs belong
+/// to the session, not the turn, so they keep running; their results are
+/// held rather than delivered, because the abort pauses notifications
+/// the way cancel-all does. `detached` is the count of background tasks
+/// running at all, so the notice never names a number, only the rule.
 fn abort_notice(detached: usize) -> String {
     format!("aborting current operation…{}", detached_clause(detached))
 }
 
-/// What an abort of the turn owes the detached tasks it started, said
+/// What an abort of the turn says of the detached work running, said
 /// the same way whoever aborted — Esc or the stall watchdog.
 fn detached_clause(detached: usize) -> &'static str {
     if detached == 0 {
         ""
     } else {
-        " — detached tasks this turn started stop with it; their results are held until \
-         your next message"
+        " — background tasks keep running; their results are held until your next \
+         message (cancel-all stops them)"
     }
 }
 
 /// Every abort of a turn pauses notifications when something is
-/// detached: the dying children's completions would otherwise start a
-/// fresh turn nobody asked for, moments after the turn was stopped.
+/// detached: its completions would otherwise start a fresh turn nobody
+/// asked for, right after the person stopped one.
 /// Only then, though — a pause with nothing to hold is an unexplained
 /// one, and it would sit on every other session's mail until the next
 /// completed turn. Returns the count, for the notice.
@@ -3700,8 +3698,8 @@ async fn run_app(
             }
             decide::StallVerdict::Abort { silent_secs } => {
                 if let Some(cancel) = &cancel {
-                    // The same token Esc cancels, so the same detached
-                    // tasks die with it and are owed the same pause.
+                    // The same token Esc cancels: the detached tasks
+                    // live on, and are owed the same pause.
                     let detached = pause_for_detached(app, &mut notifications_paused);
                     let message = format!(
                         "nothing from the provider for {silent_secs}s — the turn was stopped{}",
@@ -6135,9 +6133,9 @@ mod tests {
         assert!(!refusal.contains("subagent_type"), "{refusal}");
     }
 
-    /// Aborting a turn stops the detached tasks that turn started —
-    /// their token is a child of its token — so the notice says so
-    /// instead of letting the panel's `bg` rows vanish wordlessly.
+    /// Aborting a turn leaves its background tasks running — they belong
+    /// to the session — and holds their results, so the notice says both:
+    /// a person pressing Esc should not wonder whether the build died.
     /// With nothing detached there is nothing extra to say.
     #[test]
     fn aborting_a_turn_says_what_happens_to_its_detached_tasks() {
@@ -6147,7 +6145,7 @@ mod tests {
             with_tasks.starts_with("aborting current operation…"),
             "{with_tasks}"
         );
-        assert!(with_tasks.contains("detached task"), "{with_tasks}");
+        assert!(with_tasks.contains("keep running"), "{with_tasks}");
         assert!(with_tasks.contains("held"), "{with_tasks}");
     }
 

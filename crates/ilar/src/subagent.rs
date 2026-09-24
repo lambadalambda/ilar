@@ -1428,6 +1428,9 @@ impl SubagentSpawner {
             heartbeat: ctx.heartbeat.clone(),
             // The child's turn sets its own from the steers it takes.
             steers: None,
+            // A foreground child works for its caller's owner; the
+            // background branch below makes the task its own.
+            detached_owner: ctx.detached_owner.clone(),
         };
 
         if background {
@@ -1438,12 +1441,12 @@ impl SubagentSpawner {
             let description = input.description.clone();
             let parent_session_id = ctx.session_id.clone();
             let stall_timeout = self.stall_timeout;
-            // A child of the turn's token, so one token stands for "this
-            // task should stop": the parent turn ending cancels it, and
+            // A child of the owner's token, so one token stands for "this
+            // task should stop": its owner stopping cancels it, and
             // `abort_all`/`shutdown` can still cancel it alone.
-            let background_cancel = ctx.cancel.child_token();
+            let root_cancel = detached_owner(ctx);
+            let background_cancel = root_cancel.child_token();
             let task_cancel = background_cancel.clone();
-            let root_cancel = ctx.cancel.clone();
             let workspace = child_workspace.clone();
             let parent_location = ctx.location.clone();
             let leased_location = child_location.clone();
@@ -1560,6 +1563,7 @@ impl SubagentSpawner {
                 // rather than one of them naming a token that outlives
                 // the task.
                 child_ctx.cancel = cancel.clone();
+                child_ctx.detached_owner = Some(cancel.clone());
                 let (tx, mut rx_evt) = loop_event_channel(LOOP_EVENT_CAPACITY);
                 // Activity tracker: any event of this task's turn counts
                 // as progress, and so does any event of a foreground
@@ -2043,9 +2047,9 @@ your response with a one-line status, not an answer; the task keeps running eith
             quiet: None,
             heartbeat: None,
         });
-        // Same shape as a background task: a child of the caller's
-        // token, so one token stands for "this job should stop" — an
-        // interrupted turn takes the job with it, and
+        // Same shape as a background task: a child of its owner's token
+        // (`detached_owner`), so one token stands for "this job should
+        // stop" — a stopped task takes its jobs with it, and
         // `abort_all`/`shutdown` can still cancel it alone.
         let background_cancel = root_cancel.child_token();
         let task_cancel = background_cancel.clone();
@@ -2365,6 +2369,8 @@ your response with a one-line status, not an answer; the task keeps running eith
                     withheld: self.withheld.clone(),
                     // Set by the turn from its steers; this one has none.
                     steers: None,
+                    // What this delivery starts stops with it.
+                    detached_owner: Some(cancel.clone()),
                 },
                 // No live channel: this turn is not the parent's to
                 // steer, so a message that arrives while it runs waits
@@ -4065,6 +4071,18 @@ fn wait_timeout(requested_ms: Option<u64>) -> Duration {
             .unwrap_or(WAIT_DEFAULT_MS)
             .clamp(WAIT_MIN_MS, WAIT_MAX_MS),
     )
+}
+
+/// The token a call's detached work hangs from. Background work belongs
+/// to its session, not to the turn that started it: a root session's
+/// turn token lives for one turn — Esc on a turn held open by `wait`
+/// stopped the very build it waited for — so its work gets a token of
+/// its own, stopped by cancel-all, its own cancel or shutdown. Inside a
+/// background task or a delivery, the context names that task's token,
+/// and a task stopped stops what it started; a foreground child names
+/// its caller's.
+pub(crate) fn detached_owner(ctx: &ToolContext) -> tokio_util::sync::CancellationToken {
+    ctx.detached_owner.clone().unwrap_or_default()
 }
 
 /// What of `session_id`'s own detached work is running: its background

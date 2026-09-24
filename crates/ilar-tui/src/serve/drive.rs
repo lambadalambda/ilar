@@ -438,8 +438,13 @@ impl Drive {
         Ok(Fate::Started)
     }
 
-    /// Cancel the turn this process is running on that session.
+    /// Cancel the turn this process is running on that session, and the
+    /// session's background work: a stop from the page is the only one it
+    /// has, and that work outlives a turn.
     pub(crate) fn abort(&self, id: &str) -> Result<Fate, DriveError> {
+        if let Some(engine) = lock_engines(&self.engines).get(id) {
+            engine.runtime.spawner.abort_all();
+        }
         let mut running = lock(&self.running);
         let Some(turn) = running.get_mut(id) else {
             return Err(DriveError::NotDriving);

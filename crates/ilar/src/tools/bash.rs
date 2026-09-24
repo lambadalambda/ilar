@@ -536,6 +536,7 @@ impl Tool for BashTool {
                     truncate_chars_ellipsis(&crate::agent::redact_command(&input.command), 120)
                 );
                 let parent_session_id = ctx.session_id.clone();
+                let owner = crate::subagent::detached_owner(&ctx);
                 // Background jobs surface through notifications, not
                 // live tool rows; no tail reporter.
                 let future = run_command(
@@ -556,7 +557,7 @@ impl Tool for BashTool {
                         timeout,
                         future,
                         crate::tools::WorkspaceAccess::Mutating,
-                        ctx.cancel.clone(),
+                        owner,
                     )
                     .await;
             }
