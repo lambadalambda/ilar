@@ -1,5 +1,23 @@
 # DEVLOG
 
+## 2026-09-24 — Services can report their exit
+
+On the gateway, Qwen 3.8 did not act out waits. It hit a wall instead:
+a background `bash` render held the checkout's write lease for its
+whole run, so even `ffmpeg` on a finished scene was refused. It
+switched to `setsid nohup … &`, which escapes ilar entirely (no row, no
+report, no cancel), and wrote that into a memory note. It then polled
+logs in foreground `sleep` loops, about 71 minutes of them.
+
+`service start` now takes `notify: true`. A watcher job holding no
+write lease reports when the service has ended: its exit is recorded
+and its whole process group is gone, so `render.sh &` is not reported
+done while the render runs. The report carries the exit and a redacted
+log tail. It is a failure unless the exit is 0 or the service was
+stopped on purpose. `wait` sees the watcher. A watcher dropped
+unfinished (cancel-all, timeout) stops its service, and it does so even
+before its first poll: the guard is built outside the `async` body.
+
 ## 2026-09-24 — A wait tool, shaped like Codex's
 
 Codex-trained models cannot wait by ending their turn. After starting a

@@ -42,9 +42,38 @@ struct ServiceEntry {
     granted: Vec<crate::secrets::Granted>,
     started: std::time::Instant,
     exited: Option<String>,
+    /// Stopped by name: its end is not a failure, whatever signal did it.
+    stopped: bool,
 }
 
 impl ServiceEntry {
+    /// The last `lines` of the log, redacted of every stored secret and
+    /// of what this service was started with.
+    fn log_tail(&self, secrets: Option<&crate::secrets::Secrets>, lines: usize) -> String {
+        let output = self.output.lock().unwrap();
+        // Every stored value, not just the ones this service was
+        // started with: a service that prints somebody else's token
+        // must not hand it over here.
+        let stored = secrets.map(|secrets| secrets.all()).unwrap_or_default();
+        let text = crate::secrets::redact(
+            &String::from_utf8_lossy(&output.retained),
+            &crate::secrets::redaction_set(stored, &self.granted),
+        );
+        let all: Vec<&str> = text.lines().collect();
+        let start = all.len().saturating_sub(lines);
+        let mut body = all[start..].join("\n");
+        if output.total > output.retained.len() || start > 0 {
+            body = format!("… (earlier output dropped)\n{body}");
+        }
+        if body.trim().is_empty() {
+            body = "(no output yet)".to_string();
+        }
+        if let Some(error) = &output.error {
+            body.push_str(&format!("\n(log capture error: {error})"));
+        }
+        body
+    }
+
     /// Poll liveness, recording the exit status when the child is done.
     fn refresh(&mut self) {
         if self.exited.is_none()
@@ -193,6 +222,8 @@ impl ServiceManager {
     pub fn stop_all(&self) {
         let mut services = self.services.lock().unwrap();
         for entry in services.values_mut() {
+            // Stopped on purpose: a watcher reports it as such.
+            entry.stopped = true;
             entry.kill_group();
         }
     }
@@ -227,6 +258,101 @@ struct Input {
     /// (start only).
     #[serde(default)]
     secrets: Vec<String>,
+    /// Report the exit as a background job's result (start only).
+    #[serde(default)]
+    notify: bool,
+}
+
+/// How often a notifying service's watcher looks at it.
+const WATCH_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+/// Longer than any render: the watcher is a job, and a job has a timeout.
+const WATCH_LIMIT: std::time::Duration = std::time::Duration::from_secs(48 * 3600);
+/// Log lines a notifying service's report carries.
+const REPORT_LINES: usize = 20;
+
+/// Stops the watched service when its watcher is dropped unfinished —
+/// cancel-all, a cancel of the job, its timeout — so "cancelled" is true
+/// of the render, not only of the watching.
+struct StopUnwatched {
+    manager: Arc<ServiceManager>,
+    name: String,
+    started: std::time::Instant,
+    armed: bool,
+}
+
+impl Drop for StopUnwatched {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(mut services) = self.manager.services.lock() else {
+            return;
+        };
+        if let Some(entry) = services.get_mut(&self.name)
+            && entry.started == self.started
+        {
+            entry.stopped = true;
+            entry.kill_group();
+        }
+    }
+}
+
+/// Until the service `name` started at `started` has ended — its exit
+/// recorded and its whole process group gone, so a command that
+/// backgrounds its work is not reported done while the work runs: how
+/// it ended and its log's tail, as a job's result. Replaced by a new
+/// start of the same name, or gone, it has ended too, and says so.
+///
+/// Not an `async fn`: the guard is made here and moved into the future,
+/// so a watcher cancelled before its first poll still stops the service.
+fn watch_exit(
+    manager: Arc<ServiceManager>,
+    name: String,
+    started: std::time::Instant,
+    secrets: Option<crate::secrets::Secrets>,
+) -> impl std::future::Future<Output = ToolOutput> + Send {
+    let guard = StopUnwatched {
+        manager: manager.clone(),
+        name: name.clone(),
+        started,
+        armed: true,
+    };
+    async move { watch_until_exit(manager, name, started, secrets, guard).await }
+}
+
+async fn watch_until_exit(
+    manager: Arc<ServiceManager>,
+    name: String,
+    started: std::time::Instant,
+    secrets: Option<crate::secrets::Secrets>,
+    mut guard: StopUnwatched,
+) -> ToolOutput {
+    loop {
+        {
+            let mut services = manager.services.lock().unwrap();
+            let entry = match services.get_mut(&name) {
+                Some(entry) if entry.started == started => entry,
+                _ => {
+                    guard.armed = false;
+                    return ToolOutput::text(format!("service {name} was replaced or removed"));
+                }
+            };
+            entry.refresh();
+            if let Some(how) = entry.exited.clone()
+                && entry.group.is_none()
+            {
+                guard.armed = false;
+                let tail = entry.log_tail(secrets.as_ref(), REPORT_LINES);
+                let report = format!("service {name} ended ({how})\n{tail}");
+                return if entry.stopped || how == "exit 0" {
+                    ToolOutput::text(report)
+                } else {
+                    ToolOutput::error(report)
+                };
+            }
+        }
+        tokio::time::sleep(WATCH_POLL).await;
+    }
 }
 
 fn valid_name(name: &str) -> bool {
@@ -254,11 +380,13 @@ impl Tool for ServiceTool {
     }
 
     fn description(&self) -> &'static str {
-        "Manage long-running processes (dev servers, watchers). Actions: \
-         start {name, command}, status [name], logs {name, lines?}, \
-         stop {name}. Services keep running between tool calls and are \
-         killed when the session ends. Use this instead of backgrounding \
-         servers with bash."
+        "Manage long-running processes (dev servers, watchers, long \
+         renders). Actions: start {name, command, notify?}, status [name], \
+         logs {name, lines?}, stop {name}. Services keep running between \
+         tool calls, hold no write lease, and are killed when the session \
+         ends. With notify, a finished service reports its exit and log \
+         tail as a background job does. Use this instead of backgrounding \
+         with bash, nohup or setsid."
     }
 
     fn concurrency(&self) -> ToolConcurrency {
@@ -288,7 +416,8 @@ impl Tool for ServiceTool {
                 "name": {"type": "string", "description": "Service name ([a-zA-Z0-9_-], max 64)"},
                 "command": {"type": "string", "description": "Shell command (start only)"},
                 "lines": {"type": "integer", "description": "Log lines to return (default 50, max 500)"},
-                "secrets": {"type": "array", "items": {"type": "string"}, "description": "Names of stored secrets (see the secrets tool) to set as environment variables of the service (start only). The user is asked before each use unless they granted it."}
+                "secrets": {"type": "array", "items": {"type": "string"}, "description": "Names of stored secrets (see the secrets tool) to set as environment variables of the service (start only). The user is asked before each use unless they granted it."},
+                "notify": {"type": "boolean", "description": "Report the exit when the service ends, as a background job does (start only). For work that finishes, like a render; not for servers."}
             },
             "required": ["action"]
         })
@@ -363,6 +492,7 @@ impl Tool for ServiceTool {
                         tokio::spawn(drain(stderr, MAX_SERVICE_OUTPUT, output.clone()));
                     }
                     let pid = child.id();
+                    let started = std::time::Instant::now();
                     manager.services.lock().unwrap().insert(
                         name.clone(),
                         ServiceEntry {
@@ -370,17 +500,65 @@ impl Tool for ServiceTool {
                             group: pid,
                             child: Some(child),
                             output,
-                            started: std::time::Instant::now(),
+                            started,
                             exited: None,
                             granted,
+                            stopped: false,
                         },
                     );
-                    ToolOutput::text(format!(
-                        "started service {name:?} (pid {}): {command}\nCheck it with \
-                         {{\"action\":\"status\",\"name\":\"{name}\"}} and \
-                         {{\"action\":\"logs\",\"name\":\"{name}\"}}.",
+                    let started_line = format!(
+                        "started service {name:?} (pid {}): {command}",
                         pid.map(|pid| pid.to_string())
                             .unwrap_or_else(|| "unknown".into()),
+                    );
+                    if !input.notify {
+                        return ToolOutput::text(format!(
+                            "{started_line}\nCheck it with \
+                             {{\"action\":\"status\",\"name\":\"{name}\"}} and \
+                             {{\"action\":\"logs\",\"name\":\"{name}\"}}."
+                        ));
+                    }
+                    // A watcher job, holding no checkout: the exit is
+                    // reported the way a background job's is, on the
+                    // panel meanwhile, and in `wait`'s view.
+                    let Some(spawner) = ctx.subagent.clone() else {
+                        return ToolOutput::text(format!(
+                            "{started_line}\nIt cannot report its exit in this session: \
+                             check it with status and logs."
+                        ));
+                    };
+                    let watching = spawner
+                        .spawn_background_tool(
+                            ctx.session_id.clone(),
+                            // Redacted here, as a bash job's name is: it
+                            // rides the report into the transcript.
+                            format!(
+                                "service {name}: {}",
+                                crate::text::truncate_chars_ellipsis(
+                                    &crate::agent::redact_command(&command),
+                                    120
+                                )
+                            ),
+                            WATCH_LIMIT,
+                            Box::pin(watch_exit(
+                                manager.clone(),
+                                name.clone(),
+                                started,
+                                ctx.secrets.clone(),
+                            )),
+                            WorkspaceAccess::None,
+                            crate::subagent::detached_owner(&ctx),
+                        )
+                        .await;
+                    if watching.is_error {
+                        return ToolOutput::text(format!(
+                            "{started_line}\nIt cannot report its exit: too much is running \
+                             or waiting to be delivered. Check it with status and logs."
+                        ));
+                    }
+                    ToolOutput::text(format!(
+                        "{started_line}\nIt reports when it exits, like a background job; \
+                         wait or end your response meanwhile, and do not poll its log."
                     ))
                 }
                 "status" => {
@@ -426,31 +604,7 @@ impl Tool for ServiceTool {
                         return ToolOutput::error(format!("service: no service named {name:?}"));
                     };
                     entry.refresh();
-                    let output = entry.output.lock().unwrap();
-                    // Every stored value, not just the ones this
-                    // service was started with: a service that prints
-                    // somebody else's token must not hand it over here.
-                    let stored = ctx
-                        .secrets
-                        .as_ref()
-                        .map(|secrets| secrets.all())
-                        .unwrap_or_default();
-                    let text = crate::secrets::redact(
-                        &String::from_utf8_lossy(&output.retained),
-                        &crate::secrets::redaction_set(stored, &entry.granted),
-                    );
-                    let all: Vec<&str> = text.lines().collect();
-                    let start = all.len().saturating_sub(lines);
-                    let mut body = all[start..].join("\n");
-                    if output.total > output.retained.len() || start > 0 {
-                        body = format!("… (earlier output dropped)\n{body}");
-                    }
-                    if body.trim().is_empty() {
-                        body = "(no output yet)".to_string();
-                    }
-                    if let Some(error) = &output.error {
-                        body.push_str(&format!("\n(log capture error: {error})"));
-                    }
+                    let body = entry.log_tail(ctx.secrets.as_ref(), lines);
                     ToolOutput::text(format!("{}\n\n{body}", describe(&name, entry)))
                 }
                 "stop" => {
@@ -487,6 +641,7 @@ impl Tool for ServiceTool {
                     if let Some(entry) = manager.services.lock().unwrap().get_mut(&name) {
                         entry.mark_exited(label.clone());
                         entry.group = None;
+                        entry.stopped = true;
                     }
                     ToolOutput::text(format!("stopped service {name:?} ({label})"))
                 }
@@ -524,6 +679,7 @@ mod tests {
             granted: Vec::new(),
             started: std::time::Instant::now(),
             exited: None,
+            stopped: false,
         };
 
         // `stop` ends a service by name; it used to set the field

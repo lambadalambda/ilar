@@ -4910,3 +4910,136 @@ async fn a_message_interrupts_a_wait() {
     drop(steers);
     spawner.shutdown().await;
 }
+
+/// A render run as a service holds no checkout; with notify it reports
+/// its exit like a job — `wait` sees it, and the report carries the
+/// log's tail — so neither a poll loop nor `setsid nohup` is needed.
+#[tokio::test]
+async fn a_service_started_with_notify_reports_its_exit_like_a_job() {
+    let (store, session_id) = temp_store();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap()
+        .with_services(ilar::tools::service::ServiceManager::new())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref());
+
+    let started = call_tool(
+        &registry,
+        ctx.clone(),
+        "service",
+        serde_json::json!({
+            "action": "start",
+            "name": "render",
+            "command": "sleep 0.3; echo frame-done",
+            "notify": true
+        }),
+    )
+    .await;
+    assert!(!started.is_error, "{}", started.content);
+    assert!(
+        started.content.contains("reports when it exits"),
+        "{}",
+        started.content
+    );
+
+    let waited = tokio::time::timeout(
+        Duration::from_secs(10),
+        call_tool(&registry, ctx, "wait", serde_json::json!({})),
+    )
+    .await
+    .expect("wait saw the service end");
+    assert!(
+        waited.content.starts_with("Finished:"),
+        "{}",
+        waited.content
+    );
+    assert!(
+        waited.content.contains("service render"),
+        "{}",
+        waited.content
+    );
+
+    let report = tokio::time::timeout(Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("the exit was reported")
+        .unwrap();
+    assert!(!report.is_error, "{}", report.text);
+    assert!(report.text.contains("exit 0"), "{}", report.text);
+    assert!(report.text.contains("frame-done"), "{}", report.text);
+    spawner.shutdown().await;
+}
+
+async fn next_report(
+    notifications: &mut tokio::sync::mpsc::Receiver<Notification>,
+) -> Notification {
+    tokio::time::timeout(Duration::from_secs(10), notifications.recv())
+        .await
+        .expect("a report")
+        .unwrap()
+}
+
+/// How a notifying service ends decides what its report says: a failed
+/// render is a failure, a stop by name is not, and a cancel of the
+/// watcher stops the render too — "cancelled" must be true of the work.
+#[tokio::test]
+async fn a_notifying_service_reports_failure_stop_and_cancel_truthfully() {
+    let (store, session_id) = temp_store();
+    let spawner = patient_spawner(Arc::new(MockProvider::new(vec![])), &store);
+    let mut notifications = spawner.subscribe();
+    let manager = ilar::tools::service::ServiceManager::new();
+    let registry = ToolRegistry::builtin()
+        .with_subagents(spawner.clone())
+        .unwrap()
+        .with_services(manager.clone())
+        .unwrap();
+    let ctx = background_tool_context(session_id, spawner.clone(), std::env::temp_dir().as_ref());
+    let start = |name: &'static str, command: &'static str| {
+        call_tool(
+            &registry,
+            ctx.clone(),
+            "service",
+            serde_json::json!({"action": "start", "name": name, "command": command, "notify": true}),
+        )
+    };
+    start("broken", "echo nope; exit 3").await;
+    let failed = next_report(&mut notifications).await;
+    assert!(failed.is_error, "{}", failed.text);
+    assert!(failed.text.contains("exit 3"), "{}", failed.text);
+
+    start("stopped", "sleep 30").await;
+    call_tool(
+        &registry,
+        ctx.clone(),
+        "service",
+        serde_json::json!({"action": "stop", "name": "stopped"}),
+    )
+    .await;
+    let stopped = next_report(&mut notifications).await;
+    assert!(!stopped.is_error, "{}", stopped.text);
+
+    start("cancelled", "sleep 30").await;
+    spawner.abort_all();
+    let cancelled = next_report(&mut notifications).await;
+    assert!(cancelled.text.contains("cancelled"), "{}", cancelled.text);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = call_tool(
+                &registry,
+                ctx.clone(),
+                "service",
+                serde_json::json!({"action": "status", "name": "cancelled"}),
+            )
+            .await;
+            if !status.content.contains("running") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the service stops with its cancelled watcher");
+    spawner.shutdown().await;
+}
