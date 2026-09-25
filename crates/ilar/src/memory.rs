@@ -271,17 +271,21 @@ pub struct Hit {
     pub score: f64,
     /// Distinct query words the note contains.
     pub matched: usize,
-    /// Whether one of them is a word fewer than half the notes share:
-    /// a match on something, not on a word every note has.
+    /// Whether one of them is a word at most a fifth of the notes
+    /// share: a match on something, not on a word most notes have.
     pub rare: bool,
+    /// Whether one of them is in the note's kind, title or summary —
+    /// what the note is about, not a word somewhere in its body.
+    pub headline: bool,
 }
 
 impl Hit {
-    /// The bar a note clears to be surfaced unasked: two words in
-    /// common with the prompt, or one that singles it out. A search the
-    /// model asked for shows everything that matched at all.
+    /// The bar a note clears to be surfaced unasked: a word of what it
+    /// is about, and two words in common with the prompt or one that
+    /// singles it out. A search the model asked for shows everything
+    /// that matched at all.
     pub fn relevant(&self) -> bool {
-        self.matched >= 2 || self.rare
+        self.headline && (self.matched >= 2 || self.rare)
     }
 
     /// The index line: `<id> [kind] <age> — title: summary`.
@@ -349,8 +353,11 @@ impl RecallConfig {
         if recall_bytes(events) >= self.session_bytes {
             return Ok(None);
         }
-        let seen = recalled_ids(events);
-        let hits: Vec<Hit> = rank(&self.store.notes()?, prompt, now)
+        let Some(query) = recall_query(prompt) else {
+            return Ok(None);
+        };
+        let seen = held_ids(events);
+        let hits: Vec<Hit> = rank(&self.store.notes()?, &query, now)
             .into_iter()
             .filter(|hit| hit.relevant() && !seen.contains(&hit.id))
             .take(self.notes)
@@ -388,18 +395,77 @@ pub fn recall_block(hits: &[Hit], now: DateTime<Utc>) -> String {
     text
 }
 
-/// Note ids surfaced since the last compaction.
-pub fn recalled_ids(events: &[crate::session::SessionEvent]) -> std::collections::HashSet<String> {
+/// What recall matches a prompt on: the person's words. A notification
+/// nobody typed recalls nothing, and a front end's `<now>` stamp and
+/// paths are not words the prompt is about — on the gateway they were
+/// most of what recall matched.
+fn recall_query(prompt: &str) -> Option<String> {
+    if prompt.contains("<task-notification>") || prompt.contains("<tool-notification>") {
+        return None;
+    }
+    let mut text = prompt.to_string();
+    while let Some(start) = text.find("<now>") {
+        let end = text[start..]
+            .find("</now>")
+            .map_or(text.len(), |at| start + at + "</now>".len());
+        text.replace_range(start..end, " ");
+    }
+    Some(
+        text.split_whitespace()
+            .filter(|token| !token.contains(['/', '\\']))
+            .filter(|token| token.chars().any(char::is_alphabetic))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// Notes this context already holds, since the last compaction:
+/// surfaced by recall, or written, amended, forgotten or read with the
+/// memory tools. Surfacing one again tells the model nothing.
+fn held_ids(events: &[crate::session::SessionEvent]) -> std::collections::HashSet<String> {
+    use crate::session::{ContentBlock, SessionEvent};
     let cut = crate::session::compaction_cut(events);
-    events[cut.min(events.len())..]
-        .iter()
-        .filter_map(|event| match event {
-            crate::session::SessionEvent::MemoryRecall { ids, .. } => Some(ids),
-            _ => None,
-        })
-        .flatten()
-        .cloned()
-        .collect()
+    let mut ids = std::collections::HashSet::new();
+    for event in &events[cut.min(events.len())..] {
+        match event {
+            SessionEvent::MemoryRecall { ids: recalled, .. } => {
+                ids.extend(recalled.iter().cloned())
+            }
+            SessionEvent::AssistantMessage { content, .. } => {
+                for block in content {
+                    let ContentBlock::ToolCall { name, input, .. } = block else {
+                        continue;
+                    };
+                    let named: Vec<&serde_json::Value> = match name.as_str() {
+                        "memory_get" => input
+                            .get("ids")
+                            .and_then(serde_json::Value::as_array)
+                            .map(|ids| ids.iter().collect())
+                            .unwrap_or_default(),
+                        "memory" => input.get("id").into_iter().collect(),
+                        _ => Vec::new(),
+                    };
+                    ids.extend(
+                        named
+                            .into_iter()
+                            .filter_map(|id| id.as_str().map(str::to_string)),
+                    );
+                }
+            }
+            SessionEvent::ToolResult { content, .. } => {
+                for wrote in ["noted ", "amended "] {
+                    if let Some(id) = content
+                        .strip_prefix(wrote)
+                        .and_then(|rest| rest.split_whitespace().next())
+                    {
+                        ids.insert(id.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    ids
 }
 
 /// Bytes of recall in the session's window — what its context holds.
@@ -849,35 +915,39 @@ pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
         .collect();
     let average = documents.iter().map(Vec::len).sum::<usize>() as f64 / documents.len() as f64;
     let (k1, b) = (1.2, 0.75);
-    let idf: HashMap<&str, f64> = terms
+    let containing: HashMap<&str, usize> = terms
         .iter()
         .map(|term| {
-            let containing = documents
+            let count = documents
                 .iter()
                 .filter(|document| document.contains(term))
-                .count() as f64;
-            let idf = ((documents.len() as f64 - containing + 0.5) / (containing + 0.5) + 1.0).ln();
-            (term.as_str(), idf)
+                .count();
+            (term.as_str(), count)
         })
         .collect();
+    let idf = |term: &str| {
+        let count = containing[term] as f64;
+        ((documents.len() as f64 - count + 0.5) / (count + 0.5) + 1.0).ln()
+    };
     let mut hits: Vec<Hit> = notes
         .iter()
         .zip(&documents)
         .filter_map(|(note, document)| {
+            let headline_words = words(&format!("{} {} {}", note.kind, note.title, note.summary));
             let mut score = 0.0;
             let mut matched = 0;
             let mut rare = false;
+            let mut headline = false;
             for term in &terms {
                 let frequency = document.iter().filter(|word| *word == term).count() as f64;
                 if frequency == 0.0 {
                     continue;
                 }
                 matched += 1;
-                // idf passes ln 2 exactly where fewer than half the
-                // notes contain the word.
-                rare |= idf[term.as_str()] > std::f64::consts::LN_2;
+                rare |= containing[term.as_str()] * 5 <= documents.len();
+                headline |= headline_words.contains(term);
                 let length = document.len() as f64;
-                score += idf[term.as_str()] * (frequency * (k1 + 1.0))
+                score += idf(term) * (frequency * (k1 + 1.0))
                     / (frequency + k1 * (1.0 - b + b * length / average.max(1.0)));
             }
             if score <= 0.0 {
@@ -894,6 +964,7 @@ pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
                 score: score * decay,
                 matched,
                 rare,
+                headline,
             })
         })
         .collect();
@@ -1287,6 +1358,7 @@ impl Tool for MemoryGetTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::SessionEvent;
 
     /// Every worktree of a repository, and every directory inside one,
     /// remembers into the same store — the parallel streams run here
@@ -1723,5 +1795,149 @@ mod tests {
         ] {
             assert!(!was_a_write(read), "{read}");
         }
+    }
+
+    /// A store of the kind the gateway audit read, 2026-09-25: notes
+    /// whose bodies are full of dates and workspace paths.
+    fn recall_fixture() -> (tempfile::TempDir, RecallConfig, Vec<Note>, DateTime<Utc>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let now = "2026-09-24T12:00:00Z".parse().unwrap();
+        let notes = vec![
+            store
+                .note(
+                    NoteKind::Solution,
+                    "H3 render output layout",
+                    "clips land as h80s mp4 files beside their log",
+                    "Written 2026-09-24 09:00; see /home/lain/.local/state/ilar/gateway/workspace",
+                    now,
+                )
+                .unwrap(),
+            store
+                .note(
+                    NoteKind::Event,
+                    "Mario prompt test",
+                    "the video model knows Mario sprites without the name",
+                    "Rendered 2026-09-23 10:53 at 16:9, ffmpeg frames extracted to check",
+                    now,
+                )
+                .unwrap(),
+        ];
+        (dir, RecallConfig::new(Arc::new(store)), notes, now)
+    }
+
+    fn surfaced(
+        recall: &RecallConfig,
+        prompt: &str,
+        events: &[SessionEvent],
+        now: DateTime<Utc>,
+    ) -> Vec<String> {
+        recall
+            .recall(prompt, events, now)
+            .unwrap()
+            .map(|(ids, _)| ids)
+            .unwrap_or_default()
+    }
+
+    /// Recall matches what the person wrote. On the gateway "Still
+    /// going?" surfaced five notes on the digits of its `<now>` stamp,
+    /// and "landed … -> /home/lain/…" lines on the words of a path; a
+    /// third of all recalls fired on notifications nobody typed.
+    #[test]
+    fn recall_matches_the_person_s_words_not_stamps_paths_or_notifications() {
+        let (_dir, recall, notes, now) = recall_fixture();
+        let stamp = "<now>2026-09-24T13:49:02.123+04:00</now>\n\n";
+        assert!(surfaced(&recall, &format!("{stamp}Still going?"), &[], now).is_empty());
+        assert!(
+            surfaced(
+                &recall,
+                "next_a landed 1108961B in 70s -> /home/lain/.local/state/ilar/gateway/workspace/next_a.mp4",
+                &[],
+                now
+            )
+            .is_empty()
+        );
+        let notification = "<task-notification>\nTask \"Mario prompt test\" completed (task_id: \
+                            abc).\n<result>the video model knows Mario sprites</result>\n\
+                            </task-notification>";
+        assert!(surfaced(&recall, notification, &[], now).is_empty());
+        assert_eq!(
+            surfaced(
+                &recall,
+                &format!("{stamp}does the model know Mario sprites?"),
+                &[],
+                now
+            ),
+            [notes[1].id.clone()]
+        );
+    }
+
+    /// Unasked, a note surfaces for its title or summary — what it is
+    /// about — and not for a word somewhere in a long body. A search
+    /// the model asks for still reads the body.
+    #[test]
+    fn a_note_matching_only_in_its_body_is_not_surfaced_unasked() {
+        let (_dir, recall, notes, now) = recall_fixture();
+        let prompt = "extract frames with ffmpeg";
+        assert!(surfaced(&recall, prompt, &[], now).is_empty());
+        let searched = rank(&recall.store.notes().unwrap(), prompt, now);
+        assert_eq!(searched[0].id, notes[1].id);
+    }
+
+    /// What this context wrote, amended or read, it has: surfacing it
+    /// again tells the model nothing. Seven of ten recalls on the Mac
+    /// were a note the same session had written.
+    #[test]
+    fn a_note_this_context_wrote_or_read_is_not_surfaced_again() {
+        let (_dir, recall, notes, now) = recall_fixture();
+        let prompt = "does the model know Mario sprites?";
+        let wrote = SessionEvent::ToolResult {
+            id: crate::session::new_id(),
+            tool_use_id: "call".into(),
+            content: format!("noted {} (event)", notes[1].id),
+            is_error: false,
+            images: Vec::new(),
+            child_session_id: None,
+            state: None,
+            ts: now,
+        };
+        assert!(surfaced(&recall, prompt, &[wrote], now).is_empty());
+        let read = SessionEvent::AssistantMessage {
+            id: crate::session::new_id(),
+            model: "zai/glm-4.7".into(),
+            content: vec![crate::session::ContentBlock::ToolCall {
+                id: "call".into(),
+                name: "memory_get".into(),
+                input: serde_json::json!({"ids": [notes[1].id]}),
+                item_id: None,
+            }],
+            usage: Default::default(),
+            stop_reason: "tool_use".into(),
+            ts: now,
+        };
+        assert!(surfaced(&recall, prompt, &[read], now).is_empty());
+    }
+
+    /// One shared word surfaces a note only when few notes share it: a
+    /// word two of five notes carry says little about which one is meant.
+    #[test]
+    fn one_shared_word_surfaces_a_note_only_when_it_is_rare() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let now: DateTime<Utc> = "2026-09-24T12:00:00Z".parse().unwrap();
+        for title in [
+            "native render cost",
+            "native clip chain",
+            "draft tier",
+            "vision check",
+            "cron job",
+        ] {
+            store
+                .note(NoteKind::Event, title, "measured", "", now)
+                .unwrap();
+        }
+        let recall = RecallConfig::new(Arc::new(store));
+        assert!(surfaced(&recall, "go native", &[], now).is_empty());
+        assert_eq!(surfaced(&recall, "the draft please", &[], now).len(), 1);
     }
 }
