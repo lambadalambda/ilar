@@ -3763,6 +3763,42 @@ mod tests {
         assert!(!row.1.is_empty(), "the child's work is shown, not hidden");
     }
 
+    /// A resumed task runs on the model it was started with, but its
+    /// row only knew the model a call named — and a resume names none,
+    /// so the row read "build" as though the model had been dropped.
+    /// The child's own steps say which model ran.
+    #[test]
+    fn an_agent_row_shows_the_model_its_child_actually_runs() {
+        let mut app = App::new();
+        app.session_id = "root".into();
+        app.push_loop_event(&LoopEvent::ToolStarted {
+            id: "msg-1".into(),
+            name: "task_message".into(),
+        });
+        app.push_subagent_activity(&focus_activity(
+            "child",
+            "root",
+            "msg-1",
+            LoopEvent::StepComplete {
+                stop_reason: "end_turn".into(),
+                usage: Default::default(),
+                model: "openai/gpt-6-sol".into(),
+            },
+        ));
+        let kind = app
+            .lines
+            .iter()
+            .find_map(|line| match line {
+                Line_::Tool { kind, .. } => Some(kind),
+                _ => None,
+            })
+            .expect("the task_message row");
+        assert!(
+            matches!(kind, ToolKind::Agent { model: Some(model), .. } if model == "openai/gpt-6-sol"),
+            "{kind:?}"
+        );
+    }
+
     /// A background task's call returns its started note at once, so the
     /// row was ✓ before the child had done anything — and stayed ✓ when
     /// the child failed, stalled or was cancelled. The child's own ending

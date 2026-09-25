@@ -1285,6 +1285,18 @@ pub(crate) fn apply_subagent_activity(
             model: None,
         };
     }
+    // The model the child actually runs, from its own steps: a call names
+    // one only when it chooses, and a resume never does — the row read
+    // as though the task had lost the model it was started with.
+    if let LoopEvent::StepComplete { model: ran, .. } = &activity.event
+        && let Some(Line_::Tool {
+            kind: ToolKind::Agent { model, .. },
+            ..
+        }) = owner.get_mut(call_index)
+        && model.as_deref() != Some(ran.as_str())
+    {
+        *model = Some(ran.clone());
+    }
     let Line_::Tool {
         state,
         child_lines,

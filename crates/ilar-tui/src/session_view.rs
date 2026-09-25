@@ -977,6 +977,11 @@ fn restore_child_activity(
                 model: None,
             };
         }
+        // The model the child runs on, from its own log: a call names
+        // one only when it chooses, and a resume never does.
+        if let ToolKind::Agent { model, .. } = kind {
+            *model = Some(session.effective_model());
+        }
         *child_lines = restored;
     }
     (task_usage, task_cost)
@@ -2069,7 +2074,9 @@ mod tests {
                 session_id: child_id.clone(),
                 parent_id: Some(parent_id.clone()),
                 agent: "explore".into(),
-                model: "zai/glm-4.7".into(),
+                // Not the parent's: the resumed row must show the model
+                // the task runs on, which the resume never names.
+                model: "openai/gpt-6-sol".into(),
                 workspace: None,
                 cwd: None,
             })
@@ -2177,7 +2184,8 @@ mod tests {
             })
             .expect("the task_message row");
         assert!(
-            matches!(resumed.0, ToolKind::Agent { name, .. } if name == "explore"),
+            matches!(resumed.0, ToolKind::Agent { name, model: Some(model) }
+                if name == "explore" && model == "openai/gpt-6-sol"),
             "{:?}",
             resumed.0
         );
