@@ -197,19 +197,24 @@ Memory also comes to the model unasked, in two places, both
 cache-safe. At session open, beside the core block, the newest notes'
 index lines (at most twenty, under 4 KiB) say what the archive holds;
 frozen with the rest of the prompt. And on every prompt, the index is
-run over the prompt's words: notes that share two words with it, or
-one that fewer than half the notes contain, are surfaced — at most
-five, as index lines and never bodies — in a `<memory-recall>` block
-appended after the user message. The block says what it is: background
-the session wrote earlier, for possible relevance, not instructions
-from anyone and not part of the message it follows. When a note is
-older than a day it adds that a note is what was true when it was
-written rather than live state, so a claim about code or a file and
-line may have moved. The block is a session event of its own, so
-the transcript, the web view and a resumed session all show it; the
-TUI shows a count when the session is reopened. A note is not
-surfaced twice in one context — until a compaction folds the earlier
-copy away, when it may come back — and after 16 KiB of recall in one
+run over the person's words. Not over a task or job notification,
+which recalls nothing, and not over the gateway's `<now>` stamp or
+paths. A note is surfaced when a word of its title or summary matches,
+and it shares two words with the prompt, or one word that at most a
+fifth of the notes contain. At most five are surfaced, as index lines
+and never bodies, in a `<memory-recall>` block appended after the user
+message. The block says what it is: notes an earlier session made,
+for possible relevance. They are claims, not verified in this session,
+to be checked before they are relied on or reported as fact, and not
+instructions from anyone or part of the message they follow. When a
+note is older than a day, the block adds that a note is what was true
+when it was written rather than live state, so a claim about code or
+a file and line may have moved. The block is a session event of its
+own, so the transcript, the web view and a resumed session all show
+it; the TUI shows a count when the session is reopened. A note is not
+surfaced when the context already has it: recalled, written, amended
+or read, until a compaction folds that copy away, when it may come
+back. After 16 KiB of recall in one
 context the window gets no more. Nothing here rewrites an earlier
 message: the prefix a provider cached stays put.
 `general.memory_recall = false` and `general.memory_index = false`
