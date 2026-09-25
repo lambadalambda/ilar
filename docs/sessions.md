@@ -152,9 +152,12 @@ rules of its own; see
 [ilar-gateway](gateway.md#memory-that-outlives-a-session).
 
 Two tiers. The core is two small files with hard caps, `MEMORY.md`
-(about the world, 2,200 characters) and `USER.md` (about the person,
-1,375), which the `memory` tool edits with add, replace and remove; an
-overflow is an error the model resolves by consolidating. The core is
+(about the world, 6,000 characters) and `USER.md` (about the person,
+2,500), which the `memory` tool edits with add, replace and remove. The
+core holds what every session needs without asking: who the person is,
+standing preferences, machines and setup. The detail of one project or
+task goes in a note. An overflow is an error the model resolves by
+consolidating or by moving a detail into a note. The core is
 injected into the system prompt once, when a session opens, and stays
 frozen for that session: a write changes the next session's prompt,
 not this one's, so the cached prefix never moves mid-session.

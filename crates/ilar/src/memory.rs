@@ -29,9 +29,14 @@ use crate::tools::{
     Tool, ToolConcurrency, ToolContext, ToolFuture, ToolOutput, WorkspaceAccess, parse_input,
 };
 
-/// Hermes's caps, which keep the core under a thousand tokens.
-pub const MEMORY_CHARS: usize = 2200;
-pub const USER_CHARS: usize = 1375;
+/// The core's caps: about 2,000 tokens together, a fixed cost paid once
+/// per session and read from the prompt cache after. Hermes's 2,200 and
+/// 1,375 filled with one project's details and refused thirteen gateway
+/// review writes; OpenClaw keeps its MEMORY.md under 10,000. A cap is
+/// still a cap — it is what makes the model choose — and the person's
+/// file stays the smaller, so it cannot crowd out the rest.
+pub const MEMORY_CHARS: usize = 6000;
+pub const USER_CHARS: usize = 2500;
 
 /// How a note's summary is written, said wherever a note gets written:
 /// in the `memory` tool's description, in the standing prompt section,
@@ -518,7 +523,8 @@ impl MemoryStore {
     fn write_core(&self, file: CoreFile, text: &str) -> Result<()> {
         if text.chars().count() > file.cap() {
             bail!(
-                "{} would be {} characters; the cap is {}. Consolidate or remove entries first \
+                "{} would be {} characters; the cap is {}. Consolidate or remove entries, or \
+                 move a detail into a note and keep the core to what every session needs \
                  (action show lists what is there).",
                 file.file_name(),
                 text.chars().count(),
@@ -1042,7 +1048,9 @@ impl Tool for MemoryTool {
                 "Remember across sessions. add / replace / remove change a core file (file: \
                  memory for the world, user for the person) that is injected into every future \
                  session and has a hard cap — an overflow is an error, so consolidate; show \
-                 prints both files as they are. note files one durable fact in the archive \
+                 prints both files as they are. The core holds what every session needs \
+                 without asking: who the person is, standing preferences, machines and setup; \
+                 the detail of one project or task goes in a note. note files one durable fact in the archive \
                  (kind: decision, solution, preference, event, task, risk; title; a one-line \
                  summary; body), found later with memory_search. amend rewrites a note you \
                  name by id, keeping its id and its date; forget retires one. {SUMMARY_RULE} \
@@ -1567,7 +1575,30 @@ mod tests {
         let too_long = "x".repeat(USER_CHARS + 1);
         let error = store.add(CoreFile::User, &too_long).unwrap_err();
         assert!(error.to_string().contains("cap"), "{error}");
+        // The archive takes what the core cannot: the full gateway core
+        // failed thirteen review writes that belonged in notes.
+        assert!(error.to_string().contains("note"), "{error}");
         assert_eq!(store.core(CoreFile::User).unwrap(), "");
+    }
+
+    /// Room for the standing facts of a person and a few machines and
+    /// projects — Hermes's 2,200 and 1,375 filled with one project's
+    /// render details — and still a small fixed cost of a frozen,
+    /// cached prefix. OpenClaw keeps its MEMORY.md under 10,000.
+    #[test]
+    fn the_core_caps_leave_room_and_stay_small() {
+        assert_eq!((MEMORY_CHARS, USER_CHARS), (6000, 2500));
+    }
+
+    /// What goes in the core is said where it is written: the facts
+    /// every session needs unasked, not one project's details.
+    #[test]
+    fn the_tool_says_what_belongs_in_the_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = MemoryTool::new(Arc::new(MemoryStore::new(dir.path().to_path_buf())));
+        let description = tool.description();
+        assert!(description.contains("every session needs"), "{description}");
+        assert!(description.contains("goes in a note"), "{description}");
     }
 
     #[test]
@@ -1871,7 +1902,7 @@ mod tests {
         }
         for read in [
             "already there, unchanged",
-            "MEMORY.md (0 of 2200 characters):\n",
+            "MEMORY.md (0 of 6000 characters):\n",
         ] {
             assert!(!was_a_write(read), "{read}");
         }

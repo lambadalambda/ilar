@@ -115,8 +115,10 @@ earlier is about the same fact, answer with {{\"action\": \"amend\", \"id\": \"�
 fields to change — a body replaces the old one whole and comes with a new summary — or \
 {{\"action\": \"forget\", \"id\": \"…\"}}, in the same notes list. \
 {} \
-Memory entries are one short line each and the files are small: prefer replace over add \
-when an entry is already about the same thing. A workflow worth repeating is a skill, not a \
+Memory entries are one short line each and the files are capped: they hold what every \
+session needs without asking — who the person is, standing preferences, machines and setup — \
+and the detail of one project or task is a note. Prefer replace over add when an entry is \
+already about the same thing. A workflow worth repeating is a skill, not a \
 memory entry: add \"skills\": [{{\"action\": \"create\" or \"patch\", \"name\": \"lowercase-with-\
 dashes\", \"description\": \"…\", \"triggers\": [\"…\"], \"body\": \"…\", \"old\": \"…\", \
 \"new\": \"…\"}}] — a distilled rule with its reason, never the story of what happened, and \
