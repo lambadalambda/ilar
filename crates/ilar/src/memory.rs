@@ -279,7 +279,7 @@ pub struct Hit {
     /// Whether one of them is a word at most a fifth of the notes
     /// share: a match on something, not on a word most notes have.
     pub rare: bool,
-    /// Whether one of them is in the note's kind, title or summary —
+    /// Whether one of them is in the note's title or summary —
     /// what the note is about, not a word somewhere in its body.
     pub headline: bool,
 }
@@ -406,23 +406,32 @@ pub fn recall_block(hits: &[Hit], now: DateTime<Utc>) -> String {
 /// paths are not words the prompt is about — on the gateway they were
 /// most of what recall matched.
 fn recall_query(prompt: &str) -> Option<String> {
-    if prompt.contains("<task-notification>") || prompt.contains("<tool-notification>") {
-        return None;
-    }
     let mut text = prompt.to_string();
-    while let Some(start) = text.find("<now>") {
-        let end = text[start..]
-            .find("</now>")
-            .map_or(text.len(), |at| start + at + "</now>".len());
-        text.replace_range(start..end, " ");
+    for tag in ["now", "task-notification", "tool-notification"] {
+        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+        while let Some(start) = text.find(&open) {
+            let end = text[start..]
+                .find(&close)
+                .map_or(text.len(), |at| start + at + close.len());
+            text.replace_range(start..end, " ");
+        }
     }
-    Some(
-        text.split_whitespace()
-            .filter(|token| !token.contains(['/', '\\']))
-            .filter(|token| token.chars().any(char::is_alphabetic))
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .filter_map(|token| {
+            // An absolute path or a URL is where something lives, which
+            // every note about the workspace shares; a relative one
+            // keeps its file name, which a coding note is titled with.
+            let absolute = token.starts_with(['/', '~', '\\']) || token.contains("://");
+            match token.rsplit(['/', '\\']).next() {
+                _ if absolute => None,
+                Some(name) => Some(name),
+                None => Some(token),
+            }
+        })
+        .filter(|word| word.chars().any(char::is_alphabetic))
+        .collect();
+    (!words.is_empty()).then(|| words.join(" "))
 }
 
 /// Notes this context already holds, since the last compaction:
@@ -949,7 +958,7 @@ pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
         .iter()
         .zip(&documents)
         .filter_map(|(note, document)| {
-            let headline_words = words(&format!("{} {} {}", note.kind, note.title, note.summary));
+            let headline_words = words(&format!("{} {}", note.title, note.summary));
             let mut score = 0.0;
             let mut matched = 0;
             let mut rare = false;
@@ -1980,6 +1989,39 @@ mod tests {
                 now
             ),
             [notes[1].id.clone()]
+        );
+    }
+
+    /// A message typed while a turn ran is folded into the prompt beside
+    /// the notification that started the next one: the notification is
+    /// left out, the person's words still recall. A relative path keeps
+    /// its file name, which is what a coding note is titled with.
+    #[test]
+    fn typed_words_beside_a_notification_and_a_file_name_still_recall() {
+        let (_dir, recall, notes, now) = recall_fixture();
+        let folded = "does the model know Mario sprites?\n\n<task-notification>\nTask \"x\" \
+                      completed.\n</task-notification>";
+        assert_eq!(surfaced(&recall, folded, &[], now), [notes[1].id.clone()]);
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let file = store
+            .note(
+                NoteKind::Risk,
+                "recall.rs matching",
+                "recall.rs drops paths",
+                "",
+                now,
+            )
+            .unwrap();
+        let recall = RecallConfig::new(Arc::new(store));
+        assert_eq!(
+            surfaced(
+                &recall,
+                "crash in crates/ilar/src/recall.rs matching",
+                &[],
+                now
+            ),
+            [file.id]
         );
     }
 

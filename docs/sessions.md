@@ -217,7 +217,9 @@ own, so the transcript, the web view and a resumed session all show
 it; the TUI shows a count when the session is reopened. A note is not
 surfaced when the context already has it: recalled, written, amended
 or read, until a compaction folds that copy away, when it may come
-back. After 16 KiB of recall in one
+back. A note listed in the opening index can still be recalled: the
+index sits at the top of a long prompt, and the recall puts the line
+next to the question it is about. After 16 KiB of recall in one
 context the window gets no more. Nothing here rewrites an earlier
 message: the prefix a provider cached stays put.
 `general.memory_recall = false` and `general.memory_index = false`

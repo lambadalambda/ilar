@@ -1,5 +1,40 @@
 # DEVLOG
 
+## 2026-09-25 — Memory, audited against the transcripts
+
+Three machines' logs were read against what memory is meant to do.
+Per-prompt recall on the gateway was about 23% relevant:
+- prompts matched on the digits of the `<now>` stamp and on workspace
+  paths;
+- a third of recalls fired on notifications;
+- most repeated a note the session had just written.
+
+On the Mac, 7 of 10 recalls were such echoes. The model read a
+surfaced note in full 5 times in all gateway sessions. Recall now
+matches the person's words only. A note must match in its title or
+summary. One shared word counts only when at most a fifth of the
+notes carry it. Notes the context wrote, amended or read are skipped.
+
+Two write paths damaged notes:
+- `amend` said "what to change, the rest is kept" but replaced the
+  body, and three notes were left holding only an addendum;
+- a correction added to a body under the old summary was recalled as
+  the old finding, and a later session missed it.
+
+A new body now needs a new summary. Recalled notes were framed as
+"background you wrote earlier", so a model reported a note's claim as
+work it had re-verified. They are now an earlier session's claims,
+unverified.
+
+The core caps were Hermes's 2,200 and 1,375. OpenClaw injects up to
+60,000 every turn and keeps its MEMORY.md under 10,000. PicoClaw has
+no cap. ilar's core is frozen and cached per session, so the caps are
+now 6,000 and 2,500, with a rule for what goes there: what every
+session needs, not one project's detail.
+
+Still open: terminal sessions rarely write memory (aiko: none in 30
+prompts). OpenClaw's flush before compaction is the next thing to try.
+
 ## 2026-09-24 — Services can report their exit
 
 On the gateway, Qwen 3.8 did not act out waits. It hit a wall instead:

@@ -66,7 +66,8 @@ pub const JOB_ID: &str = "weekly";
 pub const PROMPT: &str = "Weekly review, as yourself. Read this week's daily notes under memory/daily \
 in your home with the read tool, and search the archive with memory_search for anything that \
 recurs. Then: promote what recurs or still matters into the core memory with the memory tool \
-(add, or replace an entry that is about the same thing; the files are small, so consolidate); \
+(add, or replace an entry that is about the same thing; the files are capped and hold what \
+every session needs, so consolidate, and move one project's detail into a note); \
 remove core entries that are no longer true; file as notes what is worth finding later but \
 not worth the core; amend notes the week corrected rather than filing second ones about the \
 same thing, and forget the ones it disproved; rewrite a note that says \"yesterday\" or \"last \
