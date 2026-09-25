@@ -665,6 +665,15 @@ impl MemoryStore {
     /// it, and recency still measures from when the fact was learned,
     /// not from when the words were fixed.
     pub fn amend(&self, id: &str, change: Amendment<'_>) -> Result<Note> {
+        // The summary is what search and recall show; a body changed
+        // under the old one hides the change from every later session.
+        if change.body.is_some() && change.summary.is_none() {
+            bail!(
+                "a new body needs a new summary too: the summary is what search and recall \
+                 show, and the old one would hide what changed. Pass summary as well — the \
+                 old one again if it still says it all"
+            );
+        }
         let path = self.note_path(id)?;
         let _write = self.write.lock().unwrap();
         let text = match std::fs::read_to_string(&path) {
@@ -1066,7 +1075,7 @@ impl Tool for MemoryTool {
                 "kind": {"type": "string", "enum": ["decision", "solution", "preference", "event", "task", "risk"]},
                 "title": {"type": "string"},
                 "summary": {"type": "string", "description": "note: one line"},
-                "body": {"type": "string", "description": "note: the fact in full (default: the summary); amend: what to change, the rest is kept"}
+                "body": {"type": "string", "description": "note: the fact in full (default: the summary); amend: the new body in full — it replaces the old one, so carry over what still holds, and pass a new summary with it"}
             },
             "required": ["action"]
         })
@@ -1775,6 +1784,60 @@ mod tests {
         assert_eq!(read[0].title, "Fence and more");
         assert_eq!(read[0].body, body, "the body is untouched");
         assert_eq!(read[0].when, when, "and so is the date it was learned");
+    }
+
+    /// A new body comes with a new summary. The summary is what search
+    /// and recall show: a correction added to the body under the old
+    /// summary ("node traffic is plaintext") was surfaced as the old
+    /// finding, and a later session missed it, 2026-09-24.
+    #[test]
+    fn a_new_body_needs_a_new_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let now: DateTime<Utc> = "2026-09-24T12:00:00Z".parse().unwrap();
+        let note = store
+            .note(
+                NoteKind::Risk,
+                "Review findings",
+                "two crash bugs",
+                "The crash bugs.",
+                now,
+            )
+            .unwrap();
+        let refused = store
+            .amend(
+                &note.id,
+                Amendment {
+                    body: Some("The crash bugs. CORRECTION: traffic is plaintext."),
+                    ..Amendment::default()
+                },
+            )
+            .unwrap_err();
+        assert!(refused.to_string().contains("summary"), "{refused}");
+        assert_eq!(
+            store.get(std::slice::from_ref(&note.id)).unwrap()[0].body,
+            "The crash bugs."
+        );
+        store
+            .amend(
+                &note.id,
+                Amendment {
+                    summary: Some("two crash bugs; node traffic is plaintext"),
+                    body: Some("The crash bugs. CORRECTION: traffic is plaintext."),
+                    ..Amendment::default()
+                },
+            )
+            .unwrap();
+    }
+
+    /// The tool says what `amend` does to a body: replaces it. Read as
+    /// "what to change", it left notes holding only an addendum.
+    #[test]
+    fn the_tool_says_amend_replaces_the_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = MemoryTool::new(Arc::new(MemoryStore::new(dir.path().to_path_buf())));
+        let body = tool.input_schema()["properties"]["body"]["description"].to_string();
+        assert!(body.contains("replaces"), "{body}");
     }
 
     #[test]

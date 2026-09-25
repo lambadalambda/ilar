@@ -112,7 +112,8 @@ answer with one JSON object and nothing else: {{\"memory\": [{{\"file\": \"user\
 \"risk\", \"title\": \"…\", \"summary\": \"one line\", \"body\": \"the fact in full\"}}]}}. \
 A note the conversation changed or disproved is not a second note: when one you were shown \
 earlier is about the same fact, answer with {{\"action\": \"amend\", \"id\": \"…\"}} plus the \
-fields to change, or {{\"action\": \"forget\", \"id\": \"…\"}}, in the same notes list. \
+fields to change — a body replaces the old one whole and comes with a new summary — or \
+{{\"action\": \"forget\", \"id\": \"…\"}}, in the same notes list. \
 {} \
 Memory entries are one short line each and the files are small: prefer replace over add \
 when an entry is already about the same thing. A workflow worth repeating is a skill, not a \
