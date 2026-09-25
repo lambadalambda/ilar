@@ -301,6 +301,9 @@ pub struct LoopConfig {
     /// Surface memory notes for each prompt, from this store. Root
     /// sessions only; a child's copy of the config carries `None`.
     pub recall: Option<crate::memory::RecallConfig>,
+    /// Let the model write this memory before each compaction: for a
+    /// session nobody reviews afterwards. Root sessions only.
+    pub memory_flush: Option<Arc<crate::memory::MemoryStore>>,
 }
 
 /// `base` doubled `retries` times, capped — the exponential backoff both
@@ -345,6 +348,7 @@ impl Default for LoopConfig {
             live_heartbeat: crate::session::SCRATCH_HEARTBEAT,
             max_output_tokens: None,
             recall: None,
+            memory_flush: None,
         }
     }
 }
@@ -1786,6 +1790,7 @@ async fn run_turn_steps(
                 tools: &tools,
                 services: &registry.running_services(),
                 cancel: &cancel,
+                memory: config.memory_flush.as_ref(),
             },
         )
         .await?
@@ -1910,6 +1915,7 @@ async fn run_turn_steps(
                     tools: &tools,
                     services: &registry.running_services(),
                     cancel: &cancel,
+                    memory: config.memory_flush.as_ref(),
                 },
             )
             .await?

@@ -190,6 +190,9 @@ pub struct CompactionOptions<'a> {
     /// instruction so the handover names them.
     pub services: &'a [String],
     pub cancel: &'a CancellationToken,
+    /// Let the model write this memory before the summary: for a
+    /// session nobody reviews afterwards. See [`flush_memory`].
+    pub memory: Option<&'a std::sync::Arc<crate::memory::MemoryStore>>,
 }
 
 /// Where to cut the history when compacting.
@@ -397,6 +400,8 @@ pub async fn compact_session(
             tools,
             services,
             cancel,
+            // Asked for by the person, who is right there.
+            memory: None,
         },
     )
     .await?;
@@ -410,42 +415,197 @@ pub async fn compact_session(
     }
 }
 
-/// One summarization call. Errors are the provider's; judging the text
-/// is the caller's job.
+/// One side response — a summary or a flush round — read to its end:
+/// its text, its thinking (which a chat-wire model needs back beside
+/// its tool calls), and the calls it made.
+#[derive(Default)]
+struct SideResponse {
+    text: String,
+    thinking: String,
+    field: Option<crate::session::ReasoningField>,
+    calls: Vec<(String, String, serde_json::Value)>,
+    stop: Option<StopReason>,
+}
+
+/// A side request's response, or `None` when cancelled. Errors are the
+/// provider's; judging what came back is the caller's job.
+async fn respond_once(
+    provider: &dyn Provider,
+    request: Request,
+    cancel: &CancellationToken,
+) -> Result<Option<SideResponse>> {
+    let mut stream = provider.stream(request)?;
+    let mut response = SideResponse::default();
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Ok(None),
+            next = stream.next() => next,
+        };
+        let Some(event) = next else {
+            anyhow::bail!("stream ended before completion");
+        };
+        match event {
+            ProviderEvent::TextDelta(t) => response.text.push_str(&t),
+            ProviderEvent::ThinkingDelta(t) => response.thinking.push_str(&t),
+            ProviderEvent::ThinkingField(field) => response.field = Some(field),
+            ProviderEvent::ToolCallCompleted { id, name, input } => {
+                response.calls.push((id, name, input));
+            }
+            ProviderEvent::TurnComplete { stop_reason, .. } => {
+                response.stop = Some(stop_reason);
+                return Ok(Some(response));
+            }
+            ProviderEvent::Error(e)
+            | ProviderEvent::RetryableError(e)
+            | ProviderEvent::RateLimited { message: e, .. } => anyhow::bail!("call failed: {e}"),
+            _ => {}
+        }
+    }
+}
+
+/// One summarization call: its text, or empty when cancelled.
 async fn summarize_once(
     provider: &dyn Provider,
     request: Request,
     cancel: &CancellationToken,
 ) -> Result<String> {
-    let mut stream = provider.stream(request)?;
-    let mut summary = String::new();
-    loop {
-        let next = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Ok(String::new()),
-            next = stream.next() => next,
-        };
-        let Some(event) = next else {
-            anyhow::bail!("compaction stream ended before completion");
-        };
-        match event {
-            ProviderEvent::TextDelta(t) => summary.push_str(&t),
-            ProviderEvent::TurnComplete {
-                stop_reason: StopReason::EndTurn,
-                ..
-            } => break,
-            ProviderEvent::TurnComplete { stop_reason, .. } => {
-                anyhow::bail!("compaction ended with invalid stop reason {stop_reason:?}")
-            }
-            ProviderEvent::Error(e)
-            | ProviderEvent::RetryableError(e)
-            | ProviderEvent::RateLimited { message: e, .. } => {
-                anyhow::bail!("compaction call failed: {e}")
-            }
-            _ => {}
-        }
+    let response = respond_once(provider, request, cancel)
+        .await
+        .map_err(|error| anyhow::anyhow!("compaction {error:#}"))?;
+    match response {
+        None => Ok(String::new()),
+        Some(response) if response.stop == Some(StopReason::EndTurn) => Ok(response.text),
+        Some(response) => anyhow::bail!(
+            "compaction ended with invalid stop reason {:?}",
+            response.stop
+        ),
     }
-    Ok(summary)
+}
+
+/// What the flush asks before a summary.
+const FLUSH_INSTRUCTION: &str = "Stop working on the task — for this one turn only: the \
+conversation above is about to be summarized, and its detail will be out of sight. First write \
+to memory what a later session would need and could not find in the repository, the log or a \
+search: a correction or preference from the person, a decision and its reason, a convention no \
+file states. Use only the memory, memory_search and memory_get tools, and amend a note that is \
+already about the same fact rather than file a second. If there is nothing to keep, answer with \
+the word nothing. Do not continue the task.";
+
+/// Rounds of tool calls the flush may take: a search, a write, a check.
+const FLUSH_ROUNDS: usize = 3;
+
+/// OpenClaw's flush, for a session nobody reviews: before the summary,
+/// one side request over the same conversation, with the same system
+/// prompt and tools, so the provider serves it from the prompt cache.
+/// Only the memory tools run; the turn is untouched and nothing of the
+/// exchange enters the log. Terminal sessions otherwise wrote little —
+/// aiko nothing in thirty prompts and five compactions. Best effort: a
+/// failure costs the flush, never the compaction. Returns what the
+/// memory tool wrote.
+async fn flush_memory(
+    provider: &dyn Provider,
+    summarizer: &Request,
+    transcript: &[ChatMessage],
+    store: &std::sync::Arc<crate::memory::MemoryStore>,
+    cancel: &CancellationToken,
+) -> Vec<String> {
+    use crate::memory::{MemoryGetTool, MemorySearchTool, MemoryTool};
+    use crate::tools::{Tool, ToolContext, ToolOutput};
+    let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
+        MemoryTool::new(store.clone()),
+        MemorySearchTool::new(store.clone()),
+        MemoryGetTool::new(store.clone()),
+    ];
+    let base = Request {
+        messages: Vec::new(),
+        ..summarizer.clone()
+    };
+    let mut messages = transcript.to_vec();
+    messages.push(ChatMessage::user_text(FLUSH_INSTRUCTION));
+    let mut kept = Vec::new();
+    for _ in 0..FLUSH_ROUNDS {
+        let request = Request {
+            messages: messages.clone(),
+            ..base.clone()
+        };
+        let response = match respond_once(provider, request, cancel).await {
+            Ok(Some(response)) if !response.calls.is_empty() => response,
+            _ => break,
+        };
+        let mut results = Vec::new();
+        for (id, name, input) in &response.calls {
+            let output = match tools.iter().find(|tool| tool.name() == name) {
+                // The memory tools read no working directory; a context
+                // only has to have one that exists.
+                Some(tool) => {
+                    tool.run(input.clone(), ToolContext::root(std::env::temp_dir()))
+                        .await
+                }
+                None => ToolOutput::error("only the memory tools run before a summary"),
+            };
+            if name == "memory" && !output.is_error && crate::memory::was_a_write(&output.content) {
+                kept.push(kept_line(&output.content, input));
+            }
+            results.push(ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: output.content,
+                is_error: output.is_error,
+                images: Vec::new(),
+            });
+        }
+        // The thinking goes back beside the calls: a chat-wire model in
+        // thinking mode (Kimi, DeepSeek) refuses a tool call without it.
+        let mut content = Vec::new();
+        if !response.thinking.is_empty() {
+            content.push(ContentBlock::Thinking {
+                text: response.thinking,
+                field: response.field,
+            });
+        }
+        content.extend(response.calls.into_iter().map(|(id, name, input)| {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                input,
+                item_id: None,
+            }
+        }));
+        messages.push(ChatMessage {
+            role: Role::Assistant,
+            content,
+        });
+        messages.push(ChatMessage {
+            role: Role::User,
+            content: results,
+        });
+    }
+    kept
+}
+
+/// A flush write as the handover lists it: a note by its result, which
+/// names it; a core write with the file and the entry, which "added"
+/// alone does not.
+fn kept_line(result: &str, input: &serde_json::Value) -> String {
+    if !(result.starts_with("added")
+        || result.starts_with("replaced")
+        || result.starts_with("removed"))
+    {
+        return result.to_string();
+    }
+    let field = |name: &str| input.get(name).and_then(serde_json::Value::as_str);
+    let file = match field("file") {
+        Some("user") => "USER.md",
+        _ => "MEMORY.md",
+    };
+    let entry = field("text")
+        .or(field("new"))
+        .or(field("old"))
+        .unwrap_or_default();
+    format!(
+        "{} in {file}: {entry}",
+        result.split_whitespace().next().unwrap_or(result)
+    )
 }
 
 /// Returns the compaction summary when one was performed.
@@ -522,6 +682,10 @@ pub(crate) async fn compact_if_needed_locked(
         cache_key: Some(session.session_id().to_string()),
         options: crate::model::variant_options(model, session.effective_variant().as_deref())?,
     };
+    let kept = match options.memory {
+        Some(store) => flush_memory(provider, &request, &transcript, store, options.cancel).await,
+        None => Vec::new(),
+    };
     let summary = summarize_once(provider, request, options.cancel).await?;
     if options.cancel.is_cancelled() {
         return Ok(None);
@@ -532,6 +696,20 @@ pub(crate) async fn compact_if_needed_locked(
     if let Some(reason) = degenerate_summary(&summary) {
         anyhow::bail!("compaction produced no usable summary: {reason}");
     }
+    // What the flush kept goes in the handover: the next context knows
+    // it is written down, and where to look.
+    let summary = if kept.is_empty() {
+        summary
+    } else {
+        format!(
+            "{}\n\n## Remembered\n{}",
+            summary.trim_end(),
+            kept.iter()
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
 
     session.append(SessionEvent::Compaction {
         id: new_id(),

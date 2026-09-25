@@ -32,8 +32,20 @@ no cap. ilar's core is frozen and cached per session, so the caps are
 now 6,000 and 2,500, with a rule for what goes there: what every
 session needs, not one project's detail.
 
-Still open: terminal sessions rarely write memory (aiko: none in 30
-prompts). OpenClaw's flush before compaction is the next thing to try.
+Terminal sessions rarely wrote memory (aiko: none in 30 prompts and 5
+compactions). So before an automatic compaction, a session nobody
+reviews now gets a flush, as OpenClaw does. A first version put a
+`<memory-flush>` message into the turn and delayed the compaction one
+step. The review found three flaws:
+- a text-only answer to it ended the turn, leaving the person's prompt
+  unanswered;
+- the delay could push a request past the input limit;
+- a resume cut at the flush and not at the prompt.
+
+The flush is now a side request inside compaction, beside the
+summarizer's. It uses the same prompt and tools (so the cache serves
+it) and runs only the memory tools, for up to three rounds. Its writes
+go into the handover. The turn is not touched.
 
 ## 2026-09-24 — Services can report their exit
 

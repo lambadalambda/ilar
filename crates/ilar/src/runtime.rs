@@ -858,6 +858,13 @@ impl RuntimePlan {
                 .as_ref()
                 .filter(|memory| memory.recall)
                 .map(|memory| crate::memory::RecallConfig::new(memory.store.clone())),
+            // A session told to write its own memory gets a turn at it
+            // before each compaction; one with a review does not.
+            memory_flush: self
+                .memory
+                .as_ref()
+                .filter(|memory| memory.standing_prompt)
+                .map(|memory| memory.store.clone()),
             ..loop_config
         };
         // Always attached; whether it shows is the tool's own call, per

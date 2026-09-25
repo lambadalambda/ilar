@@ -196,6 +196,19 @@ names. The `memory` tool's description and the assistant's after-turn
 review say the same rule, so a note is found the same way whoever
 wrote it.
 
+A standing section alone was not enough: sessions went through many
+prompts and several compactions without writing anything. So before an
+automatic compaction summarizes the conversation away, a session that
+writes its own memory gets one side request over the same
+conversation. It asks the model to write what a later session would
+need, and only the memory tools run. The request uses the same system
+prompt and tools as the turn, so the provider serves it from its
+prompt cache. Nothing of that exchange enters the session. What it
+wrote is added to the handover under "Remembered", so the next context
+knows it is saved. A failure costs the flush, never the compaction.
+The idea is OpenClaw's. The assistant, which has its review, gets
+none, and neither does a `/compact` you ask for.
+
 Memory also comes to the model unasked, in two places, both
 cache-safe. At session open, beside the core block, the newest notes'
 index lines (at most twenty, under 4 KiB) say what the archive holds;

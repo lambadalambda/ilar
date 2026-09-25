@@ -410,3 +410,105 @@ async fn the_session_s_recall_budget_stops_it() {
         "the budget was spent"
     );
 }
+
+/// A note call the flush makes, as a provider streams it.
+fn note_call(id: &str, input: serde_json::Value) -> Vec<ProviderEvent> {
+    vec![
+        ProviderEvent::ThinkingDelta("the database choice should last".into()),
+        ProviderEvent::ToolCallStarted {
+            id: id.into(),
+            name: "memory".into(),
+            item_id: None,
+        },
+        ProviderEvent::ToolCallCompleted {
+            id: id.into(),
+            name: "memory".into(),
+            input,
+        },
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+            usage: Default::default(),
+        },
+    ]
+}
+
+/// Before a compaction folds the conversation away, a session nobody
+/// reviews gets one side request — OpenClaw's flush — that may call the
+/// memory tools. Terminal sessions otherwise wrote little: aiko none in
+/// thirty prompts and five compactions. The turn itself is untouched:
+/// no message is added to it, and the handover says what was kept.
+#[tokio::test]
+async fn a_compaction_first_lets_the_model_write_its_memory() {
+    let t = Recalling::new(vec![
+        done("hi"),
+        note_call(
+            "flush-1",
+            serde_json::json!({
+                "action": "note",
+                "kind": "decision",
+                "title": "Database",
+                "summary": "the app database is postgres 17",
+                "body": "Chosen for jsonb."
+            }),
+        ),
+        done("nothing more"),
+        done("SUMMARY: we talked about the database."),
+        done("after the handover"),
+    ]);
+    t.turn("hello there", ilar::agent::LoopConfig::default())
+        .await;
+    t.turn(
+        "we decided on postgres",
+        ilar::agent::LoopConfig {
+            // Any context is over this: compaction is due.
+            context_limit: Some(1),
+            memory_flush: Some(t.memory.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let notes = t.memory.notes().unwrap();
+    let database = notes
+        .iter()
+        .find(|note| note.title == "Database")
+        .expect("the flush wrote");
+    let events = t.store.audit_events(&t.id).unwrap();
+    let handover = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::Compaction { summary, .. } => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("compacted");
+    assert!(handover.contains(&database.id), "{handover}");
+    let user_texts: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::UserMessage { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_texts,
+        ["hello there", "we decided on postgres"],
+        "the turn is untouched"
+    );
+    // Same system prompt and tools as the turn: the conversation is
+    // served from the prompt cache, only the instruction is new.
+    let requests = t.provider.requests();
+    assert_eq!(requests[1].tools, requests[0].tools);
+    assert_eq!(requests[1].messages[0], requests[0].messages[0]);
+    // The second flush round carries the first round's thinking beside
+    // its call: Kimi and DeepSeek refuse a tool call without it.
+    let replayed = requests[2]
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == ilar::session::Role::Assistant)
+        .unwrap();
+    assert!(
+        matches!(&replayed.content[0], ContentBlock::Thinking { text, .. } if text.contains("database choice")),
+        "{replayed:?}"
+    );
+}
