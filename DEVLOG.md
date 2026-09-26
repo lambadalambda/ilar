@@ -1,5 +1,15 @@
 # DEVLOG
 
+## 2026-09-26 — A tool call that arrives as text
+
+A Qwen 3.8 turn on gufo ended on `<function=todo">`: a stray quote
+made the name undeclared, and gufo drops a call that fails its checks
+and returns the markup as plain text (gufo-org/gufo#266). The turn
+saw no call and ended. Now a reply whose text holds a `<tool_call>`
+block followed by a call's opening gets one `<tool-notification>`
+per turn saying the call did not run, and the turn goes on. The call
+is not run from the text: the server already found it invalid.
+
 ## 2026-09-25 — Memory, audited against the transcripts
 
 Three machines' logs were read against what memory is meant to do.

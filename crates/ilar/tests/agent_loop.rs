@@ -4448,3 +4448,80 @@ async fn a_started_turn_ends_its_log_with_how_it_finished() {
     cancelled.cancel();
     assert_eq!(finish_of(answer(), cancelled).await, TurnFinish::Aborted);
 }
+
+fn text_step(text: &str) -> Vec<ProviderEvent> {
+    vec![
+        ProviderEvent::TextDelta(text.into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        },
+    ]
+}
+
+async fn run_text_turn(steps: Vec<Vec<ProviderEvent>>) -> (MockProvider, Vec<SessionEvent>) {
+    let (store, session_id) = temp_session("build");
+    let provider = MockProvider::new(steps);
+    let (tx, _rx) = events_channel();
+    let outcome = run_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        "plan it",
+        &[],
+        None,
+        LoopConfig::default(),
+        tx,
+        CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+    let events = store.load(&session_id).unwrap().events().to_vec();
+    (provider, events)
+}
+
+fn notes(events: &[SessionEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::UserMessage { text, .. } if text.starts_with("<tool-notification>") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A server that drops a malformed call returns its markup as text; the
+/// turn says so once and goes on, rather than ending on a call that
+/// never ran. The call itself is not run from the text.
+#[tokio::test]
+async fn a_tool_call_leaked_as_text_is_answered_once_and_the_turn_goes_on() {
+    let leaked = "Plan below.\n\n<tool_call>\n<function=todo\">\n<parameter=todos>\n[]\n</parameter>\n</function>\n</tool_call>";
+    let (provider, events) = run_text_turn(vec![
+        text_step(leaked),
+        text_step(leaked),
+        text_step("unreached"),
+    ])
+    .await;
+    assert_eq!(provider.requests().len(), 2);
+    let notes = notes(&events);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("did not run"), "{}", notes[0]);
+}
+
+/// Prose that mentions the tag is not a call.
+#[tokio::test]
+async fn prose_about_a_tool_call_tag_ends_the_turn() {
+    let (provider, events) = run_text_turn(vec![
+        text_step("The server wraps calls in `<tool_call>` tags."),
+        text_step("unreached"),
+    ])
+    .await;
+    assert_eq!(provider.requests().len(), 1);
+    assert!(notes(&events).is_empty());
+}

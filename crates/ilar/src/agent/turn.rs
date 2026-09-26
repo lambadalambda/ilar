@@ -1628,6 +1628,41 @@ async fn run_turn_inner(
     result
 }
 
+/// Said when a response's text holds a tool call instead of a call: a
+/// server that finds a call malformed (a bad name, invalid JSON) may
+/// drop it and return its markup as text, and the turn would end on a
+/// call that never ran. It is not run from the text: the server has
+/// already found it invalid.
+const LEAKED_CALL_NOTE: &str = "<tool-notification>\nYour last response wrote a tool call as \
+text, so it did not run. Call the tool again: a declared tool name, arguments as valid JSON.\n\
+</tool-notification>";
+
+/// A `<tool_call>` tag followed by a call's opening — Qwen's
+/// `<function=…>` or Hermes' JSON — on its line or the next. Not prose
+/// that names the tag, nor an example in a code fence: told to call
+/// again, a model would run the example.
+fn leaks_tool_call(text: &str) -> bool {
+    let mut fenced = false;
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    while let Some(line) = lines.next() {
+        if line.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("<tool_call>").filter(|_| !fenced) else {
+            continue;
+        };
+        let opening = match rest.trim() {
+            "" => lines.next().unwrap_or_default(),
+            rest => rest,
+        };
+        if opening.starts_with("<function=") || opening.starts_with('{') {
+            return true;
+        }
+    }
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_turn_steps(
     session: &mut crate::session::Session,
@@ -1847,6 +1882,7 @@ async fn run_turn_steps(
     // Steers drained at the end of a step, waiting to be appended at the
     // top of the next one.
     let mut pending_steers: Vec<Steer> = Vec::new();
+    let mut told_of_leak = false;
     while iterations < config.max_iterations {
         if cancel.is_cancelled() {
             events.publish_terminal(LoopEvent::TurnDone {
@@ -2393,6 +2429,10 @@ async fn run_turn_steps(
         // Persist the completed assistant message.
         let blocks = acc.content_blocks();
         let had_tool_calls = !acc.tool_indices.is_empty();
+        let leaked_call = !had_tool_calls
+            && blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if leaks_tool_call(text)));
         let stop_reason = acc
             .stop_reason
             .clone()
@@ -2471,6 +2511,11 @@ async fn run_turn_steps(
             // reopening the turn with nothing to add and appending a
             // second assistant message with no user message between.
             pending_steers = drain_steers(steer.as_mut());
+            // Once a turn: a model that leaks again ends it, as before.
+            if leaked_call && !told_of_leak {
+                told_of_leak = true;
+                pending_steers.push(LEAKED_CALL_NOTE.into());
+            }
             if !pending_steers.is_empty() {
                 continue;
             }
@@ -2808,6 +2853,22 @@ fn invalid_tool_state(tool_name: &str, output: &crate::tools::ToolOutput) -> Opt
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_leaked_call_is_the_tag_and_a_calls_opening_outside_a_fence() {
+        use super::leaks_tool_call as leaks;
+        assert!(leaks("Plan.\n<tool_call>\n<function=todo\">\n</tool_call>"));
+        assert!(leaks("<tool_call><function=bash>"));
+        assert!(leaks(
+            "<tool_call>{\"name\": \"bash\", \"arguments\": {}}</tool_call>"
+        ));
+        assert!(!leaks("Calls come wrapped in `<tool_call>` tags."));
+        assert!(!leaks("<tool_call>\nthen the name"));
+        assert!(!leaks(
+            "The format:\n```\n<tool_call>\n<function=bash>\n```"
+        ));
+        assert!(leaks("```\nx\n```\n<tool_call>\n<function=bash>"));
+    }
+
     #[test]
     fn url_redaction_leaves_minified_json_alone() {
         let json = r#"{"host":"https://api.io","user":"bob@x.io"}"#;
