@@ -8,7 +8,7 @@ use ilar::provider::{
     EventStream, FixedProviderResolver, MockProvider, Provider, ProviderEvent, Request, StopReason,
 };
 use ilar::session::{ContentBlock, SessionEvent, SessionMeta, SessionStore, Usage, new_id};
-use ilar::subagent::{Notification, RouteOutcome, SubagentSpawner};
+use ilar::subagent::{JobKind, Notification, RouteOutcome, SubagentSpawner};
 use ilar::tools::{ToolContext, ToolRegistry};
 
 fn temp_store() -> (SessionStore, String) {
@@ -1826,6 +1826,7 @@ async fn a_background_job_sits_in_the_running_registry_while_it_runs() {
     for _ in 0..100 {
         if spawner.running_tasks().iter().any(|task| {
             task.agent == "job"
+                && task.job == Some(JobKind::Bash)
                 && task.description.starts_with("bash: sleep 1")
                 && task.session_id == session_id
                 && task.background
@@ -4943,6 +4944,16 @@ async fn a_service_started_with_notify_reports_its_exit_like_a_job() {
         started.content.contains("reports when it exits"),
         "{}",
         started.content
+    );
+    // Its watcher says what it is: the services panel already shows the
+    // service, so the agents panel leaves this row out.
+    assert!(
+        spawner
+            .running_tasks()
+            .iter()
+            .any(|task| task.job == Some(JobKind::ServiceWatch)),
+        "{:?}",
+        spawner.running_tasks()
     );
 
     let waited = tokio::time::timeout(

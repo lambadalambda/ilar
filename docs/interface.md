@@ -369,6 +369,8 @@ that cannot be delivered, or is held because the session it belongs to
 is open elsewhere, claims the notice line above the input. A background job — `bash` with `run_in_background` — sits in the
 same panel while it runs, as a ⚙ row with its command and elapsed time,
 so a long render never reads as a hang; it has no transcript to open.
+A service started with `notify` is not a row here: the services panel
+shows it.
 The panel's title counts each kind for what it is — `agents (2) · 1 job
 · 1 delivering` — since a job is not an agent.
 

@@ -530,6 +530,7 @@ impl Tool for ServiceTool {
                     let watching = spawner
                         .spawn_background_tool(
                             ctx.session_id.clone(),
+                            crate::subagent::JobKind::ServiceWatch,
                             // Redacted here, as a bash job's name is: it
                             // rides the report into the transcript.
                             format!(

@@ -553,6 +553,7 @@ impl Tool for BashTool {
                 return spawner
                     .spawn_background_tool(
                         parent_session_id,
+                        crate::subagent::JobKind::Bash,
                         description,
                         timeout,
                         future,

@@ -2768,7 +2768,13 @@ impl schedule::Runtime for LoopRuntime<'_> {
             })
             .collect();
         app.notifications_paused = *self.notifications_paused;
-        let tasks = self.spawner.running_tasks();
+        // A service's watcher is on the services panel as the service.
+        let tasks: Vec<_> = self
+            .spawner
+            .running_tasks()
+            .into_iter()
+            .filter(|task| task.job != Some(ilar::subagent::JobKind::ServiceWatch))
+            .collect();
         // Depths from the registry's own ancestry, in registry order:
         // children stay after their parent, roots keep their place.
         let depths = decide::tree_depths(

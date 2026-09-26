@@ -214,6 +214,14 @@ pub struct SubagentSpawner {
 /// to tell them apart. Named here, beside the one place that writes it.
 pub const JOB_AGENT: &str = "job";
 
+/// What a [`JOB_AGENT`] row runs, for a panel that shows some kinds
+/// elsewhere: a service's watcher is on the services panel already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobKind {
+    Bash,
+    ServiceWatch,
+}
+
 /// A subagent that is working right now, for anything that wants to
 /// show live delegation — the TUI sidebar reads this every frame.
 #[derive(Debug, Clone)]
@@ -226,6 +234,8 @@ pub struct RunningTask {
     pub parent_session_id: String,
     pub description: String,
     pub agent: String,
+    /// Set for a [`JOB_AGENT`] row, `None` for an agent's.
+    pub job: Option<JobKind>,
     pub background: bool,
     /// A completion being delivered to this session — waiting for its
     /// current turn to end, or resuming it — rather than a task the
@@ -1349,6 +1359,7 @@ impl SubagentSpawner {
             parent_session_id: ctx.session_id.clone(),
             description: input.description.clone(),
             agent: agent.name.clone(),
+            job: None,
             background,
             delivering: false,
             started: std::time::Instant::now(),
@@ -2006,9 +2017,11 @@ your response with a one-line status, not an answer; the task keeps running eith
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_background_tool(
         self: &Arc<Self>,
         parent_session_id: String,
+        kind: JobKind,
         description: String,
         timeout: std::time::Duration,
         future: ToolFuture,
@@ -2037,6 +2050,7 @@ your response with a one-line status, not an answer; the task keeps running eith
             parent_session_id: String::new(),
             description: description.clone(),
             agent: JOB_AGENT.into(),
+            job: Some(kind),
             background: true,
             delivering: false,
             started: std::time::Instant::now(),
@@ -2202,6 +2216,7 @@ your response with a one-line status, not an answer; the task keeps running eith
             parent_session_id: meta.parent_id.clone().unwrap_or_default(),
             description: notification.description.clone(),
             agent: meta.agent.clone(),
+            job: None,
             background: true,
             delivering: true,
             started: std::time::Instant::now(),
