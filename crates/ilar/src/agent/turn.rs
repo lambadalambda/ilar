@@ -1690,6 +1690,15 @@ async fn run_turn_steps(
     let provider = resolver
         .resolve_provider(&model)
         .map_err(TurnNeverStarted::mark)?;
+    // What a compaction at the start keeps word for word: a new prompt.
+    // A continued turn brings none, and its last user message may open
+    // hours of work, so everything is summarized, as mid-turn.
+    let start_cut = match start {
+        TurnStart::User(..) => crate::compaction::CompactionCut::TurnBoundary,
+        TurnStart::Continue | TurnStart::Resume(_) => {
+            crate::compaction::CompactionCut::ActiveHistory
+        }
+    };
     match start {
         TurnStart::User(user_input, images) => {
             if session.pending_question().is_some() {
@@ -1820,7 +1829,7 @@ async fn run_turn_steps(
                 context_limit: limit,
                 threshold: config.compaction_threshold,
                 force: config.force_compaction,
-                cut: crate::compaction::CompactionCut::TurnBoundary,
+                cut: start_cut,
                 system_prompt,
                 tools: &tools,
                 services: &registry.running_services(),

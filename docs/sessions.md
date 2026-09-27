@@ -107,8 +107,10 @@ handover summary: after a compaction the model sees its system prompt,
 its tools, and that summary — no recency window, no kept tail. The
 summarization request is the turn's own request with the instruction
 appended last, so the conversation is served from the provider's prompt
-cache and the model summarizes instead of answering it. `/compact`
-triggers it manually.
+cache and the model summarizes instead of answering it. At the start
+of a turn, only the new prompt stays word for word after the summary;
+a continued turn (Ctrl-R, a resume after an abort) has none, so
+everything is summarized. `/compact` triggers it manually.
 
 Nothing is lost, only put out of sight. The session's full log stays on
 disk and the `history` tool searches it: `query` finds excerpts

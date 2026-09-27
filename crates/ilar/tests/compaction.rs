@@ -1577,3 +1577,51 @@ async fn compaction_of_a_parked_session_spends_no_request() {
     // The log is untouched and still loads.
     assert!(store.load(&session_id).is_ok());
 }
+
+/// A continued turn — Ctrl-R, a resume after an abort — brings no new
+/// message, so nothing is new to keep word for word: everything is
+/// summarized, as mid-turn. Cutting at the last user message kept the
+/// whole long turn it opened, and a session of 169k tokens came back
+/// from its compaction at 147k.
+#[tokio::test]
+async fn a_continued_turn_compacts_everything_not_from_its_last_message() {
+    let (store, session_id) = temp_session();
+    seed_compactable_history(&store, &session_id);
+    let provider = MockProvider::new(vec![
+        text_turn("SUMMARY: the whole run."),
+        text_turn("going on"),
+    ]);
+    let (tx, _rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    let outcome = ilar::agent::resume_turn(
+        &provider,
+        &ToolRegistry::builtin(),
+        &store,
+        &session_id,
+        None,
+        tiny_config(),
+        tx,
+        tokio_util::sync::CancellationToken::new(),
+        ToolContext::root(std::env::temp_dir()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+
+    let events = store.audit_events(&session_id).unwrap();
+    let (at, kept_from) = events
+        .iter()
+        .enumerate()
+        .find_map(|(at, event)| match event {
+            SessionEvent::Compaction { kept_from, .. } => Some((at, *kept_from)),
+            _ => None,
+        })
+        .expect("compacted");
+    assert_eq!(kept_from, at, "nothing before the compaction is kept");
+    let answered = &provider.requests()[1];
+    assert!(
+        !format!("{:?}", answered.messages).contains("old question 5"),
+        "{:?}",
+        answered.messages
+    );
+}
