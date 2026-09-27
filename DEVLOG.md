@@ -1,5 +1,17 @@
 # DEVLOG
 
+## 2026-09-27 — The flush made the summary a cache miss on gufo
+
+A compaction on gufo ran 10 minutes and was cancelled. gufo reuses its
+cache only for a prompt that extends the previous request's prompt.
+The flush's side requests extended the conversation and hit; the
+summary request branched off before them and re-read 169k tokens. Now
+the summary goes on from the flush when the flush ended on a plain
+answer. After tool calls it keeps its own request, since a summarizer
+shown its own memory calls, tools on offer, is apt to call another.
+Qwen's template keeps earlier thinking unless `preserve_thinking` is
+false, so the continuation renders the same prefix.
+
 ## 2026-09-26 — A tool call that arrives as text
 
 A Qwen 3.8 turn on gufo ended on `<function=todo">`: a stray quote
