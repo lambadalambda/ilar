@@ -133,6 +133,12 @@ fn carries_prior_summary(messages: &[ChatMessage]) -> bool {
 /// The conversation exactly as the turn sent it, plus the instruction as
 /// a final user message. The shared prefix is what makes this cheap.
 fn summarizer_messages(transcript: &[ChatMessage], services: &[String]) -> Vec<ChatMessage> {
+    let mut messages = transcript.to_vec();
+    messages.push(summary_instruction(transcript, services));
+    messages
+}
+
+fn summary_instruction(transcript: &[ChatMessage], services: &[String]) -> ChatMessage {
     let mut instruction = String::from(SUMMARIZATION_INSTRUCTION);
     if carries_prior_summary(transcript) {
         instruction.push_str(SUMMARY_CARRY_FORWARD);
@@ -144,9 +150,7 @@ fn summarizer_messages(transcript: &[ChatMessage], services: &[String]) -> Vec<C
             instruction.push_str(service);
         }
     }
-    let mut messages = transcript.to_vec();
-    messages.push(ChatMessage::user_text(instruction));
-    messages
+    ChatMessage::user_text(instruction)
 }
 
 /// Appended when the session's service manager reports running
@@ -502,14 +506,18 @@ const FLUSH_ROUNDS: usize = 3;
 /// exchange enters the log. Terminal sessions otherwise wrote little —
 /// aiko nothing in thirty prompts and five compactions. Best effort: a
 /// failure costs the flush, never the compaction. Returns what the
-/// memory tool wrote.
+/// memory tool wrote, and the exchange for the summary to go on from:
+/// a server that caches only a continuation (gufo) reads the whole
+/// conversation again for a request that branches off before it.
+/// `None` unless it ended on an answer without calls: a summary asked
+/// right after tool results, tools on offer, is apt to call another.
 async fn flush_memory(
     provider: &dyn Provider,
     summarizer: &Request,
     transcript: &[ChatMessage],
     store: &std::sync::Arc<crate::memory::MemoryStore>,
     cancel: &CancellationToken,
-) -> Vec<String> {
+) -> (Vec<String>, Option<Vec<ChatMessage>>) {
     use crate::memory::{MemoryGetTool, MemorySearchTool, MemoryTool};
     use crate::tools::{Tool, ToolContext, ToolOutput};
     let tools: Vec<std::sync::Arc<dyn Tool>> = vec![
@@ -524,17 +532,56 @@ async fn flush_memory(
     let mut messages = transcript.to_vec();
     messages.push(ChatMessage::user_text(FLUSH_INSTRUCTION));
     let mut kept = Vec::new();
+    let mut settled = false;
     for _ in 0..FLUSH_ROUNDS {
         let request = Request {
             messages: messages.clone(),
             ..base.clone()
         };
         let response = match respond_once(provider, request, cancel).await {
-            Ok(Some(response)) if !response.calls.is_empty() => response,
+            Ok(Some(response)) => response,
             _ => break,
         };
+        // The answer goes back whole: the thinking beside the calls,
+        // since a chat-wire model in thinking mode (Kimi, DeepSeek)
+        // refuses a tool call without it, and the text too, since the
+        // summary goes on from exactly this exchange.
+        let mut content = Vec::new();
+        if !response.thinking.is_empty() {
+            content.push(ContentBlock::Thinking {
+                text: response.thinking,
+                field: response.field,
+            });
+        }
+        if !response.text.is_empty() {
+            content.push(ContentBlock::Text {
+                text: response.text,
+            });
+        }
+        let calls = response.calls;
+        content.extend(
+            calls
+                .iter()
+                .map(|(id, name, input)| ContentBlock::ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    item_id: None,
+                }),
+        );
+        let answered = !content.is_empty();
+        if answered {
+            messages.push(ChatMessage {
+                role: Role::Assistant,
+                content,
+            });
+        }
+        if calls.is_empty() {
+            settled = answered;
+            break;
+        }
         let mut results = Vec::new();
-        for (id, name, input) in &response.calls {
+        for (id, name, input) in calls {
             let output = match tools.iter().find(|tool| tool.name() == name) {
                 // The memory tools read no working directory; a context
                 // only has to have one that exists.
@@ -545,42 +592,21 @@ async fn flush_memory(
                 None => ToolOutput::error("only the memory tools run before a summary"),
             };
             if name == "memory" && !output.is_error && crate::memory::was_a_write(&output.content) {
-                kept.push(kept_line(&output.content, input));
+                kept.push(kept_line(&output.content, &input));
             }
             results.push(ContentBlock::ToolResult {
-                tool_use_id: id.clone(),
+                tool_use_id: id,
                 content: output.content,
                 is_error: output.is_error,
                 images: Vec::new(),
             });
         }
-        // The thinking goes back beside the calls: a chat-wire model in
-        // thinking mode (Kimi, DeepSeek) refuses a tool call without it.
-        let mut content = Vec::new();
-        if !response.thinking.is_empty() {
-            content.push(ContentBlock::Thinking {
-                text: response.thinking,
-                field: response.field,
-            });
-        }
-        content.extend(response.calls.into_iter().map(|(id, name, input)| {
-            ContentBlock::ToolCall {
-                id,
-                name,
-                input,
-                item_id: None,
-            }
-        }));
-        messages.push(ChatMessage {
-            role: Role::Assistant,
-            content,
-        });
         messages.push(ChatMessage {
             role: Role::User,
             content: results,
         });
     }
-    kept
+    (kept, settled.then_some(messages))
 }
 
 /// A flush write as the handover lists it: a note by its result, which
@@ -673,8 +699,8 @@ pub(crate) async fn compact_if_needed_locked(
     // The request the turn itself would have sent, with the instruction
     // appended: same system prompt, same tools, same session cache key,
     // so the provider serves the conversation from its prompt cache and
-    // only the instruction is new.
-    let request = Request {
+    // only the instruction is new. After a flush, it goes on from that.
+    let mut request = Request {
         model: model.to_string(),
         system_prompt: options.system_prompt.map(str::to_string),
         messages: summarizer_messages(&transcript, options.services),
@@ -683,7 +709,15 @@ pub(crate) async fn compact_if_needed_locked(
         options: crate::model::variant_options(model, session.effective_variant().as_deref())?,
     };
     let kept = match options.memory {
-        Some(store) => flush_memory(provider, &request, &transcript, store, options.cancel).await,
+        Some(store) => {
+            let (kept, exchange) =
+                flush_memory(provider, &request, &transcript, store, options.cancel).await;
+            if let Some(mut exchange) = exchange {
+                exchange.push(summary_instruction(&transcript, options.services));
+                request.messages = exchange;
+            }
+            kept
+        }
         None => Vec::new(),
     };
     let summary = summarize_once(provider, request, options.cancel).await?;

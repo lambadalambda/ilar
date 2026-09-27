@@ -511,4 +511,60 @@ async fn a_compaction_first_lets_the_model_write_its_memory() {
         matches!(&replayed.content[0], ContentBlock::Thinking { text, .. } if text.contains("database choice")),
         "{replayed:?}"
     );
+    // The summary goes on from the flush, its last answer included,
+    // rather than branching off before it: a server that caches only a
+    // continuation (gufo) read 169k tokens again for the branch.
+    let summary = &requests[3].messages;
+    assert!(summary.starts_with(&requests[2].messages), "{summary:?}");
+    assert_eq!(summary.len(), requests[2].messages.len() + 2);
+    assert!(
+        matches!(&summary[summary.len() - 2].content[..], [ContentBlock::Text { text }] if text == "nothing more"),
+        "{summary:?}"
+    );
+}
+
+/// A flush still calling tools at its last round is not gone on from: a
+/// summary asked right after tool results, tools on offer, is apt to
+/// call another, and a call fails the compaction.
+#[tokio::test]
+async fn a_flush_that_ends_on_calls_leaves_the_summary_its_own_request() {
+    let note = |id: &str, title: &str| {
+        note_call(
+            id,
+            serde_json::json!({
+                "action": "note",
+                "kind": "decision",
+                "title": title,
+                "summary": format!("{title} was decided"),
+                "body": "Chosen."
+            }),
+        )
+    };
+    let t = Recalling::new(vec![
+        done("hi"),
+        note("flush-1", "One"),
+        note("flush-2", "Two"),
+        note("flush-3", "Three"),
+        done("SUMMARY: three decisions."),
+        done("after the handover"),
+    ]);
+    t.turn("hello there", ilar::agent::LoopConfig::default())
+        .await;
+    t.turn(
+        "we decided three things",
+        ilar::agent::LoopConfig {
+            context_limit: Some(1),
+            memory_flush: Some(t.memory.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let requests = t.provider.requests();
+    let (flush, summary) = (&requests[1].messages, &requests[4].messages);
+    // The conversation and the summary instruction, as without a flush.
+    assert_eq!(summary.len(), flush.len());
+    assert_eq!(summary[..flush.len() - 1], flush[..flush.len() - 1]);
+    assert_ne!(summary.last(), flush.last());
+    assert_eq!(t.memory.notes().unwrap().len(), 3);
 }
