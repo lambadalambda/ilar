@@ -91,7 +91,7 @@ async fn live_zen_kimi_reasons_then_calls_a_tool() {
 #[ignore]
 async fn live_zen_grok_on_responses_calls_a_tool() {
     let provider = OpenCodeProvider::zen(key(), None);
-    let (calls, stop) = turn(&provider, "opencode/grok-4.6").await;
+    let (calls, stop) = turn(&provider, "opencode/grok-4.7").await;
     assert_eq!(calls, ["write"]);
     assert_eq!(stop, Some(StopReason::ToolUse));
 }
@@ -217,7 +217,7 @@ async fn live_chat_rows_take_their_thinking_back() {
     let rows: [(&OpenCodeProvider, &str); 5] = [
         (&go, "opencode-go/qwen3.8-flash"),
         (&go, "opencode-go/minimax-m3"),
-        (&go, "opencode-go/kimi-k2.6"),
+        (&go, "opencode-go/kimi-k2.7-code"),
         (&go, "opencode-go/deepseek-v4-flash"),
         (&zen, "opencode/kimi-k3"),
     ];

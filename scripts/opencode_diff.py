@@ -42,6 +42,7 @@ EXCLUDED = {
     ("opencode", "gpt-5.2-codex"): "past OpenCode's published deprecation (2026-09-03)",
     ("opencode", "gpt-5.3-codex-spark"): "listed, but the upstream has no route (2026-09-03)",
     ("opencode", "mimo-v2.6-flash-free"): "free tier only inside OpenCode (2026-09-24)",
+    ("opencode", "longcat-2.5-preview-free"): "free tier only inside OpenCode (2026-09-30)",
     ("opencode-go", "minimax-m2.7"): "503 upstream while the Zen twin answers (2026-09-24)",
 }
 

@@ -244,31 +244,14 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "opencode",
-        "deepseek-v4-flash",
-        pricing!(0.22, 0.66, Some(0.007), None),
-    ),
-    (
-        "opencode",
         "minimax-m3",
         pricing!(0.3, 1.2, Some(0.06), None),
     ),
-    (
-        "opencode",
-        "minimax-m2.7",
-        pricing!(0.3, 1.2, Some(0.06), None),
-    ),
-    ("opencode", "glm-5.2", pricing!(1.4, 4.4, Some(0.26), None)),
-    ("opencode", "glm-5.1", pricing!(1.4, 4.4, Some(0.26), None)),
     ("opencode", "kimi-k3", pricing!(3.0, 15.0, Some(0.3), None)),
     (
         "opencode",
         "kimi-k2.7-code",
         pricing!(0.95, 4.0, Some(0.19), None),
-    ),
-    (
-        "opencode",
-        "kimi-k2.6",
-        pricing!(0.95, 4.0, Some(0.16), None),
     ),
     (
         "opencode",
@@ -282,11 +265,6 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "opencode",
-        "ling-3.0-flash-fin-free",
-        pricing!(0.0, 0.0, Some(0.0), None),
-    ),
-    (
-        "opencode",
         "nemotron-3-ultra-free",
         pricing!(0.0, 0.0, Some(0.0), None),
     ),
@@ -295,33 +273,16 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "nemotron-3.5-lightning-free",
         pricing!(0.0, 0.0, Some(0.0), None),
     ),
-    // Zen's discount ended 2026-09-18 (models.dev 156818aa).
-    (
-        "opencode",
-        "gpt-5.6-sol",
-        pricing!(4.0, 20.0, Some(0.4), Some(5.0)),
-    ),
     // Zen's own price since 2026-07-10, not the openai twin's.
     (
         "opencode",
         "gpt-5.6-terra",
         pricing!(2.5, 15.0, Some(0.25), Some(3.125)),
     ),
-    (
-        "opencode",
-        "gpt-5.6-luna",
-        pricing!(0.2, 1.2, Some(0.02), Some(0.25)),
-    ),
     ("opencode", "gpt-5.5", pricing!(5.0, 30.0, Some(0.5), None)),
     (
         "opencode",
         "gpt-5.5-pro",
-        pricing!(30.0, 180.0, Some(30.0), None),
-    ),
-    ("opencode", "gpt-5.4", pricing!(2.5, 15.0, Some(0.25), None)),
-    (
-        "opencode",
-        "gpt-5.4-pro",
         pricing!(30.0, 180.0, Some(30.0), None),
     ),
     (
@@ -339,23 +300,6 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "gpt-5.3-codex",
         pricing!(1.75, 14.0, Some(0.175), None),
     ),
-    (
-        "opencode",
-        "gpt-5.2",
-        pricing!(1.75, 14.0, Some(0.175), None),
-    ),
-    (
-        "opencode",
-        "gpt-5.1",
-        pricing!(1.07, 8.5, Some(0.107), None),
-    ),
-    ("opencode", "gpt-5", pricing!(1.07, 8.5, Some(0.107), None)),
-    (
-        "opencode",
-        "gpt-5-nano",
-        pricing!(0.05, 0.4, Some(0.005), None),
-    ),
-    ("opencode", "grok-4.6", pricing!(2.0, 6.0, Some(0.5), None)),
     // The 2026-09-24 rows, at models.dev's base tier.
     ("opencode", "grok-4.7", pricing!(1.4, 4.2, Some(0.35), None)),
     (
@@ -373,11 +317,6 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "deepseek-v4.1-flash",
         pricing!(0.3, 1.2, Some(0.006), None),
     ),
-    (
-        "opencode",
-        "deepseek-v4-flash-vision-exp",
-        pricing!(0.14, 0.28, Some(0.028), None),
-    ),
     ("opencode", "glm-5.3", pricing!(1.4, 4.4, Some(0.26), None)),
     (
         "opencode",
@@ -389,16 +328,10 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "space-bunny-free",
         pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
     ),
-    ("opencode", "grok-4.5", pricing!(2.0, 6.0, Some(0.3), None)),
     (
         "opencode",
         "grok-build-0.1",
         pricing!(1.0, 2.0, Some(0.2), None),
-    ),
-    (
-        "opencode",
-        "muse-spark-1.2",
-        pricing!(1.25, 4.25, Some(0.15), None),
     ),
     (
         "opencode",
@@ -427,11 +360,6 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "opencode-go",
-        "glm-5.1",
-        pricing!(1.4, 4.4, Some(0.26), None),
-    ),
-    (
-        "opencode-go",
         "kimi-k3",
         pricing!(3.0, 15.0, Some(0.3), None),
     ),
@@ -439,11 +367,6 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "opencode-go",
         "kimi-k2.7-code",
         pricing!(0.95, 4.0, Some(0.19), None),
-    ),
-    (
-        "opencode-go",
-        "kimi-k2.6",
-        pricing!(0.95, 4.0, Some(0.16), None),
     ),
     (
         "opencode-go",
@@ -527,6 +450,11 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "opencode-go",
+        "longcat-2.5-preview-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode-go",
         "muse-spark-1.3-contributor",
         pricing!(0.1, 0.2, Some(0.002), None),
     ),
@@ -539,11 +467,6 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "opencode",
         "qwen3.6-plus",
         pricing!(0.5, 3.0, Some(0.05), Some(0.625)),
-    ),
-    (
-        "opencode",
-        "qwen3.5-plus",
-        pricing!(0.2, 1.2, Some(0.02), Some(0.25)),
     ),
     (
         "opencode-go",
@@ -562,18 +485,8 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "opencode-go",
-        "qwen3.7-max",
-        pricing!(2.5, 7.5, Some(0.5), Some(3.125)),
-    ),
-    (
-        "opencode-go",
         "qwen3.7-plus",
         pricing!(0.4, 1.6, Some(0.04), Some(0.5)),
-    ),
-    (
-        "opencode-go",
-        "qwen3.6-plus",
-        pricing!(0.5, 3.0, Some(0.05), Some(0.625)),
     ),
 ];
 
@@ -1390,30 +1303,8 @@ static CATALOG: &[ModelInfo] = &[
     .reasoning(EFFORT_LOW_TO_MAX),
     model!(
         "opencode",
-        "gpt-5.6-sol",
-        "GPT-5.6 Sol",
-        272_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .input(272_000)
-    .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
-    model!(
-        "opencode",
         "gpt-5.6-terra",
         "GPT-5.6 Terra",
-        272_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .input(272_000)
-    .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
-    model!(
-        "opencode",
-        "gpt-5.6-luna",
-        "GPT-5.6 Luna",
         272_000,
         128_000,
         OpenCodeResponses
@@ -1435,26 +1326,6 @@ static CATALOG: &[ModelInfo] = &[
         "opencode",
         "gpt-5.5-pro",
         "GPT-5.5 Pro",
-        1_050_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(OPENAI_VERSIONED_PRO_VARIANTS),
-    model!(
-        "opencode",
-        "gpt-5.4",
-        "GPT-5.4",
-        1_050_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
-    model!(
-        "opencode",
-        "gpt-5.4-pro",
-        "GPT-5.4 Pro",
         1_050_000,
         128_000,
         OpenCodeResponses
@@ -1491,59 +1362,9 @@ static CATALOG: &[ModelInfo] = &[
     )
     .vision()
     .reasoning(OPENAI_GPT52_VARIANTS),
-    model!(
-        "opencode",
-        "gpt-5.2",
-        "GPT-5.2",
-        400_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
-    model!(
-        "opencode",
-        "gpt-5.1",
-        "GPT-5.1",
-        400_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(OPENAI_GPT51_VARIANTS),
-    model!(
-        "opencode",
-        "gpt-5",
-        "GPT-5",
-        400_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(OPENAI_GPT5_VARIANTS),
-    model!(
-        "opencode",
-        "gpt-5-nano",
-        "GPT-5 Nano",
-        400_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(OPENAI_GPT5_VARIANTS),
-    model!(
-        "opencode",
-        "grok-4.6",
-        "Grok 4.6",
-        500_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(EFFORT_LOW_TO_XHIGH),
     // Added 2026-09-24 from the live listings: models.dev's records,
     // each probed with a small request on its wire. Grok's output is
-    // cut as for 4.6; Space Bunny's 512K reply to the 1M rows' 131K.
+    // cut to 384K; Space Bunny's 512K reply to the 1M rows' 131K.
     model!(
         "opencode",
         "grok-4.7",
@@ -1586,16 +1407,6 @@ static CATALOG: &[ModelInfo] = &[
     .effort(ZAI_EFFORT_VARIANTS),
     model!(
         "opencode",
-        "deepseek-v4-flash-vision-exp",
-        "DeepSeek V4 Flash Vision Exp",
-        1_000_000,
-        384_000,
-        OpenCodeChat
-    )
-    .vision()
-    .effort(ZAI_EFFORT_VARIANTS),
-    model!(
-        "opencode",
         "glm-5.3",
         "GLM-5.3",
         1_000_000,
@@ -1626,16 +1437,6 @@ static CATALOG: &[ModelInfo] = &[
     .effort(EFFORT_LOW_TO_MAX),
     model!(
         "opencode",
-        "grok-4.5",
-        "Grok 4.5",
-        500_000,
-        128_000,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(OPENAI_WIDE_VARIANTS),
-    model!(
-        "opencode",
         "grok-build-0.1",
         "Grok Build 0.1",
         256_000,
@@ -1643,16 +1444,6 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeResponses
     )
     .vision(),
-    model!(
-        "opencode",
-        "muse-spark-1.2",
-        "Muse Spark 1.2",
-        1_048_576,
-        131_072,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
     model!(
         "opencode",
         "muse-spark-1.3-contributor-free",
@@ -1684,15 +1475,6 @@ static CATALOG: &[ModelInfo] = &[
     .effort(EFFORT_HIGH_MAX),
     model!(
         "opencode",
-        "deepseek-v4-flash",
-        "DeepSeek V4 Flash",
-        1_000_000,
-        384_000,
-        OpenCodeChat
-    )
-    .effort(ZAI_EFFORT_VARIANTS),
-    model!(
-        "opencode",
         "minimax-m3",
         "MiniMax-M3",
         512_000,
@@ -1700,31 +1482,6 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeChat
     )
     .vision(),
-    model!(
-        "opencode",
-        "minimax-m2.7",
-        "MiniMax-M2.7",
-        204_800,
-        131_072,
-        OpenCodeChat
-    ),
-    model!(
-        "opencode",
-        "glm-5.2",
-        "GLM-5.2",
-        1_000_000,
-        131_072,
-        OpenCodeChat
-    )
-    .effort(EFFORT_HIGH_MAX),
-    model!(
-        "opencode",
-        "glm-5.1",
-        "GLM-5.1",
-        204_800,
-        131_072,
-        OpenCodeChat
-    ),
     model!(
         "opencode",
         "kimi-k3",
@@ -1739,15 +1496,6 @@ static CATALOG: &[ModelInfo] = &[
         "opencode",
         "kimi-k2.7-code",
         "Kimi K2.7 Code",
-        262_144,
-        65_536,
-        OpenCodeChat
-    )
-    .vision(),
-    model!(
-        "opencode",
-        "kimi-k2.6",
-        "Kimi K2.6",
         262_144,
         65_536,
         OpenCodeChat
@@ -1772,14 +1520,6 @@ static CATALOG: &[ModelInfo] = &[
     .vision(),
     model!(
         "opencode",
-        "ling-3.0-flash-fin-free",
-        "Ling 3.0 Flash Fin Free",
-        262_144,
-        32_768,
-        OpenCodeChat
-    ),
-    model!(
-        "opencode",
         "nemotron-3-ultra-free",
         "Nemotron 3 Ultra Free",
         1_000_000,
@@ -1800,15 +1540,6 @@ static CATALOG: &[ModelInfo] = &[
         "opencode",
         "qwen3.6-plus",
         "Qwen3.6 Plus",
-        262_144,
-        65_536,
-        OpenCodeChat
-    )
-    .vision(),
-    model!(
-        "opencode",
-        "qwen3.5-plus",
-        "Qwen3.5 Plus",
         262_144,
         65_536,
         OpenCodeChat
@@ -1899,6 +1630,17 @@ static CATALOG: &[ModelInfo] = &[
     .input(524_288)
     .vision()
     .effort(EFFORT_LOW_TO_MAX),
+    // Added 2026-09-30, answering on Go; Zen serves its free tier only
+    // inside OpenCode. Thinking is on or off, with no ladder.
+    model!(
+        "opencode-go",
+        "longcat-2.5-preview-free",
+        "LongCat 2.5 Preview Free",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    )
+    .vision(),
     model!(
         "opencode-go",
         "muse-spark-1.3-contributor",
@@ -1949,14 +1691,6 @@ static CATALOG: &[ModelInfo] = &[
     .effort(EFFORT_HIGH_MAX),
     model!(
         "opencode-go",
-        "glm-5.1",
-        "GLM-5.1",
-        202_752,
-        32_768,
-        OpenCodeChat
-    ),
-    model!(
-        "opencode-go",
         "kimi-k3",
         "Kimi K3",
         1_048_576,
@@ -1969,15 +1703,6 @@ static CATALOG: &[ModelInfo] = &[
         "opencode-go",
         "kimi-k2.7-code",
         "Kimi K2.7 Code",
-        262_144,
-        65_536,
-        OpenCodeChat
-    )
-    .vision(),
-    model!(
-        "opencode-go",
-        "kimi-k2.6",
-        "Kimi K2.6",
         262_144,
         65_536,
         OpenCodeChat
@@ -2080,25 +1805,8 @@ static CATALOG: &[ModelInfo] = &[
     .effort(EFFORT_LOW_MEDIUM_XHIGH),
     model!(
         "opencode-go",
-        "qwen3.7-max",
-        "Qwen3.7 Max",
-        1_000_000,
-        65_536,
-        OpenCodeChat
-    ),
-    model!(
-        "opencode-go",
         "qwen3.7-plus",
         "Qwen3.7 Plus",
-        1_000_000,
-        65_536,
-        OpenCodeChat
-    )
-    .vision(),
-    model!(
-        "opencode-go",
-        "qwen3.6-plus",
-        "Qwen3.6 Plus",
         1_000_000,
         65_536,
         OpenCodeChat
@@ -2372,7 +2080,6 @@ mod tests {
             ("opencode/muse-spark-1.3", Responses, true, 5),
             ("opencode/qwen3.8-flash", Chat, true, 3),
             ("opencode/deepseek-v4.1-flash", Chat, true, 3),
-            ("opencode/deepseek-v4-flash-vision-exp", Chat, true, 3),
             ("opencode/glm-5.3", Chat, false, 3),
             ("opencode/glm-5.3-flash", Chat, true, 3),
             ("opencode/space-bunny-free", Chat, true, 5),
@@ -2395,13 +2102,37 @@ mod tests {
         assert!(find("opencode-go/minimax-m2.7").is_none());
     }
 
+    /// 2026-09-30: what the gateways stopped serving is gone — Zen's
+    /// refused with "Model access is disabled", Go's with 410 and a
+    /// replacement — and LongCat is on Go, where it answered.
+    #[test]
+    fn the_september_30_opencode_changes() {
+        for id in [
+            "opencode/gpt-5.6-sol",
+            "opencode/glm-5.2",
+            "opencode/grok-4.6",
+            "opencode/kimi-k2.6",
+            "opencode-go/kimi-k2.6",
+            "opencode-go/qwen3.7-max",
+        ] {
+            assert!(find(id).is_none(), "{id}");
+            assert!(pricing_for(id).is_none(), "{id}");
+        }
+        let longcat = find("opencode-go/longcat-2.5-preview-free").unwrap();
+        assert_eq!(longcat.access, ModelAccess::OpenCodeChat);
+        assert!(longcat.supports_vision());
+        assert!(find("opencode/longcat-2.5-preview-free").is_none());
+        let zen_sol = find("opencode/gpt-6.1-sol").unwrap();
+        assert_eq!(zen_sol.access, ModelAccess::OpenCodeResponses);
+    }
+
     /// Thinking goes back on the chat wire and nowhere else: every
     /// chat-completions row replays it, no Responses-wire or OpenAI row
     /// does, and a model nobody can find keeps its thinking local.
     #[test]
     fn thinking_is_replayed_on_the_chat_wire_only() {
         assert!(replays_thinking("zai/glm-4.7"));
-        assert!(replays_thinking("opencode-go/kimi-k2.6"));
+        assert!(replays_thinking("opencode-go/kimi-k2.7-code"));
         assert!(!replays_thinking("openai/gpt-5.6-sol"));
         assert!(!replays_thinking("opencode-go/gpt-5.3-codex"));
         assert!(!replays_thinking("nowhere/nothing"));
@@ -2613,11 +2344,14 @@ mod tests {
                 price(&format!("{provider}/gpt-6-luna")),
                 (0.1, 0.5, Some(0.01), Some(0.125))
             );
+            assert_eq!(
+                price(&format!("{provider}/gpt-6.1-sol")),
+                (2.0, 10.0, Some(0.1), Some(2.5))
+            );
         }
         let cut = (4.0, 20.0, Some(0.4), Some(5.0));
         assert_eq!(price("openai/gpt-5.6-sol"), cut);
         assert_eq!(price("openai/gpt-5.6"), cut);
-        assert_eq!(price("opencode/gpt-5.6-sol"), cut);
         assert_eq!(
             price("opencode/gpt-5.6-terra"),
             (2.5, 15.0, Some(0.25), Some(3.125))
@@ -2636,7 +2370,7 @@ mod tests {
                 matches!(model.provider, "opencode" | "opencode-go") && model.id.starts_with("gpt-")
             })
             .collect::<Vec<_>>();
-        assert!(twins.len() >= 15, "expected the GPT lineup on Zen");
+        assert!(twins.len() >= 10, "expected the GPT lineup on Zen");
         for model in twins {
             let twin = find(&format!("openai/{}", model.id))
                 .unwrap_or_else(|| panic!("{} has no openai twin", model.full_id()));
@@ -2658,12 +2392,12 @@ mod tests {
     fn opencode_rows_name_their_wire() {
         // The docs put each model on one endpoint; the row records which.
         let access = |id: &str| find(id).unwrap().access;
-        assert_eq!(access("opencode/glm-5.2"), ModelAccess::OpenCodeChat);
+        assert_eq!(access("opencode/glm-5.3"), ModelAccess::OpenCodeChat);
         assert_eq!(access("opencode/kimi-k3"), ModelAccess::OpenCodeChat);
         assert_eq!(access("opencode/big-pickle"), ModelAccess::OpenCodeChat);
-        assert_eq!(access("opencode/grok-4.6"), ModelAccess::OpenCodeResponses);
+        assert_eq!(access("opencode/grok-4.7"), ModelAccess::OpenCodeResponses);
         assert_eq!(
-            access("opencode/muse-spark-1.2"),
+            access("opencode/muse-spark-1.3"),
             ModelAccess::OpenCodeResponses
         );
         assert_eq!(access("opencode-go/glm-5.3"), ModelAccess::OpenCodeChat);
@@ -2698,7 +2432,7 @@ mod tests {
     #[test]
     fn opencode_responses_rows_take_the_openai_effort_body() {
         assert_eq!(
-            variant_options("opencode/gpt-5.6-sol", Some("high")).unwrap(),
+            variant_options("opencode/gpt-6-sol", Some("high")).unwrap(),
             serde_json::json!({"reasoning": {"effort": "high"}})
         );
         assert_eq!(
@@ -2719,7 +2453,7 @@ mod tests {
             ids("opencode-go/muse-spark-1.3-contributor"),
             ["minimal", "low", "medium", "high", "xhigh"]
         );
-        assert_eq!(ids("opencode/grok-4.6"), ["low", "medium", "high", "xhigh"]);
+        assert_eq!(ids("opencode/grok-4.7"), ["low", "medium", "high", "xhigh"]);
         assert_eq!(ids("opencode-go/glm-5.3"), ["low", "high", "max"]);
         assert_eq!(ids("opencode-go/kimi-k3"), ["max"]);
         assert_eq!(ids("opencode-go/hy3"), ["none", "low", "high"]);
@@ -2733,7 +2467,7 @@ mod tests {
             variant_options("opencode-go/glm-5.3", Some("max")).unwrap(),
             serde_json::json!({"reasoning_effort": "max"})
         );
-        assert!(variant_options("opencode/grok-4.6", Some("max")).is_err());
+        assert!(variant_options("opencode/grok-4.7", Some("max")).is_err());
         assert!(variant_options("opencode-go/minimax-m3", Some("high")).is_err());
     }
 

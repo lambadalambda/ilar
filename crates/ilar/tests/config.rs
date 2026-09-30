@@ -654,12 +654,12 @@ fn one_opencode_key_reaches_both_gateways() {
         config.providers["opencode-go"].api_key.as_deref(),
         Some("ok")
     );
-    assert!(config.provider_result("opencode/glm-5.2").is_ok());
+    assert!(config.provider_result("opencode/glm-5.3").is_ok());
     assert!(config.provider_result("opencode-go/gpt-5.6-luna").is_ok());
 
     let models = config.available_models();
     for id in [
-        "opencode/gpt-5.6-sol",
+        "opencode/gpt-6-sol",
         "opencode/kimi-k3",
         "opencode/big-pickle",
         "opencode-go/glm-5.3",
@@ -704,7 +704,7 @@ fn one_opencode_key_reaches_both_gateways() {
         config.providers["opencode-go"].api_key.as_deref(),
         Some("go-only")
     );
-    assert!(config.provider_result("opencode/glm-5.2").is_err());
+    assert!(config.provider_result("opencode/glm-5.3").is_err());
     assert!(config.provider_result("opencode-go/glm-5.2").is_ok());
     let models = config.available_models();
     assert!(models.iter().all(|model| model.provider != "opencode"));

@@ -87,13 +87,13 @@ fn body_of(raw: &str) -> serde_json::Value {
 async fn chat_rows_post_to_chat_completions_without_zai_fields() {
     let (base, server) = http_server(CHAT_TURN);
     let provider = OpenCodeProvider::zen("k".into(), Some(base));
-    let events = drain(provider.stream(request("opencode/glm-5.2")).unwrap()).await;
+    let events = drain(provider.stream(request("opencode/glm-5.3")).unwrap()).await;
     let raw = server.await.unwrap();
 
     assert!(raw.starts_with("POST /chat/completions HTTP/1.1"), "{raw}");
     assert!(raw.contains("authorization: Bearer k"), "{raw}");
     let body = body_of(&raw);
-    assert_eq!(body["model"], "glm-5.2");
+    assert_eq!(body["model"], "glm-5.3");
     assert_eq!(body["stream_options"]["include_usage"], true);
     assert!(body.get("tool_stream").is_none(), "tool_stream is z.ai's");
     assert!(events.contains(&ProviderEvent::TextDelta("ok".into())));
@@ -144,7 +144,7 @@ async fn each_gateway_refuses_the_other_prefix() {
         .expect("go id on zen");
     assert!(err.to_string().contains("expected opencode"), "{err}");
     let err = go
-        .stream(request("opencode/glm-5.2"))
+        .stream(request("opencode/glm-5.3"))
         .err()
         .expect("zen id on go");
     assert!(err.to_string().contains("expected opencode-go"), "{err}");
@@ -243,7 +243,7 @@ async fn both_wires_name_their_session_to_the_gateway() {
 
     let (base, server) = http_server(CHAT_TURN);
     let zen = OpenCodeProvider::zen("k".into(), Some(base));
-    let _ = drain(zen.stream(with_session("opencode/glm-5.2")).unwrap()).await;
+    let _ = drain(zen.stream(with_session("opencode/glm-5.3")).unwrap()).await;
     let raw = server.await.unwrap();
     assert_eq!(
         header(&raw, "x-opencode-session").as_deref(),
@@ -272,7 +272,7 @@ async fn both_wires_name_their_session_to_the_gateway() {
     // No session (topic naming): a per-process one stands in.
     let (base, server) = http_server(CHAT_TURN);
     let zen = OpenCodeProvider::zen("k".into(), Some(base));
-    let _ = drain(zen.stream(request("opencode/glm-5.2")).unwrap()).await;
+    let _ = drain(zen.stream(request("opencode/glm-5.3")).unwrap()).await;
     let raw = server.await.unwrap();
     assert_eq!(
         header(&raw, "x-opencode-session").as_deref(),
