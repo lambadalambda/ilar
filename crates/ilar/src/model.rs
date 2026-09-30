@@ -76,6 +76,18 @@ macro_rules! pricing {
 /// absent — their effective token price depends on the plan, so the UI
 /// shows tokens without dollars.
 static PRICING: &[(&str, &str, ModelPricing)] = &[
+    // GPT-6.1 Sol (2026-09-29): 6 Sol's rates with half its cache read,
+    // the same on Zen. Base tier only.
+    (
+        "openai",
+        "gpt-6.1-sol",
+        pricing!(2.0, 10.0, Some(0.1), Some(2.5)),
+    ),
+    (
+        "opencode",
+        "gpt-6.1-sol",
+        pricing!(2.0, 10.0, Some(0.1), Some(2.5)),
+    ),
     // GPT-6 Sol and Luna (2026-09-22): the same on Zen. Base tier only,
     // as for astra — past 272k input the rate doubles.
     (
@@ -1003,6 +1015,20 @@ macro_rules! model {
 // the docs file under the Messages wire answer on chat-completions and
 // are cataloged there; the Claude and Gemini families do not.
 static CATALOG: &[ModelInfo] = &[
+    // GPT-6.1 Sol (2026-09-29): 6 Sol's window and input cap, but the
+    // ladder starts at low (Codex's models.json, models.dev); every
+    // ChatGPT plan.
+    model!(
+        "openai",
+        "gpt-6.1-sol",
+        "GPT-6.1 Sol",
+        272_000,
+        128_000,
+        OpenAiBoth
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX),
     // GPT-6 Sol and Luna (2026-09-22). The window and input cap as for
     // astra below; the full ladder from none, like the 5.6 rows; every
     // ChatGPT plan, with no access gate (Codex's models.json).
@@ -1316,7 +1342,19 @@ static CATALOG: &[ModelInfo] = &[
     // OpenCode Zen: the models the docs place on the Responses wire, then
     // the chat-completions ones, live-probed 2026-09-03 (see the
     // opencode module). gpt-6-astra joined 2026-09-05, gpt-6-sol and
-    // gpt-6-luna 2026-09-22 (Zen only; Go lists none of them).
+    // gpt-6-luna 2026-09-22 (Zen only; Go lists none of them),
+    // gpt-6.1-sol 2026-09-30 (Zen only).
+    model!(
+        "opencode",
+        "gpt-6.1-sol",
+        "GPT-6.1 Sol",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX),
     model!(
         "opencode",
         "gpt-6-sol",
@@ -2078,8 +2116,9 @@ pub const CUSTOM_PROVIDER: &str = "custom";
 /// The model `ilar login` points a fresh ChatGPT account at: one every
 /// plan reaches. Not simply the newest row — `gpt-6-astra` sits behind
 /// an access program, and lines that only work for some subscriptions
-/// are worse than none. `gpt-6-sol` is what Codex upgrades 5.6 users to.
-pub const CHATGPT_SUGGESTED_MODEL: &str = "openai/gpt-6-sol";
+/// are worse than none. `gpt-6.1-sol` is Codex's workhorse since
+/// 2026-09-29, on every plan.
+pub const CHATGPT_SUGGESTED_MODEL: &str = "openai/gpt-6.1-sol";
 
 /// A `[models.<name>]` entry as the catalog needs to see it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2290,7 +2329,7 @@ mod tests {
         let model = find(CHATGPT_SUGGESTED_MODEL).expect("the suggested model is in the catalog");
         assert_eq!(model.access, ModelAccess::OpenAiBoth);
         // What Codex now suggests a 5.6 user upgrade to.
-        assert_eq!(CHATGPT_SUGGESTED_MODEL, "openai/gpt-6-sol");
+        assert_eq!(CHATGPT_SUGGESTED_MODEL, "openai/gpt-6.1-sol");
     }
 
     #[test]
