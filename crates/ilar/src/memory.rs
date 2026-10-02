@@ -78,6 +78,36 @@ fn headline_fits(title: Option<&str>, summary: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// A headline brought within the limits for a writer that cannot be
+/// asked again — the gateway's review: each part clipped, and what was
+/// cut kept at the head of the body, where search still finds it.
+pub fn fit_headline(title: &str, summary: &str, body: &str) -> (String, String, String) {
+    let clip = |text: &str, max: usize| {
+        let line = one_line(text);
+        if line.chars().count() <= max {
+            (line, None)
+        } else {
+            (
+                crate::text::truncate_chars_ellipsis(&line, max - 1),
+                Some(line),
+            )
+        }
+    };
+    let (title, long_title) = clip(title, TITLE_MAX);
+    let (summary, long_summary) = clip(summary, SUMMARY_MAX);
+    let cut: Vec<String> = [long_title, long_summary]
+        .into_iter()
+        .flatten()
+        .filter(|line| !body.contains(line.as_str()))
+        .collect();
+    let body = if cut.is_empty() {
+        body.to_string()
+    } else {
+        format!("{}\n\n{body}", cut.join("\n\n")).trim().to_string()
+    };
+    (title, summary, body)
+}
+
 /// The standing section a session with a memory opens with, present
 /// whether or not anything has been written yet — an empty memory
 /// nobody mentions never gets written. Says what memory is for, what
@@ -718,8 +748,8 @@ impl MemoryStore {
         if change.body.is_some() && change.summary.is_none() {
             bail!(
                 "a new body needs a new summary too: the summary is what search and recall \
-                 show, and the old one would hide what changed. Pass summary as well — the \
-                 old one again if it still says it all"
+                 show, and the old one would hide what changed. Pass summary as well, at most \
+                 {SUMMARY_MAX} characters — the old one again if it still says it all and fits"
             );
         }
         headline_fits(change.title, change.summary)?;
@@ -1124,8 +1154,8 @@ impl Tool for MemoryTool {
                 "new": {"type": "string", "description": "replace: the new entry"},
                 "id": {"type": "string", "description": "amend / forget: the note's id, as memory_search spells it"},
                 "kind": {"type": "string", "enum": ["decision", "solution", "preference", "event", "task", "risk"]},
-                "title": {"type": "string", "description": "note: the situation the note is for, at most 80 characters"},
-                "summary": {"type": "string", "description": "note: the answer in one sentence, at most 200 characters; identifiers go in the body"},
+                "title": {"type": "string", "description": format!("note: the situation the note is for, at most {TITLE_MAX} characters")},
+                "summary": {"type": "string", "description": format!("note: the answer in one sentence, at most {SUMMARY_MAX} characters; identifiers go in the body")},
                 "body": {"type": "string", "description": "note: the fact in full (default: the summary); amend: the new body in full — it replaces the old one, so carry over what still holds, and pass a new summary with it"}
             },
             "required": ["action"]

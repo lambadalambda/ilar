@@ -109,7 +109,8 @@ Most conversations have nothing durable; then answer with exactly the word nothi
 answer with one JSON object and nothing else: {{\"memory\": [{{\"file\": \"user\" or \"memory\", \
 \"action\": \"add\" or \"replace\" or \"remove\", \"text\": \"…\", \"old\": \"…\", \"new\": \
 \"…\"}}], \"notes\": [{{\"kind\": \"decision\"|\"solution\"|\"preference\"|\"event\"|\"task\"|\
-\"risk\", \"title\": \"…\", \"summary\": \"one line\", \"body\": \"the fact in full\"}}]}}. \
+\"risk\", \"title\": \"…\", \"summary\": \"the answer, one sentence\", \"body\": \"the fact in \
+full\"}}]}}. \
 A note the conversation changed or disproved is not a second note: when one you were shown \
 earlier is about the same fact, answer with {{\"action\": \"amend\", \"id\": \"…\"}} plus the \
 fields to change — a body replaces the old one whole and comes with a new summary — or \
@@ -359,15 +360,17 @@ impl Plan {
         for note in &self.notes {
             let result = match (note.action(), note.id.as_deref()) {
                 ("note", _) => match (note.kind, note.title.as_deref(), note.summary.as_deref()) {
-                    (Some(kind), Some(title), Some(summary)) => store
-                        .note(
-                            kind,
+                    (Some(kind), Some(title), Some(summary)) => {
+                        // Written once, so fitted rather than refused.
+                        let (title, summary, body) = ilar::memory::fit_headline(
                             title,
                             summary,
                             note.body.as_deref().unwrap_or(summary),
-                            Utc::now(),
-                        )
-                        .map(|written| format!("note {}: {title}", written.id)),
+                        );
+                        store
+                            .note(kind, &title, &summary, &body, Utc::now())
+                            .map(|written| format!("note {}: {title}", written.id))
+                    }
                     _ => Err(anyhow::anyhow!("a note needs kind, title and summary")),
                 },
                 ("amend", Some(id)) => store
@@ -538,7 +541,7 @@ mod tests {
     #[test]
     fn the_review_prompt_carries_the_summary_rule() {
         assert!(PROMPT.contains(SUMMARY_RULE));
-        assert!(PROMPT.contains("\"summary\": \"one line\""));
+        assert!(PROMPT.contains("\"summary\": \"the answer, one sentence\""));
     }
 
     /// A conversation that changed a fact does not file a second note
@@ -593,6 +596,32 @@ mod tests {
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].summary, "on secunda now");
         assert_eq!(left[0].id, moved.id, "amended, not replaced");
+    }
+
+    /// The review writes once and cannot be told to shorten: a headline
+    /// past the store's limits is clipped, and the full text goes into
+    /// the body rather than the note being refused and lost.
+    #[test]
+    fn a_review_note_past_the_limits_is_clipped_not_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let skills = crate::skills::SkillLibrary::new(dir.path().join("skills"));
+        let title = "Recovering a render ".repeat(6);
+        let summary = "seed 2104 on port 8788 ".repeat(12);
+        let plan = Plan::parse(
+            &serde_json::json!({"notes": [{
+                "kind": "solution", "title": title, "summary": summary
+            }]})
+            .to_string(),
+        )
+        .expect("a plan");
+        let applied = plan.apply(&store, &skills);
+        assert!(applied.failed.is_empty(), "{:?}", applied.failed);
+        let note = &store.notes().unwrap()[0];
+        assert!(note.title.chars().count() <= ilar::memory::TITLE_MAX);
+        assert!(note.summary.chars().count() <= ilar::memory::SUMMARY_MAX);
+        assert!(note.body.contains(summary.trim()), "{}", note.body);
+        assert!(note.body.contains(title.trim()), "{}", note.body);
     }
 
     #[test]
