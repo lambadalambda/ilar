@@ -43,9 +43,40 @@ pub const USER_CHARS: usize = 2500;
 /// and in the gateway's after-turn review. The index matches words
 /// across the whole note and shows the summary, so the summary has to
 /// carry the words a future question will.
-pub const SUMMARY_RULE: &str = "Search matches words, not meaning, across a note's title, \
-summary and body, and shows the summary: put in the summary the words a future question \
-would use — ticket ids, hostnames, error strings, file names.";
+pub const SUMMARY_RULE: &str = "A note is found by its title and summary: the index and \
+search results show only these two, and search weighs their words first. The title names the \
+situation the note is for, in the words someone would use when they need it (\"Recovering a \
+render after its watcher dies\"), not how you found it; at most 80 characters. The summary is \
+the answer itself, one sentence of at most 200 characters, so the line alone is enough. Exact \
+identifiers — seeds, ports, hashes, timings, file names — go in the body, where memory_search \
+still finds them. One fact per note; progress and current state (what is done, what is \
+deployed) go stale and are not notes.";
+
+/// Longest title and summary a note takes, in characters.
+pub const TITLE_MAX: usize = 80;
+pub const SUMMARY_MAX: usize = 200;
+
+/// Refuses a headline past the limits, saying where the rest goes.
+fn headline_fits(title: Option<&str>, summary: Option<&str>) -> Result<()> {
+    let over = |text: Option<&str>, max: usize| {
+        text.map(|text| one_line(text).chars().count())
+            .filter(|&count| count > max)
+    };
+    if let Some(count) = over(title, TITLE_MAX) {
+        bail!(
+            "the title is {count} characters, over {TITLE_MAX}: name the situation the note \
+             is for, and put the detail in the body"
+        );
+    }
+    if let Some(count) = over(summary, SUMMARY_MAX) {
+        bail!(
+            "the summary is {count} characters, over {SUMMARY_MAX}: say the answer in one \
+             sentence, and move identifiers (seeds, ports, hashes, timings, file names) into \
+             the body, where memory_search still finds them"
+        );
+    }
+    Ok(())
+}
 
 /// The standing section a session with a memory opens with, present
 /// whether or not anything has been written yet — an empty memory
@@ -650,6 +681,7 @@ impl MemoryStore {
         body: &str,
         when: DateTime<Utc>,
     ) -> Result<Note> {
+        headline_fits(Some(title), Some(summary))?;
         let note = Note {
             id: format!(
                 "{}-{}",
@@ -690,6 +722,7 @@ impl MemoryStore {
                  old one again if it still says it all"
             );
         }
+        headline_fits(change.title, change.summary)?;
         let path = self.note_path(id)?;
         let _write = self.write.lock().unwrap();
         let text = match std::fs::read_to_string(&path) {
@@ -1091,8 +1124,8 @@ impl Tool for MemoryTool {
                 "new": {"type": "string", "description": "replace: the new entry"},
                 "id": {"type": "string", "description": "amend / forget: the note's id, as memory_search spells it"},
                 "kind": {"type": "string", "enum": ["decision", "solution", "preference", "event", "task", "risk"]},
-                "title": {"type": "string"},
-                "summary": {"type": "string", "description": "note: one line"},
+                "title": {"type": "string", "description": "note: the situation the note is for, at most 80 characters"},
+                "summary": {"type": "string", "description": "note: the answer in one sentence, at most 200 characters; identifiers go in the body"},
                 "body": {"type": "string", "description": "note: the fact in full (default: the summary); amend: the new body in full — it replaces the old one, so carry over what still holds, and pass a new summary with it"}
             },
             "required": ["action"]
@@ -1841,6 +1874,54 @@ mod tests {
         assert!(block.contains("earlier session"), "{block}");
         assert!(block.contains("not verified"), "{block}");
         assert!(!block.contains("you wrote"), "{block}");
+    }
+
+    /// The title and summary are what the index and search show, and a
+    /// long one was a list of identifiers: 32 of 89 summaries ran past
+    /// 30 words, 2026-10-02. Past the limits the write is refused.
+    #[test]
+    fn a_headline_is_short_and_detail_goes_in_the_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let now: DateTime<Utc> = "2026-10-02T12:00:00Z".parse().unwrap();
+        let title = "t".repeat(TITLE_MAX);
+        let summary = "s".repeat(SUMMARY_MAX);
+        let note = store
+            .note(
+                NoteKind::Solution,
+                &title,
+                &summary,
+                "seed 2104, port 8788",
+                now,
+            )
+            .unwrap();
+        let long_title = store
+            .note(NoteKind::Solution, &format!("{title}t"), "short", "", now)
+            .unwrap_err();
+        assert!(long_title.to_string().contains("title"), "{long_title}");
+        let long_summary = store
+            .note(NoteKind::Solution, "short", &format!("{summary}s"), "", now)
+            .unwrap_err();
+        assert!(long_summary.to_string().contains("body"), "{long_summary}");
+        // An amend is held to the same, and leaves the note as it was.
+        let amend = store
+            .amend(
+                &note.id,
+                Amendment {
+                    summary: Some(&format!("{summary}s")),
+                    ..Amendment::default()
+                },
+            )
+            .unwrap_err();
+        assert!(amend.to_string().contains("summary"), "{amend}");
+        assert_eq!(store.notes().unwrap()[0].summary, summary);
+        // The rule says the same numbers the check holds.
+        assert!(SUMMARY_RULE.contains(&format!("at most {TITLE_MAX} characters")));
+        assert!(SUMMARY_RULE.contains(&format!("at most {SUMMARY_MAX} characters")));
+        // Characters, not bytes: an umlaut is one.
+        store
+            .note(NoteKind::Solution, &"ä".repeat(TITLE_MAX), "short", "", now)
+            .unwrap();
     }
 
     /// A new body comes with a new summary. The summary is what search

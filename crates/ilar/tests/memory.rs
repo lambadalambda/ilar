@@ -77,7 +77,7 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
                 ilar::memory::NoteKind::Event,
                 title,
                 summary,
-                "the body",
+                "body-only text",
                 now,
             )
             .unwrap()
@@ -98,7 +98,7 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
         opened_with.contains("Deploy box: the deploy box"),
         "{opened_with}"
     );
-    assert!(!opened_with.contains("the body"), "{opened_with}");
+    assert!(!opened_with.contains("body-only text"), "{opened_with}");
 
     let turn = |text: &'static str| {
         let (tx, _rx) = loop_event_channel(LOOP_EVENT_CAPACITY);

@@ -190,11 +190,16 @@ write: a correction or a stated preference goes in before the reply
 that answers it, since the end of a session is a place nobody reaches,
 while words that scope a thing to now mark something to follow here
 rather than a rule to keep. It also says to amend a note rather than
-file a second about the same fact. And one rule for a note's summary:
-search matches words, not meaning, across the whole note and shows the
-summary, so the summary carries the words a
-future question would use — ticket ids, hostnames, error strings, file
-names. The `memory` tool's description and the assistant's after-turn
+file a second about the same fact. And one rule for a note's title and
+summary, the two lines the index and search results show. The title
+names the situation the note is for, at most 80 characters; the summary
+is the answer in one sentence, at most 200. Identifiers (seeds, ports,
+hashes, timings, file names) go in the body, which search still
+covers. Progress and current state are not notes. The store refuses a
+longer title or summary, from any writer. The rule used to ask for the
+words a future question would use in the summary; the summaries became
+lists of identifiers that matched every message on their topic
+(2026-10-02). The `memory` tool's description and the assistant's after-turn
 review say the same rule, so a note is found the same way whoever
 wrote it.
 
