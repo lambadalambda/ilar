@@ -219,8 +219,11 @@ none, and neither does a `/compact` you ask for.
 Memory also comes to the model unasked, in two places, both
 cache-safe. At session open, beside the core block, the newest notes'
 index lines (at most twenty, under 4 KiB) say what the archive holds;
-frozen with the rest of the prompt. And on every prompt, the index is
-run over the person's words. Not over a task or job notification,
+frozen with the rest of the prompt. And, when `general.memory_recall`
+is on, on every prompt the index is run over the person's words. It is
+off by default: in a week across three machines (2026-10-02), 5 of the
+65 notes it surfaced helped, most matched only the session's topic,
+and the useful notes were mostly found by the model's own search. Not over a task or job notification,
 which recalls nothing, and not over the gateway's `<now>` stamp or
 paths. A note is surfaced when a word of its title or summary matches,
 and it shares two words with the prompt, or one word that at most a
@@ -242,8 +245,8 @@ index sits at the top of a long prompt, and the recall puts the line
 next to the question it is about. After 16 KiB of recall in one
 context the window gets no more. Nothing here rewrites an earlier
 message: the prefix a provider cached stays put.
-`general.memory_recall = false` and `general.memory_index = false`
-switch the two off separately.
+`general.memory_recall = true` switches recall on, and
+`general.memory_index = false` switches the index off.
 
 ## Rewind and fork
 

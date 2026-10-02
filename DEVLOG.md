@@ -1,5 +1,22 @@
 # DEVLOG
 
+## 2026-10-02 — Recall measured, and turned off
+
+A week of per-prompt recall on the Mac, tenco and aiko, after the
+25 September fixes: 33 recalls, 65 notes. Labelled blind, 5 helped
+and 12 more were related background. Most matched the session's
+topic, not the message: in the gateway, 34 of 49 notes say "H3", so
+every video chat pulled in a recipe. The rule for summaries caused
+part of it — it asked for the words a future question would use, and
+the summaries became lists of identifiers (32 of 89 over 30 words).
+Now the title names the situation, the summary is the answer in one
+sentence, identifiers go in the body, and the store refuses a title
+over 80 characters or a summary over 200. Recall is off by default.
+
+Cloudflare's Clef-flash, a 9B yes/no classifier, ranked the same 65
+notes well (AUC 0.85), but its probabilities sat low (max 0.63) and it
+took 3-13 s per message on an M2 Max. Not adopted.
+
 ## 2026-09-27 — The flush made the summary a cache miss on gufo
 
 A compaction on gufo ran 10 minutes and was cancelled. gufo reuses its

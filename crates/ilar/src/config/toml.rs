@@ -33,7 +33,7 @@ pub struct GeneralConfig {
     /// and the model without the tools.
     pub memory: Option<bool>,
     /// Whether each prompt surfaces the notes it matches, after the
-    /// message. On unless said otherwise; nothing without `memory`.
+    /// message. Off unless said otherwise; nothing without `memory`.
     pub memory_recall: Option<bool>,
     /// Whether a session opens with the newest notes' index lines
     /// beside the core block. On unless said otherwise.
@@ -900,7 +900,7 @@ impl Config {
                     .general
                     .as_ref()
                     .and_then(|general| general.memory_recall)
-                    .unwrap_or(true),
+                    .unwrap_or(false),
                 memory_index: merged
                     .general
                     .as_ref()
@@ -1196,7 +1196,7 @@ impl Config {
                 resume_offer: true,
                 replay_thinking: Default::default(),
                 memory: true,
-                memory_recall: true,
+                memory_recall: false,
                 memory_index: true,
             },
             agent: AgentConfig::default(),

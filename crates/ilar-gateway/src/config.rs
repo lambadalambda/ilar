@@ -81,7 +81,8 @@ pub struct Memory {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Each prompt surfaces the notes it matches, after the message.
-    #[serde(default = "default_true")]
+    /// Off unless asked: of 65 notes it surfaced in a week, 5 helped.
+    #[serde(default)]
     pub recall: bool,
     /// A chat opens with the newest notes' index beside the core.
     #[serde(default = "default_true")]
@@ -114,7 +115,7 @@ impl Default for Memory {
     fn default() -> Self {
         Self {
             enabled: true,
-            recall: true,
+            recall: false,
             index: true,
         }
     }
@@ -244,6 +245,13 @@ mod tests {
         assert!(parsed.status);
         assert_eq!(parsed.status_interval_secs, 4);
         assert_eq!(parsed.send_retry_secs, 2);
+        // Memory on, its index on, per-prompt recall off unless asked.
+        assert!(parsed.memory.enabled && parsed.memory.index);
+        assert!(!parsed.memory.recall);
+        assert!(GatewayConfig::default().memory.recall == parsed.memory.recall);
+        let table: toml::Table = toml::from_str("[memory]\nrecall = true").unwrap();
+        let parsed: GatewayConfig = table.try_into().unwrap();
+        assert!(parsed.memory.recall);
         let table: toml::Table = toml::from_str("model = \"zai/glm-4.7\"").unwrap();
         let parsed: GatewayConfig = table.try_into().unwrap();
         assert_eq!(parsed.model.as_deref(), Some("zai/glm-4.7"));

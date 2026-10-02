@@ -320,6 +320,21 @@ fn memory_is_on_by_default_and_can_be_turned_off() {
     assert!(by_project.warnings.is_empty(), "{:?}", by_project.warnings);
 }
 
+/// Per-prompt recall is off unless said otherwise: of 65 notes it
+/// surfaced in a week, 5 helped (2026-10-02). The opening index stays.
+#[test]
+fn recall_is_off_by_default_and_can_be_turned_on() {
+    let (_g, empty) = tempdir();
+    let config = Loader::no_env().config_dir(empty).resolve().unwrap();
+    assert!(!config.general.memory_recall);
+    assert!(config.general.memory_index);
+    let (_user_guard, user) = tempdir();
+    write(&user.join("ilar.toml"), "[general]\nmemory_recall = true\n");
+    let on = Loader::no_env().config_dir(user).resolve().unwrap();
+    assert!(on.general.memory_recall);
+    assert!(on.warnings.is_empty(), "{:?}", on.warnings);
+}
+
 #[test]
 fn project_instructions_must_be_a_boolean() {
     let (_g, dir) = tempdir();
