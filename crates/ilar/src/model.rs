@@ -260,16 +260,6 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "opencode",
-        "mimo-v2.5-free",
-        pricing!(0.0, 0.0, Some(0.0), None),
-    ),
-    (
-        "opencode",
-        "nemotron-3-ultra-free",
-        pricing!(0.0, 0.0, Some(0.0), None),
-    ),
-    (
-        "opencode",
         "nemotron-3.5-lightning-free",
         pricing!(0.0, 0.0, Some(0.0), None),
     ),
@@ -325,23 +315,8 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "opencode",
-        "space-bunny-free",
-        pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
-    ),
-    (
-        "opencode",
         "grok-build-0.1",
         pricing!(1.0, 2.0, Some(0.2), None),
-    ),
-    (
-        "opencode",
-        "muse-spark-1.3-contributor-free",
-        pricing!(0.0, 0.0, Some(0.0), None),
-    ),
-    (
-        "opencode",
-        "muse-spark-1.2-contributor-free",
-        pricing!(0.0, 0.0, Some(0.0), None),
     ),
     (
         "opencode-go",
@@ -445,13 +420,23 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     ),
     (
         "opencode-go",
-        "space-bunny-free",
-        pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
+        "longcat-2.5-preview-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
     ),
     (
         "opencode-go",
-        "longcat-2.5-preview-free",
+        "beam-free",
         pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode-go",
+        "minimax-m3.1-flash-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode-go",
+        "step-5-preview",
+        pricing!(1.0, 2.7, Some(0.1), None),
     ),
     (
         "opencode-go",
@@ -742,6 +727,21 @@ const EFFORT_LOW_TO_MAX: &[ModelVariant] = &[
     ModelVariant {
         id: "max",
         name: "Max",
+    },
+];
+
+const EFFORT_LOW_TO_HIGH: &[ModelVariant] = &[
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
     },
 ];
 
@@ -1364,7 +1364,7 @@ static CATALOG: &[ModelInfo] = &[
     .reasoning(OPENAI_GPT52_VARIANTS),
     // Added 2026-09-24 from the live listings: models.dev's records,
     // each probed with a small request on its wire. Grok's output is
-    // cut to 384K; Space Bunny's 512K reply to the 1M rows' 131K.
+    // cut to 384K.
     model!(
         "opencode",
         "grok-4.7",
@@ -1426,17 +1426,6 @@ static CATALOG: &[ModelInfo] = &[
     .effort(ZAI_EFFORT_VARIANTS),
     model!(
         "opencode",
-        "space-bunny-free",
-        "Space Bunny Free",
-        1_048_576,
-        131_072,
-        OpenCodeChat
-    )
-    .input(524_288)
-    .vision()
-    .effort(EFFORT_LOW_TO_MAX),
-    model!(
-        "opencode",
         "grok-build-0.1",
         "Grok Build 0.1",
         256_000,
@@ -1444,26 +1433,6 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeResponses
     )
     .vision(),
-    model!(
-        "opencode",
-        "muse-spark-1.3-contributor-free",
-        "Muse Spark 1.3 Contributor Free",
-        1_048_576,
-        131_072,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
-    model!(
-        "opencode",
-        "muse-spark-1.2-contributor-free",
-        "Muse Spark 1.2 Contributor Free",
-        1_048_576,
-        131_072,
-        OpenCodeResponses
-    )
-    .vision()
-    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
     model!(
         "opencode",
         "deepseek-v4-pro",
@@ -1507,23 +1476,6 @@ static CATALOG: &[ModelInfo] = &[
         "Big Pickle",
         200_000,
         32_000,
-        OpenCodeChat
-    ),
-    model!(
-        "opencode",
-        "mimo-v2.5-free",
-        "MiMo V2.5 Free",
-        200_000,
-        32_000,
-        OpenCodeChat
-    )
-    .vision(),
-    model!(
-        "opencode",
-        "nemotron-3-ultra-free",
-        "Nemotron 3 Ultra Free",
-        1_000_000,
-        128_000,
         OpenCodeChat
     ),
     model!(
@@ -1619,17 +1571,6 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeChat
     )
     .vision(),
-    model!(
-        "opencode-go",
-        "space-bunny-free",
-        "Space Bunny Free",
-        1_048_576,
-        131_072,
-        OpenCodeChat
-    )
-    .input(524_288)
-    .vision()
-    .effort(EFFORT_LOW_TO_MAX),
     // Added 2026-09-30, answering on Go; Zen serves its free tier only
     // inside OpenCode. Thinking is on or off, with no ladder.
     model!(
@@ -1641,6 +1582,40 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeChat
     )
     .vision(),
+    // Added 2026-10-20, each answering a call and its follow-up on Go;
+    // Zen serves the free two only inside OpenCode. MiniMax M3.1 Flash
+    // is what Space Bunny was (its deprecation names it), and its 512K
+    // reply is cut to the 1M rows' 131K as Space Bunny's was. Beam
+    // takes text only.
+    model!(
+        "opencode-go",
+        "beam-free",
+        "Beam Free",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .reasoning(EFFORT_LOW_TO_MAX),
+    model!(
+        "opencode-go",
+        "minimax-m3.1-flash-free",
+        "MiniMax M3.1 Flash Free",
+        1_000_000,
+        131_072,
+        OpenCodeChat
+    )
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX),
+    model!(
+        "opencode-go",
+        "step-5-preview",
+        "Step 5 Preview",
+        1_000_000,
+        65_536,
+        OpenCodeChat
+    )
+    .vision()
+    .reasoning(EFFORT_LOW_TO_HIGH),
     model!(
         "opencode-go",
         "muse-spark-1.3-contributor",
@@ -2082,13 +2057,11 @@ mod tests {
             ("opencode/deepseek-v4.1-flash", Chat, true, 3),
             ("opencode/glm-5.3", Chat, false, 3),
             ("opencode/glm-5.3-flash", Chat, true, 3),
-            ("opencode/space-bunny-free", Chat, true, 5),
             ("opencode-go/gpt-6-luna", Responses, true, 6),
             ("opencode-go/grok-4.7", Responses, true, 4),
             ("opencode-go/deepseek-v4.1-flash", Chat, true, 3),
             ("opencode-go/mimo-v2.6-flash", Chat, true, 0),
             ("opencode-go/mimo-v2.6-pro", Chat, true, 0),
-            ("opencode-go/space-bunny-free", Chat, true, 5),
         ];
         for (id, access, vision, rungs) in rows {
             let model = find(id).unwrap_or_else(|| panic!("{id} is cataloged"));
@@ -2100,6 +2073,36 @@ mod tests {
         // an upstream that answers 503 while its Zen twin answers.
         assert!(find("opencode/mimo-v2.6-flash-free").is_none());
         assert!(find("opencode-go/minimax-m2.7").is_none());
+    }
+
+    /// 2026-10-20: three new Go rows on the wire that answered them,
+    /// and the deprecated free rows gone. Free Zen rows and Mistral
+    /// Large 4, whose stream sends typed content parts, stay out.
+    #[test]
+    fn the_october_20_opencode_changes() {
+        use ModelAccess::OpenCodeChat as Chat;
+        for (id, vision, rungs) in [
+            ("opencode-go/beam-free", false, 5),
+            ("opencode-go/minimax-m3.1-flash-free", true, 5),
+            ("opencode-go/step-5-preview", true, 3),
+        ] {
+            let model = find(id).unwrap_or_else(|| panic!("{id} is cataloged"));
+            assert_eq!(model.access, Chat, "{id}");
+            assert_eq!(model.supports_vision(), vision, "{id}");
+            assert_eq!(model.variants().len(), rungs, "{id}");
+            assert!(pricing_for(id).is_some(), "{id}");
+        }
+        for id in [
+            "opencode/space-bunny-free",
+            "opencode-go/space-bunny-free",
+            "opencode/mimo-v2.5-free",
+            "opencode/muse-spark-1.3-contributor-free",
+            "opencode/nemotron-3-ultra-free",
+            "opencode/mistral-large-4",
+            "opencode/minimax-m3.1-flash-free",
+        ] {
+            assert!(find(id).is_none(), "{id}");
+        }
     }
 
     /// 2026-09-30: what the gateways stopped serving is gone — Zen's

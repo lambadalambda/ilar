@@ -43,6 +43,12 @@ EXCLUDED = {
     ("opencode", "gpt-5.3-codex-spark"): "listed, but the upstream has no route (2026-09-03)",
     ("opencode", "mimo-v2.6-flash-free"): "free tier only inside OpenCode (2026-09-24)",
     ("opencode", "longcat-2.5-preview-free"): "free tier only inside OpenCode (2026-09-30)",
+    ("opencode", "beam-free"): "free tier only inside OpenCode (2026-10-20)",
+    ("opencode", "deepseek-v4.1-flash-free"): "free tier only inside OpenCode (2026-10-20)",
+    ("opencode", "glm-5.3-flash-free"): "free tier only inside OpenCode (2026-10-20)",
+    ("opencode", "minimax-m3.1-flash-free"): "free tier only inside OpenCode (2026-10-20)",
+    ("opencode", "nemotron-3.5-super-vl-free"): "free tier only inside OpenCode (2026-10-20)",
+    ("opencode", "mistral-large-4"): "streams content as typed parts the chat wire does not read (2026-10-20)",
     ("opencode-go", "minimax-m2.7"): "503 upstream while the Zen twin answers (2026-09-24)",
 }
 
