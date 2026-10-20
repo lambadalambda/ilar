@@ -249,7 +249,7 @@ impl ChatProvider {
         // hand the new model a field it has never seen. The one request
         // right after such a switch still speaks the old name; the
         // first reply settles it.
-        let spelling = req
+        let newest = req
             .messages
             .iter()
             .rev()
@@ -257,8 +257,13 @@ impl ChatProvider {
             .find_map(|block| match block {
                 ContentBlock::Thinking { field, .. } => Some(field.unwrap_or_default()),
                 _ => None,
-            })
-            .unwrap_or_default();
+            });
+        let spelling = newest.unwrap_or_default();
+        // A thought in the log means the model thinks, and a model in
+        // thinking mode may answer with a call and no thought; DeepSeek
+        // then refuses the next request unless that call carries the
+        // field too, empty.
+        let thinking_mode = newest.is_some();
         messages.extend(
             req.messages
                 .iter()
@@ -269,7 +274,7 @@ impl ChatProvider {
                         ThinkingReplay::Turn => last_prompt.is_some_and(|last| index > last),
                         ThinkingReplay::Off => false,
                     };
-                    openai_message(message, vision, replay.then_some(spelling))
+                    openai_message(message, vision, replay.then_some(spelling), thinking_mode)
                 }),
         );
         body.insert("messages".into(), serde_json::json!(messages));
@@ -411,11 +416,13 @@ fn is_prompt(msg: &ChatMessage) -> bool {
 /// `replay_thinking` naming a field, an assistant message's thinking
 /// goes along under it; which messages, and which field, the caller
 /// decides (`replay_thinking` in the configuration, and the newest
-/// spelling in the log).
+/// spelling in the log). In `thinking_mode` a call goes back with the
+/// field even when its thought was empty.
 fn openai_message(
     msg: &ChatMessage,
     vision: bool,
     replay_thinking: Option<crate::session::ReasoningField>,
+    thinking_mode: bool,
 ) -> Vec<serde_json::Value> {
     let role = match msg.role {
         Role::User => "user",
@@ -493,7 +500,7 @@ fn openai_message(
     }
     let with_thinking = |mut value: serde_json::Map<String, serde_json::Value>| {
         if let Some(field) = replay_thinking
-            && !thinking.is_empty()
+            && (!thinking.is_empty() || (thinking_mode && value.contains_key("tool_calls")))
         {
             value.insert(field.name().into(), serde_json::json!(thinking));
         }
@@ -1120,7 +1127,7 @@ mod tests {
                 },
             ],
         };
-        let wire = openai_message(&message, false, None);
+        let wire = openai_message(&message, false, None, false);
         let content = wire[0]["content"].as_str().unwrap();
         assert_eq!(
             content,
@@ -1145,14 +1152,14 @@ mod tests {
                 },
             ],
         };
-        let wire = openai_message(&message, false, None);
+        let wire = openai_message(&message, false, None, false);
         assert_eq!(wire[0]["content"].as_str().unwrap(), "fix the bug");
     }
 
     #[test]
     fn vision_models_get_real_image_parts_and_text_models_a_named_gap() {
         // Vision: one message, text + image_url parts.
-        let wire = openai_message(&image_message(), true, None);
+        let wire = openai_message(&image_message(), true, None, false);
         assert_eq!(wire.len(), 1);
         let content = wire[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
@@ -1163,12 +1170,12 @@ mod tests {
         );
 
         // No vision: plain string with the named gap.
-        let wire = openai_message(&image_message(), false, None);
+        let wire = openai_message(&image_message(), false, None, false);
         let content = wire[0]["content"].as_str().unwrap();
         assert!(content.contains("[image omitted"), "{content}");
 
         // Text-only stays the plain string it always was.
-        let wire = openai_message(&ChatMessage::user_text("hi"), true, None);
+        let wire = openai_message(&ChatMessage::user_text("hi"), true, None, false);
         assert_eq!(wire[0]["content"], "hi");
     }
 
@@ -1529,6 +1536,73 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, ProviderEvent::TextDelta(_))),
             "an unclosed block never leaks as text: {events:?}"
+        );
+    }
+
+    /// A model in thinking mode can answer with a call and no thought.
+    /// DeepSeek V4.1 Flash did, twice, then refused the next request:
+    /// "The `reasoning_content` in the thinking mode must be passed
+    /// back" (2026-10-20). Such a call goes back with the field empty;
+    /// a conversation with no thinking in it still sends none.
+    #[test]
+    fn a_call_made_without_a_thought_goes_back_with_an_empty_one() {
+        let call = |id: &str| ContentBlock::ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+            item_id: None,
+        };
+        let result = |id: &str| ChatMessage {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.into(),
+                content: "ok".into(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+        };
+        let assistant = |content: Vec<ContentBlock>| ChatMessage {
+            role: Role::Assistant,
+            content,
+        };
+        let mut request = Request::with_model("zai/glm-4.7");
+        request.messages = vec![
+            ChatMessage::user_text("is the annotation running?"),
+            assistant(vec![
+                ContentBlock::Thinking {
+                    text: "check the service".into(),
+                    field: None,
+                },
+                call("c1"),
+            ]),
+            result("c1"),
+            assistant(vec![call("c2")]),
+            result("c2"),
+            assistant(vec![ContentBlock::Text {
+                text: "it is".into(),
+            }]),
+        ];
+        let provider = ChatProvider::new(ChatDialect::zai("k".into(), "http://zai.test".into()));
+        let body = provider.wire_body_for_test(&request);
+        let assistants: Vec<&serde_json::Value> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect();
+        assert_eq!(assistants[0]["reasoning_content"], "check the service");
+        assert_eq!(assistants[1]["reasoning_content"], "", "{}", assistants[1]);
+        // Only a call needs it: a plain answer goes as it was.
+        assert!(assistants[2].get("reasoning_content").is_none());
+
+        // Without any thought in the conversation, nothing is padded.
+        request.messages.remove(1);
+        request.messages.remove(1);
+        let body = provider.wire_body_for_test(&request);
+        assert!(
+            !body["messages"].to_string().contains("reasoning_content"),
+            "{}",
+            body["messages"]
         );
     }
 
