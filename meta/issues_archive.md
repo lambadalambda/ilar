@@ -479,3 +479,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The chat front door](issues/the-chat-front-door.md)
 - [x] [Chat words, 2026-09-23](issues/chat-words-2026-09-23.md) — /revoke and forum topics struck
 - [x] [The docs catch up, 2026-09-23](issues/the-docs-catch-up-2026-09-23.md)
+- [x] [GPT-6.1 Terra](issues/gpt-6-1-terra.md)

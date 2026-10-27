@@ -76,6 +76,13 @@ macro_rules! pricing {
 /// absent — their effective token price depends on the plan, so the UI
 /// shows tokens without dollars.
 static PRICING: &[(&str, &str, ModelPricing)] = &[
+    // GPT-6.1 Terra (2026-10-26): half of 5.6 Terra's input. Base tier
+    // only; not on Zen yet.
+    (
+        "openai",
+        "gpt-6.1-terra",
+        pricing!(1.0, 5.0, Some(0.05), Some(1.25)),
+    ),
     // GPT-6.1 Sol (2026-09-29): 6 Sol's rates with half its cache read,
     // the same on Zen. Base tier only.
     (
@@ -928,6 +935,21 @@ macro_rules! model {
 // the docs file under the Messages wire answer on chat-completions and
 // are cataloged there; the Claude and Gemini families do not.
 static CATALOG: &[ModelInfo] = &[
+    // GPT-6.1 Terra (2026-10-26). Codex's models.json gives it a 500k
+    // window, but the API price doubles past 272k as for the other rows,
+    // so the working window stays there. The ladder from none is
+    // models.dev's, as for 5.6 Terra; every ChatGPT plan.
+    model!(
+        "openai",
+        "gpt-6.1-terra",
+        "GPT-6.1 Terra",
+        272_000,
+        128_000,
+        OpenAiBoth
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_NONE_TO_MAX),
     // GPT-6.1 Sol (2026-09-29): 6 Sol's window and input cap, but the
     // ladder starts at low (Codex's models.json, models.dev); every
     // ChatGPT plan.
@@ -2359,6 +2381,25 @@ mod tests {
             price("opencode/gpt-5.6-terra"),
             (2.5, 15.0, Some(0.25), Some(3.125))
         );
+    }
+
+    /// GPT-6.1 Terra (2026-10-26): on ChatGPT and the API, not yet on
+    /// Zen; models.dev's ladder from none and its base-tier price.
+    #[test]
+    fn the_gpt_6_1_terra_row() {
+        let row = find("openai/gpt-6.1-terra").expect("terra is cataloged");
+        assert_eq!(row.access, ModelAccess::OpenAiBoth);
+        assert_eq!(row.context_limit, 272_000);
+        assert_eq!(row.output_limit, 128_000);
+        assert!(row.vision);
+        let rungs: Vec<_> = row.variants().iter().map(|v| v.id).collect();
+        assert_eq!(rungs, ["none", "low", "medium", "high", "xhigh", "max"]);
+        let p = pricing_for("openai/gpt-6.1-terra").expect("terra is priced");
+        assert_eq!(
+            (p.input, p.output, p.cache_read, p.cache_write),
+            (1.0, 5.0, Some(0.05), Some(1.25))
+        );
+        assert!(find("opencode/gpt-6.1-terra").is_none());
     }
 
     #[test]
