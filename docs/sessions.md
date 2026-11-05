@@ -297,8 +297,9 @@ answer; a model that asks is told so immediately.
 `ilar models` lists the ids `--model` accepts — the models your
 configuration reaches, with context, price and reasoning variants, as
 the `models` tool shows them. `ilar models --json` prints the same as a
-JSON array (`id`, `name`, `context`, `pricing`, `reasoning`). No model
-is called.
+JSON array (`id`, `name`, `context`, `pricing`, `reasoning`); `pricing`
+is the display label, not numbers. No model is called; configuration
+warnings, such as an endpoint that did not answer, go to stderr.
 
 A run waits for the work it sent to the background: each task or job
 that reports starts a follow-up turn, exactly as in the TUI, and the

@@ -1465,6 +1465,11 @@ async fn main() -> Result<()> {
     // No unlock, as for exec: a provider whose key is sealed away is
     // one exec could not reach either.
     if let Some(Command::Models { json }) = args.command {
+        // An endpoint that did not answer is missing from the list; its
+        // warning says why, on stderr so --json stays parseable.
+        for warning in &config.warnings {
+            eprintln!("{warning}");
+        }
         let models = config.available_models();
         if json {
             println!("{}", ilar::tools::models::listing_json(&models));
