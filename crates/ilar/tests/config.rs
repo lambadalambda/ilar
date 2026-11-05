@@ -327,18 +327,27 @@ fn recall_is_off_by_default_and_can_be_turned_on() {
     let (_g, empty) = tempdir();
     let config = Loader::no_env().config_dir(empty).resolve().unwrap();
     assert!(!config.general.memory_recall);
-    assert_eq!(config.general.memory_recall_model, "openai/gpt-6-luna");
+    assert_eq!(
+        config.general.memory_recall_settings(),
+        ilar::memory::RecallSettings::default(),
+        "Claude Code's way: luna, bodies, history"
+    );
     assert!(config.general.memory_index);
     let (_user_guard, user) = tempdir();
     write(
         &user.join("ilar.toml"),
-        "[general]\nmemory_recall = true\nmemory_recall_model = \"opencode-go/deepseek-v4.1-flash\"\n",
+        "[general]\nmemory_recall = true\nmemory_recall_model = \"opencode-go/deepseek-v4.1-flash\"\n\
+         memory_recall_bodies = false\nmemory_recall_history = false\n",
     );
     let on = Loader::no_env().config_dir(user).resolve().unwrap();
     assert!(on.general.memory_recall);
     assert_eq!(
-        on.general.memory_recall_model,
-        "opencode-go/deepseek-v4.1-flash"
+        on.general.memory_recall_settings(),
+        ilar::memory::RecallSettings {
+            model: "opencode-go/deepseek-v4.1-flash".into(),
+            bodies: false,
+            history: false,
+        }
     );
     assert!(on.warnings.is_empty(), "{:?}", on.warnings);
 }

@@ -225,7 +225,15 @@ will help with each prompt, the way Claude Code's recall does: it reads
 one line per note — kind, age, title, summary, never the body — and the
 person's words, and answers with at most five numbers, or none. Its
 prompt tells it to match on what the message is about, not on words it
-shares with a note. The model is `general.memory_recall_model`
+shares with a note. Like Claude Code's, the selector is one
+conversation per session: the listing (every note, oldest first, so it
+is the same cached prefix each time and a new note joins at the end),
+then each earlier message of the window with the picks it got, rebuilt
+from the log, then the new message — so "are you sure this is right?"
+is read as a follow-up to what came before. It sees the person's
+messages and its own answers, not what the agent did.
+`general.memory_recall_history = false` asks about each message alone.
+The model is `general.memory_recall_model`
 (`openai/gpt-6-luna` by default), at its lowest effort. The call starts
 with the turn; the first request waits up to two seconds for it, and a
 later answer joins at the next step — a reply that needs no tools has
@@ -234,9 +242,11 @@ the turn. Recall is off by default until it is measured:
 the word ranking it replaced surfaced 65 notes in a week (2026-10-02),
 of which 5 helped. Nothing is asked over a task or job notification,
 and the gateway's `<now>` stamp and paths are left out of what the
-selector reads. The picks are surfaced as index lines, never bodies,
-in a `<memory-recall>` block appended after the prompt, or after a
-step's tool results when the answer came late. The block says what it is: notes an earlier session made,
+selector reads. The picks are surfaced in a `<memory-recall>` block
+appended after the prompt, or after a step's tool results when the
+answer came late: each note's index line and its body, up to 4 KB, as
+Claude Code's recall carries the memory itself
+(`general.memory_recall_bodies = false` keeps it to the index lines). The block says what it is: notes an earlier session made,
 for possible relevance. They are claims, not verified in this session,
 to be checked before they are relied on or reported as fact, and not
 instructions from anyone or part of the message they follow. When a
@@ -249,8 +259,8 @@ offered when the context already has it: recalled, written, amended
 or read, until a compaction folds that copy away, when it may come
 back. A note listed in the opening index can still be recalled: the
 index sits at the top of a long prompt, and the recall puts the line
-next to the question it is about. After 16 KiB of recall in one
-context the window gets no more. Nothing here rewrites an earlier
+next to the question it is about. After 60 KiB of recall in one
+context (Claude Code's budget) the window gets no more. Nothing here rewrites an earlier
 message: the prefix a provider cached stays put.
 `general.memory_recall = true` switches recall on, and
 `general.memory_index = false` switches the index off.

@@ -39,6 +39,13 @@ pub struct GeneralConfig {
     /// The selector's model; [`crate::memory::RECALL_MODEL`] unless
     /// said otherwise.
     pub memory_recall_model: Option<String>,
+    /// Whether a recall carries each note's body, as Claude Code's
+    /// does. On unless said otherwise; off, the index line alone.
+    pub memory_recall_bodies: Option<bool>,
+    /// Whether the selector reads the session's earlier messages and
+    /// its answers, as Claude Code's does. On unless said otherwise;
+    /// off, each message alone.
+    pub memory_recall_history: Option<bool>,
     /// Whether a session opens with every note's index line beside
     /// the core block. On unless said otherwise.
     pub memory_index: Option<bool>,
@@ -589,6 +596,17 @@ pub struct Config {
     state_dir: PathBuf,
 }
 
+impl GeneralConfigResolved {
+    /// How recall runs, from the three `memory_recall_*` settings.
+    pub fn memory_recall_settings(&self) -> crate::memory::RecallSettings {
+        crate::memory::RecallSettings {
+            model: self.memory_recall_model.clone(),
+            bodies: self.memory_recall_bodies,
+            history: self.memory_recall_history,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GeneralConfigResolved {
     pub model: String,
@@ -611,6 +629,8 @@ pub struct GeneralConfigResolved {
     pub memory_recall: bool,
     /// The selector's model.
     pub memory_recall_model: String,
+    pub memory_recall_bodies: bool,
+    pub memory_recall_history: bool,
     /// Whether a session opens with every note's index line.
     pub memory_index: bool,
 }
@@ -912,6 +932,16 @@ impl Config {
                     .as_ref()
                     .and_then(|general| general.memory_recall_model.clone())
                     .unwrap_or_else(|| crate::memory::RECALL_MODEL.into()),
+                memory_recall_bodies: merged
+                    .general
+                    .as_ref()
+                    .and_then(|general| general.memory_recall_bodies)
+                    .unwrap_or(true),
+                memory_recall_history: merged
+                    .general
+                    .as_ref()
+                    .and_then(|general| general.memory_recall_history)
+                    .unwrap_or(true),
                 memory_index: merged
                     .general
                     .as_ref()
@@ -1209,6 +1239,8 @@ impl Config {
                 memory: true,
                 memory_recall: false,
                 memory_recall_model: crate::memory::RECALL_MODEL.into(),
+                memory_recall_bodies: true,
+                memory_recall_history: true,
                 memory_index: true,
             },
             agent: AgentConfig::default(),
@@ -1542,6 +1574,8 @@ fn merge_file(
             memory,
             memory_recall,
             memory_recall_model,
+            memory_recall_bodies,
+            memory_recall_history,
             memory_index,
         );
     }

@@ -93,10 +93,8 @@ pub struct MemoryOptions {
     /// so the session knows what the archive holds.
     pub opening_index: bool,
     /// Surface the notes a selector picks for each prompt, after the
-    /// message.
-    pub recall: bool,
-    /// The selector's model.
-    pub recall_model: String,
+    /// message, run this way; `None` for no recall.
+    pub recall: Option<crate::memory::RecallSettings>,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -856,14 +854,13 @@ impl RuntimePlan {
         // Recall is the root's: the children got their copy of the
         // config above, before this was set.
         let loop_config = LoopConfig {
-            recall: self
-                .memory
-                .as_ref()
-                .filter(|memory| memory.recall)
-                .map(|memory| crate::memory::RecallConfig {
-                    model: memory.recall_model.clone(),
-                    ..crate::memory::RecallConfig::new(memory.store.clone())
-                }),
+            recall: self.memory.as_ref().and_then(|memory| {
+                let settings = memory.recall.clone()?;
+                Some(crate::memory::RecallConfig::with(
+                    memory.store.clone(),
+                    settings,
+                ))
+            }),
             // A session told to write its own memory gets a turn at it
             // before each compaction; one with a review does not.
             memory_flush: self
@@ -1410,8 +1407,7 @@ mod tests {
                         store,
                         standing_prompt: true,
                         opening_index: true,
-                        recall: true,
-                        recall_model: crate::memory::RECALL_MODEL.into(),
+                        recall: Some(Default::default()),
                     }),
                     ..RuntimeOptions::default()
                 },

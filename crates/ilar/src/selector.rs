@@ -40,9 +40,12 @@ pub async fn answer(mut stream: EventStream) -> Option<String> {
 /// note kinds.
 pub const SELECTOR_PROMPT: &str = "You pick which memory notes will help a coding agent \
 with the person's message. You get a numbered list of notes, one per line: the number, the \
-note's kind, its age, its title and its summary. Then the message.\n\
+note's kind, its age, its title and its summary. Then the person's messages in this session, \
+one at a time, each followed by your answer; answer the last one.\n\
 Answer with the numbers of the notes that will clearly help with this message, at most five. \
-Pick a note only when you are sure from its title and summary.\n\
+Pick a note only when you are sure from its title and summary. Read the message in the light \
+of the ones before it: a follow-up is about what they were about.\n\
+- Do not pick a note you already picked for an earlier message: the agent has it already.\n\
 - Match on what the message is about, not on words it shares with a note. A note about the \
 project in general is not about every message in the project.\n\
 - Be extra careful with preference and event notes: they say how the person works or what \
@@ -71,18 +74,43 @@ pub fn listing(notes: &[&Note], now: DateTime<Utc>) -> String {
         .collect()
 }
 
-/// The selector's request: the listing first, so it can be the cached
-/// prefix (the turn gives it a cache key), then the message.
-pub fn request(model: &str, listing: &str, message: &str, options: serde_json::Value) -> Request {
+/// The selector's request, one conversation as Claude Code's: the
+/// listing first, then each earlier message of the session with the
+/// picks it got (positions in the listing), the new message last. Each
+/// call's messages extend the last one's, so with the turn's cache key
+/// all but the newest exchange is a cached prefix.
+pub fn request(
+    model: &str,
+    listing: &str,
+    past: &[(String, Vec<usize>)],
+    message: &str,
+    options: serde_json::Value,
+) -> Request {
+    let mut opening = Some(ContentBlock::text(format!("Notes:\n{listing}")));
+    let mut ask = |text: &str| ChatMessage {
+        role: Role::User,
+        content: opening
+            .take()
+            .into_iter()
+            .chain([ContentBlock::text(format!("Message:\n{text}"))])
+            .collect(),
+    };
+    let mut messages = Vec::new();
+    for (said, picked) in past {
+        messages.push(ask(said));
+        let numbers: Vec<String> = picked.iter().map(|index| (index + 1).to_string()).collect();
+        messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::text(format!(
+                "{{\"picks\": [{}]}}",
+                numbers.join(", ")
+            ))],
+        });
+    }
+    messages.push(ask(message));
     Request {
         system_prompt: Some(SELECTOR_PROMPT.into()),
-        messages: vec![ChatMessage {
-            role: Role::User,
-            content: vec![
-                ContentBlock::text(format!("Notes:\n{listing}")),
-                ContentBlock::text(format!("Message:\n{message}")),
-            ],
-        }],
+        messages,
         options,
         ..Request::with_model(model)
     }
@@ -153,6 +181,7 @@ mod tests {
         let request = request(
             "openai/gpt-6-luna",
             "1. [decision] today — a: b\n",
+            &[],
             "fix the PPU",
             serde_json::json!({"reasoning": {"effort": "none"}}),
         );
@@ -169,6 +198,52 @@ mod tests {
                 ],
             }]
         );
+    }
+
+    /// The session so far is one conversation, as Claude Code's: each
+    /// earlier message with the answer it got, the new one last. The
+    /// listing opens it, so every call shares the prefix the last one
+    /// cached.
+    #[test]
+    fn earlier_messages_and_their_answers_come_before_the_new_one() {
+        let past = [
+            ("fix the PPU timing".to_string(), vec![1]),
+            ("and the timer".to_string(), Vec::new()),
+        ];
+        let request = request(
+            "openai/gpt-6-luna",
+            "1. a\n2. b\n",
+            &past,
+            "are you sure this is right?",
+            serde_json::Value::Null,
+        );
+        let said = |role, texts: &[&str]| ChatMessage {
+            role,
+            content: texts.iter().map(|text| ContentBlock::text(*text)).collect(),
+        };
+        assert_eq!(
+            request.messages,
+            vec![
+                said(
+                    Role::User,
+                    &["Notes:\n1. a\n2. b\n", "Message:\nfix the PPU timing"]
+                ),
+                said(Role::Assistant, &[r#"{"picks": [2]}"#]),
+                said(Role::User, &["Message:\nand the timer"]),
+                said(Role::Assistant, &[r#"{"picks": []}"#]),
+                said(Role::User, &["Message:\nare you sure this is right?"]),
+            ]
+        );
+        // The shorter conversation is a prefix of the longer one.
+        let earlier = super::request(
+            "openai/gpt-6-luna",
+            "1. a\n2. b\n",
+            &past[..1],
+            "x",
+            serde_json::Value::Null,
+        );
+        assert_eq!(earlier.messages[..2], request.messages[..2]);
+        assert!(SELECTOR_PROMPT.contains("already picked"));
     }
 
     #[test]

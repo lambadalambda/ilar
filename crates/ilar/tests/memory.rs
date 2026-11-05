@@ -46,8 +46,7 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
             opening_index: true,
             // The selector would take its own turns from the script;
             // the recall tests below run it.
-            recall: false,
-            recall_model: ilar::memory::RECALL_MODEL.into(),
+            recall: None,
         }),
         ..RuntimeOptions::default()
     };
@@ -287,12 +286,87 @@ fn picked(numbers: &str) -> Vec<ProviderEvent> {
 
 /// Recall as the tests run it: the selector on the session's own
 /// model, so the one scripted provider answers both. Its call is made
-/// at turn start, before the turn's first request.
+/// at turn start, before the turn's first request. The tests below it
+/// run the configurable mode — each message alone, index lines only;
+/// the Claude Code mode has its own test.
 fn recall_config(memory: &Arc<MemoryStore>) -> ilar::memory::RecallConfig {
+    ilar::memory::RecallConfig {
+        bodies: false,
+        history: false,
+        ..claude_code_recall(memory)
+    }
+}
+
+fn claude_code_recall(memory: &Arc<MemoryStore>) -> ilar::memory::RecallConfig {
     ilar::memory::RecallConfig {
         model: "zai/glm-4.7".into(),
         ..ilar::memory::RecallConfig::new(memory.clone())
     }
+}
+
+/// By default the selector is one conversation, as Claude Code's: the
+/// second message's call carries the first message and the answer it
+/// got, and extends the first call, so the provider serves that part
+/// from its cache. The recall carries the note's body.
+#[tokio::test]
+async fn the_selector_remembers_the_session_and_recalls_bodies() {
+    let t = Recalling::new(vec![
+        picked("1"),
+        done("mode 3 is 172 dots"),
+        picked(""),
+        done("yes, checked"),
+    ]);
+    let ppu = t
+        .memory
+        .note(
+            ilar::memory::NoteKind::Decision,
+            "PPU timing",
+            "mode 3 lasts 172 dots",
+            "Measured against the Pan Docs table.",
+            chrono::Utc::now() - chrono::Duration::days(1),
+        )
+        .unwrap();
+    // A second note, so the second message still has one to ask about.
+    t.memory
+        .note(
+            ilar::memory::NoteKind::Solution,
+            "Timer reload",
+            "TIMA reloads a cycle late",
+            "",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    let config = || ilar::agent::LoopConfig {
+        recall: Some(claude_code_recall(&t.memory)),
+        ..Default::default()
+    };
+    t.turn("fix the PPU timing", config()).await;
+    t.turn("are you sure this is right?", config()).await;
+
+    assert_eq!(memory_recalls(&t.store, &t.id), vec![vec![ppu.id.clone()]]);
+    let requests = t.provider.requests();
+    let (first, second) = (&requests[0], &requests[2]);
+    assert_eq!(
+        second.messages[..first.messages.len() - 1],
+        first.messages[..first.messages.len() - 1]
+    );
+    assert_eq!(
+        second.messages[0], first.messages[0],
+        "the listing and first message lead both"
+    );
+    assert_eq!(
+        second.messages[1].content,
+        vec![ContentBlock::text(r#"{"picks": [1]}"#)]
+    );
+    assert_eq!(
+        last_user_texts(second),
+        ["Message:\nare you sure this is right?"]
+    );
+    let recall = last_user_texts(&requests[1]);
+    assert!(
+        recall[1].contains("Measured against the Pan Docs table."),
+        "{recall:?}"
+    );
 }
 
 /// The note the selector picks gets its index line after the prompt,

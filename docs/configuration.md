@@ -32,8 +32,10 @@ as a `{"type":"notice"}` event under `ilar exec --json`.
 | `general.theme` | `carbon` | See [themes](interface.md#themes). F3 opens the picker. |
 | `general.project_instructions` | `true` | Whether the working directory's `AGENTS.md`/`CLAUDE.md` is part of the system prompt. See [Project instructions](#project-instructions). User-scoped. |
 | `general.memory` | `true` | Whether a terminal session remembers across sessions, one store per project (a repository and all its worktrees) under `<state dir>/memory/`. `false` leaves the model without the `memory` tools and the prompt without the core block and the "Remembering" section; nothing on disk is touched. See [memory](sessions.md#memory-that-outlives-a-session). |
-| `general.memory_recall` | `false` | Whether each prompt surfaces the notes a selector model picks for it (up to five, from their title and summary), after the message, as index lines. See [memory](sessions.md#memory-that-outlives-a-session). |
+| `general.memory_recall` | `false` | Whether each prompt surfaces the notes a selector model picks for it (up to five, from their title and summary), after the message, with their bodies (see `memory_recall_bodies`). See [memory](sessions.md#memory-that-outlives-a-session). |
 | `general.memory_recall_model` | `"openai/gpt-6-luna"` | The selector's model. It reads one line per note and the message, at its lowest effort; a failed or slow call costs the prompt its recall, not the turn. |
+| `general.memory_recall_history` | `true` | The selector reads the session's earlier messages and the picks it gave them, as Claude Code's does, so a follow-up ("are you sure?") is read in context. `false`: each message alone. |
+| `general.memory_recall_bodies` | `true` | A recall carries each note's body (up to 4 KB), as Claude Code's does. `false`: the index line alone, read in full with `memory_get`. |
 | `general.memory_index` | `true` | Whether a session opens with every note's index line (up to 200 lines / 25 KB, newest first) beside the core block. |
 | `general.resume_offer` | `true` | Whether a bare `ilar` offers this directory's last session — its tail shown ghosted, Enter resumes it. See [Starting](interface.md#starting). |
 | `providers.openai.base_url` | API or ChatGPT endpoint | Override the Responses API base URL selected by `auth`. |
