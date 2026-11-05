@@ -1,5 +1,20 @@
 # DEVLOG
 
+## 2026-11-05 — Muse Spark announced calls and stopped
+
+Muse Spark kept writing "checking the SSH setup first." and ending the
+turn with no call. The raw streams held only reasoning and a message:
+the model really stopped, nothing was dropped. Replaying session
+be72f56b at its first stall gave 5 of 6 stops. Dropping the replayed
+reasoning items gave 0 of 6, which looked like the cause and was not:
+GPT 5.3-codex+ and Muse Spark 1.3 tag the text before a call
+`phase: "commentary"`, and ilar threw the tag away, so every earlier
+lead-in went back as a final answer. With the tag restored and all
+reasoning kept, 0 of 6, and the prompt cache stays intact. Grok writes
+after the call and sends no phase, so the tag is a catalog flag.
+Higher effort and a prompt rule ("call the tool in the same
+response") did not help (6/6 and 5/6).
+
 ## 2026-10-02 — Recall measured, and turned off
 
 A week of per-prompt recall on the Mac, tenco and aiko, after the
