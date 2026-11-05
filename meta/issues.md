@@ -31,7 +31,6 @@
 ## Milestone 7 — Unscheduled
 
 - [ ] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
-- [ ] [`ilar models` on the CLI](issues/ilar-models-on-the-cli.md)
 
 
 ## Milestone 9 — Time travel follow-ups
