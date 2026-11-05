@@ -37,6 +37,7 @@
 - [ ] [Recall that picks by meaning](issues/recall-that-picks-by-meaning.md) — index
 - [ ] [Recall is measured before it is on](issues/recall-is-measured-before-it-is-on.md)
 - [ ] [Terminal stores get consolidated](issues/terminal-stores-get-consolidated.md)
+- [ ] [Recall the Claude Code way](issues/recall-the-claude-code-way.md)
 
 
 ## Milestone 9 — Time travel follow-ups
