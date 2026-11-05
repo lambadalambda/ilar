@@ -15,6 +15,9 @@ pub struct ModelInfo {
     pub input_limit: u64,
     pub output_limit: u64,
     pub(crate) reasoning_summaries: bool,
+    /// Marks the text before a tool call with `phase: "commentary"` on
+    /// the Responses wire; replay must send the mark back.
+    pub(crate) message_phase: bool,
     /// Accepts image input.
     pub(crate) vision: bool,
     /// Effort ladder this model exposes; empty when it has none. Carried
@@ -789,6 +792,7 @@ impl ModelInfo {
             input_limit: context_limit - output_limit,
             output_limit,
             reasoning_summaries: false,
+            message_phase: false,
             vision: false,
             variants: NO_VARIANTS,
             access,
@@ -812,6 +816,12 @@ impl ModelInfo {
     const fn reasoning(mut self, variants: &'static [ModelVariant]) -> Self {
         self.reasoning_summaries = true;
         self.variants = variants;
+        self
+    }
+
+    /// Tags its lead-ins with a message phase (see the field).
+    const fn message_phase(mut self) -> Self {
+        self.message_phase = true;
         self
     }
 
@@ -949,7 +959,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     // GPT-6.1 Sol (2026-09-29): 6 Sol's window and input cap, but the
     // ladder starts at low (Codex's models.json, models.dev); every
     // ChatGPT plan.
@@ -963,7 +974,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_LOW_TO_MAX),
+    .reasoning(EFFORT_LOW_TO_MAX)
+    .message_phase(),
     // GPT-6 Sol and Luna (2026-09-22). The window and input cap as for
     // astra below; the full ladder from none, like the 5.6 rows; every
     // ChatGPT plan, with no access gate (Codex's models.json).
@@ -977,7 +989,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     model!(
         "openai",
         "gpt-6-luna",
@@ -988,7 +1001,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     // GPT-6 Astra (2026-09-04). models.dev: 1,050,000 context, 922,000
     // input cap; kept at the 5.6 rows' 272k working window, which is
     // also where Zen's price doubles. `OpenAiBoth`: the ChatGPT backend
@@ -1005,7 +1019,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_LOW_TO_MAX),
+    .reasoning(EFFORT_LOW_TO_MAX)
+    .message_phase(),
     model!(
         "openai",
         "gpt-5.6-sol",
@@ -1016,10 +1031,12 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     model!("openai", "gpt-5.6", "GPT-5.6", 1_050_000, 128_000, OpenAi)
         .vision()
-        .reasoning(EFFORT_NONE_TO_MAX),
+        .reasoning(EFFORT_NONE_TO_MAX)
+        .message_phase(),
     model!(
         "openai",
         "gpt-5.6-luna",
@@ -1030,7 +1047,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     model!(
         "openai",
         "gpt-5.6-terra",
@@ -1041,7 +1059,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     model!(
         "openai",
         "gpt-5.5-pro",
@@ -1056,7 +1075,8 @@ static CATALOG: &[ModelInfo] = &[
         "openai", "gpt-5.5", "GPT-5.5", 1_050_000, 128_000, OpenAiBoth
     )
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(OPENAI_GPT52_VARIANTS)
+    .message_phase(),
     model!(
         "openai",
         "gpt-5.4-pro",
@@ -1069,7 +1089,8 @@ static CATALOG: &[ModelInfo] = &[
     .reasoning(OPENAI_VERSIONED_PRO_VARIANTS),
     model!("openai", "gpt-5.4", "GPT-5.4", 1_050_000, 128_000, OpenAi)
         .vision()
-        .reasoning(OPENAI_GPT52_VARIANTS),
+        .reasoning(OPENAI_GPT52_VARIANTS)
+        .message_phase(),
     model!(
         "openai",
         "gpt-5.4-mini",
@@ -1079,7 +1100,8 @@ static CATALOG: &[ModelInfo] = &[
         OpenAi
     )
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(OPENAI_GPT52_VARIANTS)
+    .message_phase(),
     model!(
         "openai",
         "gpt-5.4-nano",
@@ -1089,7 +1111,8 @@ static CATALOG: &[ModelInfo] = &[
         OpenAi
     )
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(OPENAI_GPT52_VARIANTS)
+    .message_phase(),
     model!(
         "openai",
         "gpt-5.3-codex",
@@ -1099,7 +1122,8 @@ static CATALOG: &[ModelInfo] = &[
         OpenAi
     )
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(OPENAI_GPT52_VARIANTS)
+    .message_phase(),
     model!(
         "openai",
         "gpt-5.3-codex-spark",
@@ -1110,7 +1134,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(100_000)
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(OPENAI_GPT52_VARIANTS)
+    .message_phase(),
     model!(
         "openai",
         "gpt-5.2-pro",
@@ -1289,7 +1314,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_LOW_TO_MAX),
+    .reasoning(EFFORT_LOW_TO_MAX)
+    .message_phase(),
     model!(
         "opencode",
         "gpt-6-sol",
@@ -1300,7 +1326,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     model!(
         "opencode",
         "gpt-6-luna",
@@ -1311,7 +1338,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     model!(
         "opencode",
         "gpt-6-astra",
@@ -1322,7 +1350,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_LOW_TO_MAX),
+    .reasoning(EFFORT_LOW_TO_MAX)
+    .message_phase(),
     model!(
         "opencode",
         "gpt-5.6-terra",
@@ -1333,7 +1362,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     model!(
         "opencode",
         "gpt-5.5",
@@ -1343,7 +1373,8 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeResponses
     )
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(OPENAI_GPT52_VARIANTS)
+    .message_phase(),
     model!(
         "opencode",
         "gpt-5.5-pro",
@@ -1363,7 +1394,8 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeResponses
     )
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(OPENAI_GPT52_VARIANTS)
+    .message_phase(),
     model!(
         "opencode",
         "gpt-5.4-nano",
@@ -1373,7 +1405,8 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeResponses
     )
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(OPENAI_GPT52_VARIANTS)
+    .message_phase(),
     model!(
         "opencode",
         "gpt-5.3-codex",
@@ -1383,7 +1416,8 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeResponses
     )
     .vision()
-    .reasoning(OPENAI_GPT52_VARIANTS),
+    .reasoning(OPENAI_GPT52_VARIANTS)
+    .message_phase(),
     // Added 2026-09-24 from the live listings: models.dev's records,
     // each probed with a small request on its wire. Grok's output is
     // cut to 384K.
@@ -1406,7 +1440,8 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeResponses
     )
     .vision()
-    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
+    .reasoning(EFFORT_MINIMAL_TO_XHIGH)
+    .message_phase(),
     model!(
         "opencode",
         "qwen3.8-flash",
@@ -1530,7 +1565,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     model!(
         "opencode-go",
         "grok-4.6",
@@ -1554,7 +1590,8 @@ static CATALOG: &[ModelInfo] = &[
     )
     .input(272_000)
     .vision()
-    .reasoning(EFFORT_NONE_TO_MAX),
+    .reasoning(EFFORT_NONE_TO_MAX)
+    .message_phase(),
     model!(
         "opencode-go",
         "grok-4.7",
@@ -1647,7 +1684,8 @@ static CATALOG: &[ModelInfo] = &[
         OpenCodeResponses
     )
     .vision()
-    .reasoning(EFFORT_MINIMAL_TO_XHIGH),
+    .reasoning(EFFORT_MINIMAL_TO_XHIGH)
+    .message_phase(),
     model!(
         "opencode-go",
         "muse-spark-1.2-contributor",
@@ -1885,6 +1923,7 @@ pub(crate) fn register_runtime(models: &[RuntimeModel]) -> Vec<&'static ModelInf
                 input_limit: model.context_limit.saturating_sub(model.output_limit),
                 output_limit: model.output_limit,
                 reasoning_summaries: false,
+                message_phase: false,
                 vision: model.vision,
                 variants: NO_VARIANTS,
                 access: ModelAccess::Custom,

@@ -108,8 +108,9 @@ impl OpenAIProvider {
     }
 
     fn wire_body(&self, req: &Request) -> anyhow::Result<serde_json::Value> {
-        let reasoning_summaries =
-            crate::model::find(&req.model).is_some_and(|model| model.reasoning_summaries);
+        let model = crate::model::find(&req.model);
+        let reasoning_summaries = model.is_some_and(|model| model.reasoning_summaries);
+        let message_phase = model.is_some_and(|model| model.message_phase);
         let (provider, model_id) = resolve_model(&req.model)?;
         if provider != self.prefix {
             anyhow::bail!(
@@ -120,7 +121,7 @@ impl OpenAIProvider {
         let input = req
             .messages
             .iter()
-            .flat_map(wire_input_items)
+            .flat_map(|msg| wire_input_items(msg, message_phase))
             .collect::<Vec<_>>();
         let mut body = serde_json::Map::new();
         body.insert("model".into(), serde_json::json!(model_id));
@@ -178,7 +179,7 @@ impl OpenAIProvider {
 /// item refers to. A text-only `function_call_output.output` stays a plain
 /// string — that is the canonical form for text results, arrays being for
 /// multimodal ones.
-fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
+fn wire_input_items(msg: &ChatMessage, message_phase: bool) -> Vec<serde_json::Value> {
     let mut items = Vec::new();
     // Text and images gather as parts of one message item; consecutive
     // text merges into a single part so a text-only message keeps the
@@ -203,13 +204,26 @@ fn wire_input_items(msg: &ChatMessage) -> Vec<serde_json::Value> {
         }
         _ => parts.push(serde_json::json!({"type": text_part, "text": t})),
     };
+    // A model that tags its lead-ins wrote any text beside a call as
+    // commentary; sent back bare, it reads as a final answer, and the
+    // model learns to announce a call and stop.
+    let commentary = message_phase
+        && matches!(msg.role, Role::Assistant)
+        && msg
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolCall { .. }));
     let flush_parts = |parts: &mut Vec<serde_json::Value>, items: &mut Vec<serde_json::Value>| {
         if !parts.is_empty() {
-            items.push(serde_json::json!({
+            let mut message = serde_json::json!({
                 "type": "message",
                 "role": role,
                 "content": std::mem::take(parts),
-            }));
+            });
+            if commentary {
+                message["phase"] = serde_json::json!("commentary");
+            }
+            items.push(message);
         }
     };
     for block in &msg.content {
@@ -908,20 +922,23 @@ mod tests {
     /// `…</task-notification>fix the bug`. One part, two paragraphs.
     #[test]
     fn adjacent_text_blocks_reach_the_model_as_paragraphs() {
-        let items = wire_input_items(&ChatMessage {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "<task-notification>the build is green</task-notification>".into(),
-                },
-                ContentBlock::Text {
-                    text: String::new(),
-                },
-                ContentBlock::Text {
-                    text: "fix the bug".into(),
-                },
-            ],
-        });
+        let items = wire_input_items(
+            &ChatMessage {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "<task-notification>the build is green</task-notification>".into(),
+                    },
+                    ContentBlock::Text {
+                        text: String::new(),
+                    },
+                    ContentBlock::Text {
+                        text: "fix the bug".into(),
+                    },
+                ],
+            },
+            false,
+        );
         assert_eq!(items.len(), 1);
         let content = items[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1, "still one part: {content:?}");
@@ -933,20 +950,23 @@ mod tests {
 
     #[test]
     fn replayed_items_keep_the_shape_and_identity_the_api_gave_them() {
-        let message = wire_input_items(&ChatMessage {
-            role: Role::Assistant,
-            content: vec![
-                ContentBlock::Text {
-                    text: "on it".into(),
-                },
-                ContentBlock::ToolCall {
-                    id: "call_1".into(),
-                    name: "read".into(),
-                    input: serde_json::json!({"path": "Cargo.toml"}),
-                    item_id: Some("fc_1".into()),
-                },
-            ],
-        });
+        let message = wire_input_items(
+            &ChatMessage {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "on it".into(),
+                    },
+                    ContentBlock::ToolCall {
+                        id: "call_1".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "Cargo.toml"}),
+                        item_id: Some("fc_1".into()),
+                    },
+                ],
+            },
+            false,
+        );
 
         assert_eq!(message[0]["type"], "message");
         assert_eq!(message[0]["role"], "assistant");
@@ -957,20 +977,23 @@ mod tests {
         assert_eq!(message[1]["id"], "fc_1");
         assert_eq!(message[1]["call_id"], "call_1");
 
-        let user = wire_input_items(&ChatMessage::user_text("hello"));
+        let user = wire_input_items(&ChatMessage::user_text("hello"), false);
         assert_eq!(user[0]["content"][0]["type"], "input_text");
 
         // A session recorded before item ids were captured still replays;
         // it simply has no id to send.
-        let legacy = wire_input_items(&ChatMessage {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolCall {
-                id: "call_2".into(),
-                name: "read".into(),
-                input: serde_json::json!({}),
-                item_id: None,
-            }],
-        });
+        let legacy = wire_input_items(
+            &ChatMessage {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolCall {
+                    id: "call_2".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                    item_id: None,
+                }],
+            },
+            false,
+        );
         assert!(legacy[0].get("id").is_none(), "{:?}", legacy[0]);
     }
 
@@ -978,20 +1001,23 @@ mod tests {
     /// — two items would give the model two user turns for one message.
     #[test]
     fn a_user_image_rides_the_same_message_item_as_its_text() {
-        let items = wire_input_items(&ChatMessage {
-            role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "what is this?".into(),
-                },
-                ContentBlock::Image {
-                    image: crate::session::ImageContent {
-                        media_type: "image/png".into(),
-                        data: "aGVsbG8=".into(),
+        let items = wire_input_items(
+            &ChatMessage {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "what is this?".into(),
                     },
-                },
-            ],
-        });
+                    ContentBlock::Image {
+                        image: crate::session::ImageContent {
+                            media_type: "image/png".into(),
+                            data: "aGVsbG8=".into(),
+                        },
+                    },
+                ],
+            },
+            false,
+        );
 
         assert_eq!(items.len(), 1, "{items:?}");
         let content = items[0]["content"].as_array().unwrap();
@@ -1006,15 +1032,18 @@ mod tests {
     /// call itself. Conflating them would break tool results.
     #[test]
     fn a_tool_result_still_references_the_call_id() {
-        let items = wire_input_items(&ChatMessage {
-            role: Role::User,
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "call_1".into(),
-                content: "ok".into(),
-                is_error: false,
-                images: Vec::new(),
-            }],
-        });
+        let items = wire_input_items(
+            &ChatMessage {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    images: Vec::new(),
+                }],
+            },
+            false,
+        );
         assert_eq!(items[0]["type"], "function_call_output");
         assert_eq!(items[0]["call_id"], "call_1");
         // Text output is a plain string; arrays are the multimodal form.
@@ -1203,6 +1232,92 @@ mod tests {
         assert!(supports("openai/gpt-5.2"));
         assert!(supports("openai/o3"));
         assert!(!supports("openai/gpt-4o"));
+    }
+
+    /// Rows a live probe saw tag their lead-ins (2026-11-05), or their
+    /// same-family twins, and Grok, which writes after the call and
+    /// sends no phase.
+    #[test]
+    fn message_phase_is_flagged_only_where_the_wire_sends_it() {
+        let uses = |id| crate::model::find(id).unwrap().message_phase;
+        assert!(uses("openai/gpt-6.1-sol"));
+        assert!(uses("openai/gpt-5.3-codex"));
+        assert!(uses("opencode/gpt-6-astra"));
+        assert!(uses("opencode/muse-spark-1.3"));
+        assert!(uses("opencode-go/muse-spark-1.3-contributor"));
+        assert!(!uses("opencode-go/muse-spark-1.2-contributor"));
+        assert!(!uses("opencode/grok-4.7"));
+        assert!(!uses("openai/gpt-5.2"));
+        assert!(!uses("openai/gpt-4o"));
+    }
+
+    /// The text before a call is commentary. Untagged on replay, the
+    /// model reads its own "running the tests now:" as a final answer
+    /// and learns to stop there.
+    #[test]
+    fn a_lead_in_goes_back_as_commentary_where_the_model_tags_it() {
+        let lead_in = ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "running the tests now:".into(),
+                },
+                ContentBlock::ToolCall {
+                    id: "call_1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({"command": "cargo test"}),
+                    item_id: Some("fc_1".into()),
+                },
+            ],
+        };
+        let items = wire_input_items(&lead_in, true);
+        assert_eq!(items[0]["phase"], "commentary");
+        assert!(items[1].get("phase").is_none(), "{:?}", items[1]);
+
+        let untagged = wire_input_items(&lead_in, false);
+        assert!(untagged[0].get("phase").is_none(), "{:?}", untagged[0]);
+
+        let answer = ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "all green".into(),
+            }],
+        };
+        let items = wire_input_items(&answer, true);
+        assert!(items[0].get("phase").is_none(), "{:?}", items[0]);
+
+        let user = wire_input_items(&ChatMessage::user_text("go"), true);
+        assert!(user[0].get("phase").is_none(), "{:?}", user[0]);
+    }
+
+    #[test]
+    fn the_request_tags_lead_ins_only_for_a_flagged_row() {
+        let provider = OpenAIProvider::new("test".into(), None);
+        let phase_of_first_item = |model: &str| {
+            let mut request = Request::with_model(model);
+            request.messages = vec![ChatMessage {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "checking:".into(),
+                    },
+                    ContentBlock::ToolCall {
+                        id: "call_1".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({}),
+                        item_id: None,
+                    },
+                ],
+            }];
+            provider.wire_body(&request).unwrap()["input"][0]
+                .get("phase")
+                .cloned()
+        };
+        assert_eq!(
+            phase_of_first_item("openai/gpt-6-sol"),
+            Some(serde_json::json!("commentary"))
+        );
+        assert_eq!(phase_of_first_item("openai/gpt-5.2"), None);
     }
 
     #[test]
