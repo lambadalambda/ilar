@@ -38,19 +38,21 @@ use crate::tools::{
 pub const MEMORY_CHARS: usize = 6000;
 pub const USER_CHARS: usize = 2500;
 
-/// How a note's summary is written, said wherever a note gets written:
-/// in the `memory` tool's description, in the standing prompt section,
-/// and in the gateway's after-turn review. The index matches words
-/// across the whole note and shows the summary, so the summary has to
-/// carry the words a future question will.
-pub const SUMMARY_RULE: &str = "A note is found by its title and summary: the index and \
-search results show only these two, and search weighs their words first. The title names the \
-situation the note is for, in the words someone would use when they need it (\"Recovering a \
-render after its watcher dies\"), not how you found it; at most 80 characters. The summary is \
-the answer itself, one sentence of at most 200 characters, so the line alone is enough. Exact \
-identifiers — seeds, ports, hashes, timings, file names — go in the body, where memory_search \
-still finds them. One fact per note; progress and current state (what is done, what is \
-deployed) go stale and are not notes.";
+/// How a note is written, said wherever a note gets written: in the
+/// `memory` tool's description, in the standing prompt section, and in
+/// the gateway's after-turn review. Recall's selector reads the title
+/// and summary alone, so they have to say what the note is about; the
+/// body is read when the note is applied, so it says why and when.
+pub const SUMMARY_RULE: &str = "A note is found by its title and summary: the index shows \
+only these two, and recall picks notes for a message from these two lines alone. The title \
+names the situation the note is for, in the words someone would use when they need it \
+(\"Recovering a render after its watcher dies\"), not how you found it; at most 80 characters. \
+The summary is the answer itself, one sentence of at most 200 characters, so the line alone is \
+enough. Exact identifiers — seeds, ports, hashes, timings, file names — go in the body, where \
+memory_search still finds them. In the body of a decision, preference or solution, add a line \
+**Why:** with the reason and a line **How to apply:** with when it holds and when it does not. \
+One fact per note; progress and current state (what is done, what is deployed) go stale and \
+are not notes.";
 
 /// Longest title and summary a note takes, in characters.
 pub const TITLE_MAX: usize = 80;
@@ -1984,6 +1986,19 @@ mod tests {
         assert!(block.contains("earlier session"), "{block}");
         assert!(block.contains("not verified"), "{block}");
         assert!(!block.contains("you wrote"), "{block}");
+    }
+
+    /// Recall's selector reads a note's title and summary and nothing
+    /// else, so the rule says so; and a recalled rule is applied from
+    /// its body, so the body says why and when, as Claude Code asks.
+    #[test]
+    fn the_rule_says_recall_reads_the_headline_and_bodies_carry_why() {
+        assert!(SUMMARY_RULE.contains("recall picks"), "{SUMMARY_RULE}");
+        assert!(
+            SUMMARY_RULE.contains("**Why:**") && SUMMARY_RULE.contains("**How to apply:**"),
+            "{SUMMARY_RULE}"
+        );
+        assert!(!SUMMARY_RULE.contains("weighs"), "{SUMMARY_RULE}");
     }
 
     /// The title and summary are what the index and search show, and a
