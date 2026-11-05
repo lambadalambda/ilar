@@ -36,7 +36,6 @@
 - [ ] [Replay message item ids](issues/replay-message-item-ids.md)
 - [ ] [Recall that picks by meaning](issues/recall-that-picks-by-meaning.md) — index
 - [ ] [Recall is measured before it is on](issues/recall-is-measured-before-it-is-on.md)
-- [ ] [Note bodies say why and how to apply](issues/note-bodies-say-why-and-how-to-apply.md)
 - [ ] [Terminal stores get consolidated](issues/terminal-stores-get-consolidated.md)
 
 
