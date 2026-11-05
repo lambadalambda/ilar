@@ -1356,6 +1356,33 @@ mod tests {
         assert_eq!(items[1]["content"][0]["text"], "all green");
     }
 
+    /// Codex knows a third phase; dropped as unknown, the text would
+    /// go back with a guessed one.
+    #[test]
+    fn a_partial_answer_is_kept_as_one() {
+        let phase: crate::session::TextPhase =
+            serde_json::from_value(serde_json::json!("partial_answer")).unwrap();
+        let partial = ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "the first half holds".into(),
+                    phase: Some(phase),
+                },
+                ContentBlock::ToolCall {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                    item_id: None,
+                },
+            ],
+        };
+        assert_eq!(
+            wire_input_items(&partial, true)[0]["phase"],
+            "partial_answer"
+        );
+    }
+
     #[test]
     fn the_request_tags_lead_ins_only_for_a_flagged_row() {
         let provider = OpenAIProvider::new("test".into(), None);

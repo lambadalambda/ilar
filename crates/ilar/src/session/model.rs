@@ -84,12 +84,14 @@ pub enum DiagnosticKind {
 }
 
 /// What the model said a piece of text was, on a Responses wire that
-/// says: the lead-in before a tool call, or the answer. It goes back
-/// as it came, and a model told nothing reads its lead-in as an answer.
+/// says: the lead-in before a tool call, part of an answer, or the
+/// answer. It goes back as it came, and a model told nothing reads its
+/// lead-in as an answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TextPhase {
     Commentary,
+    PartialAnswer,
     FinalAnswer,
 }
 
