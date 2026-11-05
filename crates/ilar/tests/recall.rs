@@ -36,7 +36,7 @@ fn assistant(text: &str) -> SessionEvent {
     SessionEvent::AssistantMessage {
         id: new_id(),
         model: "zai/glm-4.7".into(),
-        content: vec![ContentBlock::Text { text: text.into() }],
+        content: vec![ContentBlock::text(text)],
         usage: Usage::default(),
         stop_reason: "end_turn".into(),
         ts: Utc::now(),

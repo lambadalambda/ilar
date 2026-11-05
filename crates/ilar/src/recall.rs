@@ -92,7 +92,7 @@ pub fn entries(events: &[SessionEvent]) -> Vec<Entry> {
             SessionEvent::AssistantMessage { content, .. } => {
                 for block in content {
                     match block {
-                        ContentBlock::Text { text } => push(Speaker::Assistant, text),
+                        ContentBlock::Text { text, .. } => push(Speaker::Assistant, text),
                         ContentBlock::Image { .. } => {}
                         // A thought is a thought whether the wire gets
                         // it back or the log keeps it as a local note;
@@ -532,9 +532,7 @@ mod tests {
                 id: new_id(),
                 model: "zai/glm-4.7".into(),
                 content: vec![
-                    ContentBlock::Text {
-                        text: "reading the container".into(),
-                    },
+                    ContentBlock::text("reading the container"),
                     ContentBlock::ToolCall {
                         id: "call-1".into(),
                         name: "bash".into(),

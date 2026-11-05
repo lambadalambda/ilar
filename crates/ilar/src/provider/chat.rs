@@ -437,7 +437,7 @@ fn openai_message(
         match block {
             // A merged pair of user events — a task notification and
             // the prompt after it — is two things said, not one.
-            ContentBlock::Text { text } => push_paragraph(&mut content_text, text),
+            ContentBlock::Text { text, .. } => push_paragraph(&mut content_text, text),
             // Vision models get the real part; the placeholder keeps a
             // session with images usable on a text-only model.
             ContentBlock::Image { image } if vision => image_parts.push(image_part(image)),
@@ -1095,9 +1095,7 @@ mod tests {
         ChatMessage {
             role: Role::User,
             content: vec![
-                ContentBlock::Text {
-                    text: "what is this?".into(),
-                },
+                ContentBlock::text("what is this?"),
                 ContentBlock::Image {
                     image: crate::session::ImageContent {
                         media_type: "image/png".into(),
@@ -1119,12 +1117,8 @@ mod tests {
         let message = ChatMessage {
             role: Role::User,
             content: vec![
-                ContentBlock::Text {
-                    text: "<task-notification>the build is green</task-notification>".into(),
-                },
-                ContentBlock::Text {
-                    text: "fix the bug".into(),
-                },
+                ContentBlock::text("<task-notification>the build is green</task-notification>"),
+                ContentBlock::text("fix the bug"),
             ],
         };
         let wire = openai_message(&message, false, None, false);
@@ -1141,15 +1135,9 @@ mod tests {
         let message = ChatMessage {
             role: Role::User,
             content: vec![
-                ContentBlock::Text {
-                    text: String::new(),
-                },
-                ContentBlock::Text {
-                    text: "fix the bug".into(),
-                },
-                ContentBlock::Text {
-                    text: String::new(),
-                },
+                ContentBlock::text(String::new()),
+                ContentBlock::text("fix the bug"),
+                ContentBlock::text(String::new()),
             ],
         };
         let wire = openai_message(&message, false, None, false);
@@ -1578,9 +1566,7 @@ mod tests {
             result("c1"),
             assistant(vec![call("c2")]),
             result("c2"),
-            assistant(vec![ContentBlock::Text {
-                text: "it is".into(),
-            }]),
+            assistant(vec![ContentBlock::text("it is")]),
         ];
         let provider = ChatProvider::new(ChatDialect::zai("k".into(), "http://zai.test".into()));
         let body = provider.wire_body_for_test(&request);
@@ -1639,7 +1625,7 @@ mod tests {
                 images: Vec::new(),
             }],
         };
-        let text = |text: &str| ContentBlock::Text { text: text.into() };
+        let text = |text: &str| ContentBlock::text(text);
         let mut request = Request::with_model("zai/glm-4.7");
         request.messages = vec![
             ChatMessage::user_text("earlier"),

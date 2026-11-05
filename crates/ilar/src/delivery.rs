@@ -340,9 +340,7 @@ mod tests {
         let events = vec![SessionEvent::AssistantMessage {
             id: new_id(),
             model: "test/model".into(),
-            content: vec![crate::session::ContentBlock::Text {
-                text: "the task said: done".into(),
-            }],
+            content: vec![crate::session::ContentBlock::text("the task said: done")],
             usage: crate::session::Usage::default(),
             stop_reason: "end_turn".into(),
             ts: chrono::Utc::now(),

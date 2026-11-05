@@ -595,7 +595,7 @@ pub(crate) fn seed(store: &ilar::session::SessionStore) -> std::io::Result<(Stri
         workspace: None,
         cwd: Some(std::path::PathBuf::from("/tmp/alpha")),
     };
-    let text = |text: &str| ContentBlock::Text { text: text.into() };
+    let text = |text: &str| ContentBlock::text(text);
     let assistant =
         |content: Vec<ContentBlock>, stop_reason: &str| SessionEvent::AssistantMessage {
             id: new_id(),

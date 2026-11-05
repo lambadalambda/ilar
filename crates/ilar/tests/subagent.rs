@@ -1886,9 +1886,7 @@ async fn subagent_turns_use_the_configured_compaction_threshold() {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text {
-                text: "old answer ".repeat(40),
-            }],
+            content: vec![ContentBlock::text("old answer ".repeat(40))],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: chrono::Utc::now(),
@@ -2452,7 +2450,7 @@ async fn child_session_created_with_parent_link() {
     let child_transcript = child_session.transcript();
     assert!(matches!(
         &child_transcript[0].content[0],
-        ContentBlock::Text { text } if text == "look"
+        ContentBlock::Text { text, .. } if text == "look"
     ));
 }
 
@@ -2785,7 +2783,7 @@ async fn literal_null_strings_in_optional_task_fields_spawn_as_if_omitted() {
         .unwrap();
     assert!(matches!(
         &literal_child.transcript()[0].content[0],
-        ContentBlock::Text { text } if text == "null"
+        ContentBlock::Text { text, .. } if text == "null"
     ));
 }
 
@@ -3470,7 +3468,7 @@ fn transcript_text(request: &Request) -> String {
         .iter()
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::Text { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()

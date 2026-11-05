@@ -190,7 +190,7 @@ mod tests {
     fn assistant_text(text: &str) -> ChatMessage {
         ChatMessage {
             role: Role::Assistant,
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
         }
     }
 

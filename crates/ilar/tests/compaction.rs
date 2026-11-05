@@ -64,9 +64,10 @@ fn seed_compactable_history(store: &SessionStore, session_id: &str) {
             .append(SessionEvent::AssistantMessage {
                 id: new_id(),
                 model: "zai/glm-4.7".into(),
-                content: vec![ilar::session::ContentBlock::Text {
-                    text: format!("old answer {i} {}", "detail ".repeat(20)),
-                }],
+                content: vec![ilar::session::ContentBlock::text(format!(
+                    "old answer {i} {}",
+                    "detail ".repeat(20)
+                ))],
                 usage: Usage::default(),
                 stop_reason: "end_turn".into(),
                 ts: chrono::Utc::now(),
@@ -182,9 +183,7 @@ async fn estimate_ignores_usage_before_latest_compaction_boundary() {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: "zai/glm-4.7".into(),
-            content: vec![ilar::session::ContentBlock::Text {
-                text: "old answer".into(),
-            }],
+            content: vec![ilar::session::ContentBlock::text("old answer")],
             usage: Usage {
                 input_tokens: 10_000,
                 input_token_accounting: Some(InputTokenAccounting::ExcludesCached),
@@ -339,9 +338,7 @@ fn estimate_treats_unversioned_legacy_usage_as_ambiguous() {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: "openai/gpt-5.6-sol".into(),
-            content: vec![ilar::session::ContentBlock::Text {
-                text: "small legacy answer".into(),
-            }],
+            content: vec![ilar::session::ContentBlock::text("small legacy answer")],
             usage: legacy,
             stop_reason: "end_turn".into(),
             ts: chrono::Utc::now(),
@@ -387,9 +384,9 @@ async fn oversize_transcript_triggers_compaction() {
                 .append(SessionEvent::AssistantMessage {
                     id: new_id(),
                     model: "zai/glm-4.7".into(),
-                    content: vec![ilar::session::ContentBlock::Text {
-                        text: format!("answer number {i} with substantial explanation text"),
-                    }],
+                    content: vec![ilar::session::ContentBlock::text(format!(
+                        "answer number {i} with substantial explanation text"
+                    ))],
                     usage: Usage::default(),
                     stop_reason: "end_turn".into(),
                     ts: chrono::Utc::now(),
@@ -775,9 +772,7 @@ async fn forced_compaction_runs_below_the_threshold_and_reports_its_summary() {
             .append(SessionEvent::AssistantMessage {
                 id: new_id(),
                 model: "zai/glm-4.7".into(),
-                content: vec![ilar::session::ContentBlock::Text {
-                    text: "earlier answer".into(),
-                }],
+                content: vec![ilar::session::ContentBlock::text("earlier answer")],
                 usage: Usage::default(),
                 stop_reason: "end_turn".into(),
                 ts: chrono::Utc::now(),
@@ -1110,9 +1105,10 @@ async fn what_the_summary_drops_stays_findable() {
                 .append(SessionEvent::AssistantMessage {
                     id: new_id(),
                     model: "zai/glm-4.7".into(),
-                    content: vec![ilar::session::ContentBlock::Text {
-                        text: format!("step {i} {}", "detail ".repeat(50)),
-                    }],
+                    content: vec![ilar::session::ContentBlock::text(format!(
+                        "step {i} {}",
+                        "detail ".repeat(50)
+                    ))],
                     usage: Usage::default(),
                     stop_reason: "end_turn".into(),
                     ts: chrono::Utc::now(),

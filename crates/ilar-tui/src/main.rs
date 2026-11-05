@@ -6810,9 +6810,7 @@ mod tests {
             .append(ilar::session::SessionEvent::AssistantMessage {
                 id: new_id(),
                 model: "zai/glm-4.7".into(),
-                content: vec![ilar::session::ContentBlock::Text {
-                    text: "replayed child reply".into(),
-                }],
+                content: vec![ilar::session::ContentBlock::text("replayed child reply")],
                 usage: ilar::session::Usage::default(),
                 stop_reason: "end_turn".into(),
                 ts: chrono::Utc::now(),

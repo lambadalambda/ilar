@@ -124,7 +124,7 @@ async fn mock_records_requests_for_assertions() {
         system_prompt: Some("be terse".into()),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: "hi".into() }],
+            content: vec![ContentBlock::text("hi")],
         }],
         tools: vec![ToolDefinition {
             name: "read".into(),

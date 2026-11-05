@@ -36,9 +36,9 @@ fn seed_conversation(store: &SessionStore, session_id: &str) {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text {
-                text: "Done; it listens on 8080 behind the nginx proxy.".into(),
-            }],
+            content: vec![ContentBlock::text(
+                "Done; it listens on 8080 behind the nginx proxy.",
+            )],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: chrono::Utc::now(),
@@ -159,9 +159,7 @@ async fn a_mid_turn_aside_cuts_back_to_the_last_settled_point() {
                 id: new_id(),
                 model: "zai/glm-4.7".into(),
                 content: vec![
-                    ContentBlock::Text {
-                        text: "let me check the config".into(),
-                    },
+                    ContentBlock::text("let me check the config"),
                     ContentBlock::ToolCall {
                         id: "dangling-1".into(),
                         name: "read".into(),

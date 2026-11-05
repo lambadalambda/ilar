@@ -150,6 +150,14 @@ pub enum ContentBlock {
     },
 }
 
+impl ContentBlock {
+    /// Plain text, the block every surface builds; fields added later
+    /// default here instead of at each call site.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: Role,
@@ -160,7 +168,7 @@ impl ChatMessage {
     pub fn user_text(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
         }
     }
 }

@@ -228,7 +228,7 @@ fn wire_input_items(msg: &ChatMessage, message_phase: bool) -> Vec<serde_json::V
     };
     for block in &msg.content {
         match block {
-            ContentBlock::Text { text: t } => push_text(&mut parts, t),
+            ContentBlock::Text { text: t, .. } => push_text(&mut parts, t),
             ContentBlock::Image { image } => parts.push(serde_json::json!({
                 "type": "input_image",
                 "image_url": image.data_url(),
@@ -926,15 +926,9 @@ mod tests {
             &ChatMessage {
                 role: Role::User,
                 content: vec![
-                    ContentBlock::Text {
-                        text: "<task-notification>the build is green</task-notification>".into(),
-                    },
-                    ContentBlock::Text {
-                        text: String::new(),
-                    },
-                    ContentBlock::Text {
-                        text: "fix the bug".into(),
-                    },
+                    ContentBlock::text("<task-notification>the build is green</task-notification>"),
+                    ContentBlock::text(String::new()),
+                    ContentBlock::text("fix the bug"),
                 ],
             },
             false,
@@ -954,9 +948,7 @@ mod tests {
             &ChatMessage {
                 role: Role::Assistant,
                 content: vec![
-                    ContentBlock::Text {
-                        text: "on it".into(),
-                    },
+                    ContentBlock::text("on it"),
                     ContentBlock::ToolCall {
                         id: "call_1".into(),
                         name: "read".into(),
@@ -1005,9 +997,7 @@ mod tests {
             &ChatMessage {
                 role: Role::User,
                 content: vec![
-                    ContentBlock::Text {
-                        text: "what is this?".into(),
-                    },
+                    ContentBlock::text("what is this?"),
                     ContentBlock::Image {
                         image: crate::session::ImageContent {
                             media_type: "image/png".into(),
@@ -1259,9 +1249,7 @@ mod tests {
         let lead_in = ChatMessage {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Text {
-                    text: "running the tests now:".into(),
-                },
+                ContentBlock::text("running the tests now:"),
                 ContentBlock::ToolCall {
                     id: "call_1".into(),
                     name: "bash".into(),
@@ -1279,9 +1267,7 @@ mod tests {
 
         let answer = ChatMessage {
             role: Role::Assistant,
-            content: vec![ContentBlock::Text {
-                text: "all green".into(),
-            }],
+            content: vec![ContentBlock::text("all green")],
         };
         let items = wire_input_items(&answer, true);
         assert!(items[0].get("phase").is_none(), "{:?}", items[0]);
@@ -1298,9 +1284,7 @@ mod tests {
             request.messages = vec![ChatMessage {
                 role: Role::Assistant,
                 content: vec![
-                    ContentBlock::Text {
-                        text: "checking:".into(),
-                    },
+                    ContentBlock::text("checking:"),
                     ContentBlock::ToolCall {
                         id: "call_1".into(),
                         name: "read".into(),

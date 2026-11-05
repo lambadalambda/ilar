@@ -127,7 +127,7 @@ fn carries_prior_summary(messages: &[ChatMessage]) -> bool {
     messages
         .iter()
         .flat_map(|message| &message.content)
-        .any(|block| matches!(block, ContentBlock::Text { text } if is_prior_summary(text)))
+        .any(|block| matches!(block, ContentBlock::Text { text, .. } if is_prior_summary(text)))
 }
 
 /// The conversation exactly as the turn sent it, plus the instruction as
@@ -333,7 +333,7 @@ fn message_chars(message: &ChatMessage) -> usize {
         .content
         .iter()
         .map(|block| match block {
-            crate::session::ContentBlock::Text { text } => text.chars().count(),
+            crate::session::ContentBlock::Text { text, .. } => text.chars().count(),
             // This sum is characters, divided by four by the caller; an
             // image's cost is already tokens, so it enters multiplied.
             // Its base64 length says nothing about what a model bills.
@@ -554,9 +554,7 @@ async fn flush_memory(
             });
         }
         if !response.text.is_empty() {
-            content.push(ContentBlock::Text {
-                text: response.text,
-            });
+            content.push(ContentBlock::text(response.text));
         }
         let calls = response.calls;
         content.extend(
@@ -780,7 +778,7 @@ mod tests {
             .content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.clone()),
+                ContentBlock::Text { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect()
@@ -797,7 +795,7 @@ mod tests {
         let events = vec![SessionEvent::AssistantMessage {
             id: "a1".into(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text { text: huge.clone() }],
+            content: vec![ContentBlock::text(huge.clone())],
             usage: crate::session::Usage {
                 input_tokens: 20_000,
                 output_tokens: 500,
@@ -811,17 +809,15 @@ mod tests {
         let transcript = vec![
             ChatMessage {
                 role: Role::User,
-                content: vec![ContentBlock::Text { text: huge.clone() }],
+                content: vec![ContentBlock::text(huge.clone())],
             },
             ChatMessage {
                 role: Role::Assistant,
-                content: vec![ContentBlock::Text { text: huge }],
+                content: vec![ContentBlock::text(huge)],
             },
             ChatMessage {
                 role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "t".repeat(4_000),
-                }],
+                content: vec![ContentBlock::text("t".repeat(4_000))],
             },
         ];
 
@@ -858,9 +854,7 @@ mod tests {
             "the old estimate has to be the huge one for this to prove anything"
         );
 
-        let mut content = vec![ContentBlock::Text {
-            text: "make a web version of this".into(),
-        }];
+        let mut content = vec![ContentBlock::text("make a web version of this")];
         content.extend(shots.into_iter().map(|image| ContentBlock::Image { image }));
         let transcript = vec![ChatMessage {
             role: Role::User,

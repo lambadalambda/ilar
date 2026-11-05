@@ -644,7 +644,7 @@ fn was_truncated(bounded: &str) -> bool {
 /// `ToolResult` event all stop here. A turn-error diagnostic passes.
 fn project_block(block: &ContentBlock) -> Option<Value> {
     match block {
-        ContentBlock::Text { text } => Some(json!({ "type": "text", "text": text })),
+        ContentBlock::Text { text, .. } => Some(json!({ "type": "text", "text": text })),
         ContentBlock::ReasoningSummary {
             text,
             completed: true,
@@ -1013,9 +1013,7 @@ mod tests {
         let value = project_event(&assistant(
             "zai/glm-4.7",
             vec![
-                ContentBlock::Text {
-                    text: "on it".into(),
-                },
+                ContentBlock::text("on it"),
                 ContentBlock::Thinking {
                     text: "hidden thought".into(),
                     field: None,

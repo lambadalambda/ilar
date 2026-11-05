@@ -623,7 +623,7 @@ fn restored_session_invocation_view_in(
                     match block {
                         // Never appears in assistant content.
                         ilar::session::ContentBlock::Image { .. } => {}
-                        ilar::session::ContentBlock::Text { text } => match lines.last_mut() {
+                        ilar::session::ContentBlock::Text { text, .. } => match lines.last_mut() {
                             Some(Line_::Assistant(current)) => current.push_str(text),
                             _ => lines.push(Line_::Assistant(text.clone())),
                         },
@@ -1295,9 +1295,7 @@ mod tests {
                 id: new_id(),
                 model: "zai/glm-4.7".into(),
                 content: vec![
-                    ilar::session::ContentBlock::Text {
-                        text: "restored answer".into(),
-                    },
+                    ilar::session::ContentBlock::text("restored answer"),
                     ilar::session::ContentBlock::Thinking {
                         text: "a thought from a model that summarises none".into(),
                         field: None,
@@ -1523,9 +1521,7 @@ mod tests {
                         text: "an older log wrote it like this".into(),
                         field: None,
                     },
-                    ContentBlock::Text {
-                        text: "here is what I think".into(),
-                    },
+                    ContentBlock::text("here is what I think"),
                 ],
                 usage: Usage::default(),
                 stop_reason: "end_turn".into(),
@@ -1590,11 +1586,7 @@ mod tests {
                 kind: DiagnosticKind::TurnError,
             }])
         };
-        let answered = || {
-            assistant(vec![ContentBlock::Text {
-                text: "done".into(),
-            }])
-        };
+        let answered = || assistant(vec![ContentBlock::text("done")]);
         let interrupted_tool = || SessionEvent::ToolResult {
             id: new_id(),
             tool_use_id: new_id(),
@@ -2101,9 +2093,7 @@ mod tests {
                 .append(ilar::session::SessionEvent::AssistantMessage {
                     id: new_id(),
                     model: "zai/glm-4.7".into(),
-                    content: vec![ilar::session::ContentBlock::Text {
-                        text: answer.into(),
-                    }],
+                    content: vec![ilar::session::ContentBlock::text(answer)],
                     usage: Default::default(),
                     stop_reason: "end_turn".into(),
                     ts: chrono::Utc::now(),
@@ -2254,9 +2244,7 @@ mod tests {
             .append(ilar::session::SessionEvent::AssistantMessage {
                 id: new_id(),
                 model: "zai/glm-4.7".into(),
-                content: vec![ilar::session::ContentBlock::Text {
-                    text: "Nested restored answer".into(),
-                }],
+                content: vec![ilar::session::ContentBlock::text("Nested restored answer")],
                 usage: Default::default(),
                 stop_reason: "end_turn".into(),
                 ts: chrono::Utc::now(),
@@ -2281,9 +2269,7 @@ mod tests {
             .append(ilar::session::SessionEvent::AssistantMessage {
                 id: new_id(),
                 model: "zai/glm-4.7".into(),
-                content: vec![ilar::session::ContentBlock::Text {
-                    text: "Later answer".into(),
-                }],
+                content: vec![ilar::session::ContentBlock::text("Later answer")],
                 usage: Default::default(),
                 stop_reason: "end_turn".into(),
                 ts: chrono::Utc::now(),
@@ -2587,9 +2573,7 @@ mod tests {
                         text: "Nested reasoning".into(),
                         completed: true,
                     },
-                    ilar::session::ContentBlock::Text {
-                        text: "Nested restored answer".into(),
-                    },
+                    ilar::session::ContentBlock::text("Nested restored answer"),
                 ],
                 usage: Default::default(),
                 stop_reason: "end_turn".into(),
@@ -2748,9 +2732,7 @@ mod tests {
                 .append(ilar::session::SessionEvent::AssistantMessage {
                     id: new_id(),
                     model: "zai/glm-4.7".into(),
-                    content: vec![ilar::session::ContentBlock::Text {
-                        text: format!("answer {turn}"),
-                    }],
+                    content: vec![ilar::session::ContentBlock::text(format!("answer {turn}"))],
                     usage: ilar::session::Usage::default(),
                     stop_reason: "end_turn".into(),
                     ts: chrono::Utc::now(),

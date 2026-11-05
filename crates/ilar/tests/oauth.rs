@@ -685,8 +685,8 @@ async fn item_id_cache_arm(state_dir: &str, model: &str, session_headers: bool) 
                     calls.push((id, name));
                 }
                 Some(ProviderEvent::TextDelta(text)) => match content.last_mut() {
-                    Some(ContentBlock::Text { text: existing }) => existing.push_str(&text),
-                    _ => content.push(ContentBlock::Text { text }),
+                    Some(ContentBlock::Text { text: existing, .. }) => existing.push_str(&text),
+                    _ => content.push(ContentBlock::text(text)),
                 },
                 Some(ProviderEvent::TurnComplete { usage, .. }) => break usage,
                 Some(ProviderEvent::Error(error)) => panic!("provider error: {error}"),

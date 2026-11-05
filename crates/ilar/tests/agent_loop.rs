@@ -840,7 +840,7 @@ async fn multi_turn_tool_conversation_end_to_end() {
     assert_eq!(transcript.len(), 4, "transcript: {transcript:?}");
     assert!(matches!(
         &transcript[0].content[0],
-        ContentBlock::Text { text } if text == "do the thing"
+        ContentBlock::Text { text, .. } if text == "do the thing"
     ));
     let assistant1 = &transcript[1];
     assert_eq!(assistant1.content.len(), 5);
@@ -849,9 +849,13 @@ async fn multi_turn_tool_conversation_end_to_end() {
     assert!(
         matches!(&assistant1.content[0], ContentBlock::Thinking { text, .. } if text == "plan")
     );
-    assert!(matches!(&assistant1.content[1], ContentBlock::Text { text } if text == "checking"));
+    assert!(
+        matches!(&assistant1.content[1], ContentBlock::Text { text, .. } if text == "checking")
+    );
     assert!(matches!(&assistant1.content[2], ContentBlock::ToolCall { id, .. } if id == "t1"));
-    assert!(matches!(&assistant1.content[3], ContentBlock::Text { text } if text == "after first"));
+    assert!(
+        matches!(&assistant1.content[3], ContentBlock::Text { text, .. } if text == "after first")
+    );
     assert!(matches!(&assistant1.content[4], ContentBlock::ToolCall { id, .. } if id == "t2"));
     let results = &transcript[2];
     assert!(matches!(
@@ -866,7 +870,7 @@ async fn multi_turn_tool_conversation_end_to_end() {
     ));
     assert!(matches!(
         &transcript[3].content[0],
-        ContentBlock::Text { text } if text == "all done"
+        ContentBlock::Text { text, .. } if text == "all done"
     ));
 
     // Loop events were published for the UI.
@@ -983,12 +987,12 @@ async fn multiple_thinking_runs_preserve_order() {
         matches!(&content[0], ContentBlock::Thinking { text, .. } if text == "first thought"),
         "{content:?}"
     );
-    assert!(matches!(&content[1], ContentBlock::Text { text } if text == "between"));
+    assert!(matches!(&content[1], ContentBlock::Text { text, .. } if text == "between"));
     assert!(
         matches!(&content[2], ContentBlock::Thinking { text, .. } if text == "second thought"),
         "{content:?}"
     );
-    assert!(matches!(&content[3], ContentBlock::Text { text } if text == "answer"));
+    assert!(matches!(&content[3], ContentBlock::Text { text, .. } if text == "answer"));
 }
 
 #[tokio::test]
@@ -1103,7 +1107,7 @@ async fn public_reasoning_summary_is_persisted_without_becoming_replay_input() {
         if text == "**Inspecting configuration**")
     );
     assert!(matches!(&content[1], ContentBlock::Reasoning { item } if item == &reasoning));
-    assert!(matches!(&content[2], ContentBlock::Text { text } if text == "done"));
+    assert!(matches!(&content[2], ContentBlock::Text { text, .. } if text == "done"));
     let mut published = Vec::new();
     while let Ok(event) = rx.try_recv() {
         published.push(event);
@@ -1196,7 +1200,7 @@ async fn thinking_a_model_takes_none_of_back_is_persisted_as_a_diagnostic() {
     let content = &store.load(&session_id).unwrap().transcript()[1].content;
     assert!(matches!(&content[0], ContentBlock::Diagnostic { text, .. }
         if text == "unfinished"));
-    assert!(matches!(&content[1], ContentBlock::Text { text } if text == "answer"));
+    assert!(matches!(&content[1], ContentBlock::Text { text, .. } if text == "answer"));
 }
 
 #[tokio::test]
@@ -1351,7 +1355,7 @@ async fn provider_error_surfaces_and_session_stays_resumable() {
     let transcript = session.transcript();
     assert!(matches!(
         &transcript[0].content[0],
-        ContentBlock::Text { text } if text == "hello"
+        ContentBlock::Text { text, .. } if text == "hello"
     ));
 }
 
@@ -1425,7 +1429,9 @@ async fn failed_tool_chain_resumes_without_replaying_prompt_or_tool() {
     let original_count = resumed_messages
         .iter()
         .flat_map(|message| &message.content)
-        .filter(|block| matches!(block, ContentBlock::Text { text } if text == "original prompt"))
+        .filter(
+            |block| matches!(block, ContentBlock::Text { text, .. } if text == "original prompt"),
+        )
         .count();
     assert_eq!(original_count, 1, "original prompt was duplicated");
     assert!(format!("{resumed_messages:?}").contains("echo: once"));
@@ -1948,7 +1954,7 @@ async fn concurrent_turn_on_same_session_is_rejected_before_append() {
     assert_eq!(transcript.len(), 1);
     assert!(matches!(
         &transcript[0].content[0],
-        ContentBlock::Text { text } if text == "first"
+        ContentBlock::Text { text, .. } if text == "first"
     ));
 }
 
@@ -2085,7 +2091,7 @@ async fn abort_mid_stream_leaves_resumable_session() {
     );
     assert!(matches!(
         &transcript[1].content[0],
-        ContentBlock::Text { text } if text == "before"
+        ContentBlock::Text { text, .. } if text == "before"
     ));
 }
 
@@ -2256,7 +2262,7 @@ async fn provider_error_mid_stream_persists_partial_step() {
     assert_eq!(transcript.len(), 2, "transcript: {transcript:?}");
     assert!(matches!(
         &transcript[1].content[0],
-        ContentBlock::Text { text } if text == "half an answ"
+        ContentBlock::Text { text, .. } if text == "half an answ"
     ));
     // The error itself is recorded in the session log (as a diagnostic
     // block, which never flows back to providers) so stream failures are
@@ -3458,7 +3464,7 @@ async fn a_live_scratch_streams_a_turn_and_is_deleted_at_the_end() {
         })
         .flatten()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text),
+            ContentBlock::Text { text, .. } => Some(text),
             _ => None,
         })
         .collect();
@@ -4025,7 +4031,7 @@ async fn a_scratch_that_cannot_be_written_never_disturbs_the_turn() {
     let transcript = store.load(&session_id).unwrap().transcript();
     assert!(matches!(
         transcript.last().map(|message| &message.content[0]),
-        Some(ContentBlock::Text { text }) if text == "all done"
+        Some(ContentBlock::Text { text, .. }) if text == "all done"
     ));
 }
 
@@ -4212,7 +4218,7 @@ async fn a_hiccup_after_the_first_delta_continues_the_turn() {
     // The second request continues from the committed partial step.
     let last = requests[1].messages.last().unwrap();
     assert!(
-        matches!(&last.content[0], ContentBlock::Text { text } if text == "half an answ"),
+        matches!(&last.content[0], ContentBlock::Text { text, .. } if text == "half an answ"),
         "{last:?}"
     );
     let session = store.load(&session_id).unwrap();

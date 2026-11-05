@@ -203,7 +203,7 @@ fn last_user_texts(request: &ilar::provider::Request) -> Vec<String> {
         .content
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::Text { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()
@@ -518,7 +518,7 @@ async fn a_compaction_first_lets_the_model_write_its_memory() {
     assert!(summary.starts_with(&requests[2].messages), "{summary:?}");
     assert_eq!(summary.len(), requests[2].messages.len() + 2);
     assert!(
-        matches!(&summary[summary.len() - 2].content[..], [ContentBlock::Text { text }] if text == "nothing more"),
+        matches!(&summary[summary.len() - 2].content[..], [ContentBlock::Text { text, .. }] if text == "nothing more"),
         "{summary:?}"
     );
 }

@@ -2310,16 +2310,14 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
     if let Some(summary) = summary {
         messages.push(ChatMessage {
             role: Role::User,
-            content: vec![ContentBlock::Text {
-                // The trailing line outranks any stop-flavored wording the
-                // summarizer may have carried over: the checkpoint replaced
-                // the conversation, never the goal.
-                text: format!(
-                    "<compaction-summary>\n{summary}\n</compaction-summary>\n\
-                    Continue the task from this state — the checkpoint replaced the \
-                    earlier conversation, not the goal."
-                ),
-            }],
+            // The trailing line outranks any stop-flavored wording the
+            // summarizer may have carried over: the checkpoint replaced
+            // the conversation, never the goal.
+            content: vec![ContentBlock::text(format!(
+                "<compaction-summary>\n{summary}\n</compaction-summary>\n\
+                Continue the task from this state — the checkpoint replaced the \
+                earlier conversation, not the goal."
+            ))],
         });
     }
 
@@ -2344,24 +2342,19 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));
                 }
-                push_user_blocks(
-                    &mut messages,
-                    vec![ContentBlock::Text { text: text.clone() }],
-                );
+                push_user_blocks(&mut messages, vec![ContentBlock::text(text.clone())]);
             }
             SessionEvent::UserMessage { text, images, .. } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));
                 }
-                let mut blocks = vec![ContentBlock::Text { text: text.clone() }];
+                let mut blocks = vec![ContentBlock::text(text.clone())];
                 if pictures_travel {
                     blocks.extend(images.iter().map(|image| ContentBlock::Image {
                         image: image.clone(),
                     }));
                 } else if !images.is_empty() {
-                    blocks.push(ContentBlock::Text {
-                        text: crate::image::IMAGE_ELIDED.to_string(),
-                    });
+                    blocks.push(ContentBlock::text(crate::image::IMAGE_ELIDED));
                 }
                 push_user_blocks(&mut messages, blocks);
             }
@@ -2524,7 +2517,7 @@ mod tests {
         assert_eq!(messages.len(), 3, "{messages:?}");
         assert!(matches!(
             &messages[0].content[..],
-            [ContentBlock::Text { text }, ContentBlock::Text { text: note }]
+            [ContentBlock::Text { text, .. }, ContentBlock::Text { text: note, .. }]
                 if text == "first" && note == crate::image::IMAGE_ELIDED
         ));
         // The tool result and the next user message share one user
@@ -2533,7 +2526,7 @@ mod tests {
             ContentBlock::ToolResult {
                 content, images, ..
             },
-            ContentBlock::Text { text },
+            ContentBlock::Text { text, .. },
             ContentBlock::Image { .. },
         ] = &messages[2].content[..]
         else {
@@ -2559,7 +2552,7 @@ mod tests {
         SessionEvent::AssistantMessage {
             id: new_id(),
             model: "test/model".into(),
-            content: vec![ContentBlock::Text { text: text.into() }],
+            content: vec![ContentBlock::text(text)],
             usage: super::super::model::Usage::default(),
             stop_reason: "end_turn".into(),
             ts: chrono::Utc::now(),

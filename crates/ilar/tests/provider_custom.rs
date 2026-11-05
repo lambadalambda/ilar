@@ -252,9 +252,7 @@ fn the_configured_vision_flag_decides_image_parts() {
     req.messages = vec![ChatMessage {
         role: Role::User,
         content: vec![
-            ContentBlock::Text {
-                text: "what is this?".into(),
-            },
+            ContentBlock::text("what is this?"),
             ContentBlock::Image {
                 image: ImageContent {
                     media_type: "image/png".into(),

@@ -434,8 +434,8 @@ impl StepAccumulator {
     fn push_text(&mut self, delta: String) {
         self.thinking_open = None;
         match self.content.last_mut() {
-            Some(ContentBlock::Text { text }) => text.push_str(&delta),
-            _ => self.content.push(ContentBlock::Text { text: delta }),
+            Some(ContentBlock::Text { text, .. }) => text.push_str(&delta),
+            _ => self.content.push(ContentBlock::text(delta)),
         }
     }
 
@@ -2439,9 +2439,9 @@ async fn run_turn_steps(
         let blocks = acc.content_blocks();
         let had_tool_calls = !acc.tool_indices.is_empty();
         let leaked_call = !had_tool_calls
-            && blocks
-                .iter()
-                .any(|block| matches!(block, ContentBlock::Text { text } if leaks_tool_call(text)));
+            && blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text, .. } if leaks_tool_call(text)),
+            );
         let stop_reason = acc
             .stop_reason
             .clone()

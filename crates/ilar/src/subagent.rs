@@ -3531,7 +3531,7 @@ fn final_text_of(run: &[crate::session::SessionEvent]) -> Option<String> {
             let text = content
                 .iter()
                 .filter_map(|block| match block {
-                    ContentBlock::Text { text } => Some(text.as_str()),
+                    ContentBlock::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()

@@ -87,9 +87,7 @@ async fn turn(store: &SessionStore, id: &str, root: &Path, text: &str, checkpoin
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text {
-                text: format!("did {text}"),
-            }],
+            content: vec![ContentBlock::text(format!("did {text}"))],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts,

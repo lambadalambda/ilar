@@ -698,9 +698,7 @@ async fn neutral_request_serializes_to_wire_format() {
     request.messages = vec![
         ilar::session::ChatMessage {
             role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: "read it".into(),
-            }],
+            content: vec![ContentBlock::text("read it")],
         },
         ilar::session::ChatMessage {
             role: Role::Assistant,

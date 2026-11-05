@@ -528,9 +528,7 @@ fn serializes_system_and_tool_results_in_protocol_order() {
                     is_error: false,
                     images: Vec::new(),
                 },
-                ContentBlock::Text {
-                    text: "continue with this context".into(),
-                },
+                ContentBlock::text("continue with this context"),
                 ContentBlock::ToolResult {
                     tool_use_id: "call_2".into(),
                     content: "two result".into(),
@@ -756,9 +754,7 @@ fn appending_a_turn_leaves_the_cached_prefix_byte_identical() {
     // end, nothing else touched.
     req.messages.push(ChatMessage {
         role: Role::Assistant,
-        content: vec![ContentBlock::Text {
-            text: "the file says one".into(),
-        }],
+        content: vec![ContentBlock::text("the file says one")],
     });
     req.messages.push(ChatMessage::user_text("now the other"));
     let second = provider.wire_body_for_test(&req);

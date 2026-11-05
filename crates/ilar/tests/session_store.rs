@@ -42,9 +42,7 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
             id: new_id(),
             model: "zai/glm-4.7".into(),
             content: vec![
-                ContentBlock::Text {
-                    text: "Reading it now.".into(),
-                },
+                ContentBlock::text("Reading it now."),
                 ContentBlock::ToolCall {
                     id: "toolu_1".into(),
                     name: "read".into(),
@@ -73,9 +71,7 @@ fn sample_log(meta: &SessionMeta) -> Vec<SessionEvent> {
         SessionEvent::AssistantMessage {
             id: new_id(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text {
-                text: "Done.".into(),
-            }],
+            content: vec![ContentBlock::text("Done.")],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts,
@@ -545,7 +541,7 @@ fn user_images_ride_the_transcript_and_old_logs_read_without_them() {
     assert_eq!(transcript[0].role, Role::User);
     assert!(matches!(
         &transcript[0].content[0],
-        ContentBlock::Text { text } if text == "what's wrong in this screenshot?"
+        ContentBlock::Text { text, .. } if text == "what's wrong in this screenshot?"
     ));
     assert!(matches!(
         &transcript[0].content[1],
@@ -665,9 +661,9 @@ fn transcript_honors_compaction_boundary() {
     assert_eq!(transcript[0].role, Role::User);
     assert_eq!(transcript[0].content.len(), 2);
     assert!(matches!(&transcript[0].content[0],
-        ContentBlock::Text { text } if text.contains("Earlier: user asked")));
+        ContentBlock::Text { text, .. } if text.contains("Earlier: user asked")));
     assert!(matches!(&transcript[0].content[1],
-        ContentBlock::Text { text } if text == "and now?"));
+        ContentBlock::Text { text, .. } if text == "and now?"));
 }
 
 /// A summary that carries "stop working" language must not get the last
@@ -693,7 +689,7 @@ fn injected_summary_tells_the_next_turn_to_continue() {
 
     let transcript = session.transcript();
     assert!(matches!(&transcript[0].content[0],
-        ContentBlock::Text { text } if text.starts_with("<compaction-summary>")
+        ContentBlock::Text { text, .. } if text.starts_with("<compaction-summary>")
             && text.contains("Continue the task from this state")));
 }
 
@@ -750,9 +746,7 @@ fn compacted_session_loads_only_the_active_replay_window() {
             .append(SessionEvent::AssistantMessage {
                 id: new_id(),
                 model: "zai/glm-4.7".into(),
-                content: vec![ContentBlock::Text {
-                    text: format!("old answer {index}"),
-                }],
+                content: vec![ContentBlock::text(format!("old answer {index}"))],
                 usage: Usage::default(),
                 stop_reason: "end_turn".into(),
                 ts: Utc::now(),
@@ -860,9 +854,7 @@ fn writer_rebuilds_a_corrupt_replay_index_after_canonical_fallback() {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: meta.model.clone(),
-            content: vec![ContentBlock::Text {
-                text: "post-compaction answer".into(),
-            }],
+            content: vec![ContentBlock::text("post-compaction answer")],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: Utc::now(),
@@ -980,9 +972,7 @@ fn compaction_after_indexed_load_writes_an_absolute_boundary() {
             .append(SessionEvent::AssistantMessage {
                 id: new_id(),
                 model: meta.model.clone(),
-                content: vec![ContentBlock::Text {
-                    text: format!("answer {index}"),
-                }],
+                content: vec![ContentBlock::text(format!("answer {index}"))],
                 usage: Usage::default(),
                 stop_reason: "end_turn".into(),
                 ts: Utc::now(),
@@ -1017,9 +1007,7 @@ fn compaction_after_indexed_load_writes_an_absolute_boundary() {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: meta.model.clone(),
-            content: vec![ContentBlock::Text {
-                text: "first answer".into(),
-            }],
+            content: vec![ContentBlock::text("first answer")],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: Utc::now(),
@@ -1103,9 +1091,7 @@ fn invalid_history_is_never_hidden_by_checkpoint_creation() {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: meta.model.clone(),
-            content: vec![ContentBlock::Text {
-                text: "answer".into(),
-            }],
+            content: vec![ContentBlock::text("answer")],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: Utc::now(),
@@ -1155,7 +1141,7 @@ fn corrupted_historical_id_page_falls_back_to_canonical_validation() {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: meta.model.clone(),
-            content: vec![ContentBlock::Text { text: "old".into() }],
+            content: vec![ContentBlock::text("old")],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: Utc::now(),
@@ -2226,9 +2212,7 @@ fn simple_turn(user_id: &str, text: &str, assistant_id: &str) -> Vec<SessionEven
         SessionEvent::AssistantMessage {
             id: assistant_id.into(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text {
-                text: format!("answered {text}"),
-            }],
+            content: vec![ContentBlock::text(format!("answered {text}"))],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts,
@@ -2526,7 +2510,7 @@ fn rewind_across_compaction_keeps_or_drops_the_summary_with_the_cut() {
     let transcript = reader.transcript();
     assert!(matches!(
         &transcript[0].content[0],
-        ContentBlock::Text { text } if text.contains("the story so far")
+        ContentBlock::Text { text, .. } if text.contains("the story so far")
     ));
 }
 
@@ -2672,13 +2656,13 @@ fn forking_a_compacted_session_after_the_boundary_keeps_the_summary() {
     let transcript = fork.transcript();
     assert!(matches!(
         &transcript[0].content[0],
-        ContentBlock::Text { text } if text.contains("the story so far")
+        ContentBlock::Text { text, .. } if text.contains("the story so far")
     ));
     assert!(!transcript.iter().any(|message| {
         message
             .content
             .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text } if text == "third"))
+            .any(|block| matches!(block, ContentBlock::Text { text, .. } if text == "third"))
     }));
 }
 
@@ -3008,9 +2992,7 @@ fn the_archive_outlives_the_context_window() {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text {
-                text: "noted".into(),
-            }],
+            content: vec![ContentBlock::text("noted")],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: Utc::now(),

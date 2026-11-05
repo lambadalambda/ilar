@@ -156,12 +156,7 @@ fn main() {
         session.append(user(opening)).unwrap();
         session.append(topic(name)).unwrap();
         session
-            .append(assistant(
-                vec![ContentBlock::Text {
-                    text: middle.into(),
-                }],
-                usage(900, 60),
-            ))
+            .append(assistant(vec![ContentBlock::text(middle)], usage(900, 60)))
             .unwrap();
     }
 
@@ -299,8 +294,8 @@ fn main() {
 
     session
         .append(assistant(
-            vec![ContentBlock::Text {
-                text: "Found and fixed. The hang was a deadlock between the export \
+            vec![ContentBlock::text(
+                "Found and fixed. The hang was a deadlock between the export \
                        handler and its writer:\n\n\
                        - `export_all` fed rows through an **unbounded rendezvous** — \
                        `mpsc::channel(0)` — so every send waited for the writer.\n\
@@ -315,9 +310,8 @@ fn main() {
                        All 14 export tests pass, including a new one that stalls the \
                        client on purpose. The explore agent found the same shape in \
                        `src/backup.rs:77` — left as a todo since it's outside this \
-                       fix."
-                    .into(),
-            }],
+                       fix.",
+            )],
             usage(3_900, 480),
         ))
         .unwrap();

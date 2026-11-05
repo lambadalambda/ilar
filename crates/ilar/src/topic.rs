@@ -230,9 +230,7 @@ mod tests {
             ChatMessage {
                 role: Role::Assistant,
                 content: vec![
-                    ContentBlock::Text {
-                        text: "found the race".into(),
-                    },
+                    ContentBlock::text("found the race"),
                     ContentBlock::ToolCall {
                         id: "call-1".into(),
                         name: "bash".into(),

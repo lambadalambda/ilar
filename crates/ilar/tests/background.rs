@@ -175,7 +175,7 @@ impl Provider for NestedBackgroundProvider {
             .first()
             .and_then(|message| message.content.first())
             .and_then(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             });
         if initial_prompt == Some("remain pending") {
@@ -350,7 +350,7 @@ impl Provider for PendingOnHang {
             .first()
             .and_then(|message| message.content.first())
             .and_then(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             });
         if opening == Some("hang") {
@@ -2142,9 +2142,9 @@ async fn cancelled_background_task_persists_its_partial_answer() {
         })
         .expect("aborted assistant message");
     assert!(
-        partial
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Text { text } if text == "partial answer")),
+        partial.iter().any(
+            |block| matches!(block, ContentBlock::Text { text, .. } if text == "partial answer")
+        ),
         "{partial:?}"
     );
 }
@@ -2441,9 +2441,7 @@ async fn a_compacted_child_still_reports_its_final_text() {
         .append(SessionEvent::AssistantMessage {
             id: new_id(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text {
-                text: "the final research report".into(),
-            }],
+            content: vec![ContentBlock::text("the final research report")],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: chrono::Utc::now(),
@@ -2549,7 +2547,7 @@ impl Provider for BusyForegroundChild {
         }
         let is_child = request.messages.iter().any(|message| {
             message.content.iter().any(
-                |block| matches!(block, ContentBlock::Text { text } if text.contains("trickle")),
+                |block| matches!(block, ContentBlock::Text { text, .. } if text.contains("trickle")),
             )
         });
         if is_child {
@@ -3753,9 +3751,7 @@ async fn notification_waits_for_busy_parent_without_being_lost() {
         .append(ilar::session::SessionEvent::AssistantMessage {
             id: new_id(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text {
-                text: "previous active answer".into(),
-            }],
+            content: vec![ContentBlock::text("previous active answer")],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: chrono::Utc::now(),
@@ -3883,9 +3879,7 @@ async fn nested_no_text_completion_does_not_reuse_stale_answer() {
         .append(ilar::session::SessionEvent::AssistantMessage {
             id: new_id(),
             model: "zai/glm-4.7".into(),
-            content: vec![ContentBlock::Text {
-                text: "stale answer".into(),
-            }],
+            content: vec![ContentBlock::text("stale answer")],
             usage: Usage::default(),
             stop_reason: "end_turn".into(),
             ts: chrono::Utc::now(),
@@ -4148,7 +4142,7 @@ fn transcript_text(request: &Request) -> String {
         .iter()
         .flat_map(|message| message.content.iter())
         .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.clone()),
+            ContentBlock::Text { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -4345,7 +4339,7 @@ impl Provider for PanicOnExplode {
             .first()
             .and_then(|message| message.content.first())
             .and_then(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             });
         if opening == Some("explode") {
@@ -4493,7 +4487,7 @@ impl Provider for RecordingPendingOnHang {
             .first()
             .and_then(|message| message.content.first())
             .and_then(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .map(str::to_string);

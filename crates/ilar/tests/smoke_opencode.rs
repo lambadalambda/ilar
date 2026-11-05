@@ -173,7 +173,7 @@ fn echo(step: Step, result: &str) -> Vec<ilar::session::ChatMessage> {
         });
     }
     if !step.text.is_empty() {
-        content.push(ContentBlock::Text { text: step.text });
+        content.push(ContentBlock::text(step.text));
     }
     let Some((id, name, input)) = step.call else {
         return vec![ChatMessage {
