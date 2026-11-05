@@ -487,3 +487,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The opening index lists every note](issues/the-opening-index-lists-every-note.md)
 - [x] [A model picks what recall surfaces](issues/a-model-picks-what-recall-surfaces.md)
 - [x] [Note bodies say why and how to apply](issues/note-bodies-say-why-and-how-to-apply.md)
+- [x] [A memory menu](issues/a-memory-menu.md)
