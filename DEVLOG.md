@@ -1,5 +1,28 @@
 # DEVLOG
 
+## 2026-11-05 — A model picks what recall surfaces
+
+Recall now asks a selector model, the way Claude Code's recall does:
+one numbered line per note (kind, age, title, summary — never the
+body), the person's words, and an answer of at most five numbers or
+none. Measured with `scripts/recall-eval.py` on 60 typed prompts from
+the tenco gateway (median 42 notes per prompt), against labels from
+gpt-6.1-sol at high effort, which read every note in full and what the
+session did next. 23 of the 60 prompts had a helpful note.
+
+| Selector | Precision | Recall | Quiet when none helps | Median / p90 |
+|---|---|---|---|---|
+| gpt-6-luna, effort none | 59% | 33% | 36/37 | 1.7 / 2.1 s |
+| gpt-6-luna, effort low | 53% | 37% | 32/37 | 1.8 / 2.3 s |
+| gpt-6.1-terra, effort none | 52% | 47% | 33/37 | 2.0 / 3.1 s |
+
+The word ranking it replaced was near 23% by a looser measure. Luna at
+no effort stays the default: a wrong note costs attention, a missed
+one is still in the opening index. The labels are a model's, and
+await a spot-check before recall goes on by default. The OpenAI
+Decisions API would fit (a probability per note) but is 404 through
+the ChatGPT login, Zen and Go.
+
 ## 2026-11-05 — Muse Spark announced calls and stopped
 
 Muse Spark kept writing "checking the SSH setup first." and ending the
