@@ -31,6 +31,7 @@
 ## Milestone 7 — Unscheduled
 
 - [ ] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
+- [ ] [Replay the commentary phase](issues/replay-the-commentary-phase.md)
 
 
 ## Milestone 9 — Time travel follow-ups
