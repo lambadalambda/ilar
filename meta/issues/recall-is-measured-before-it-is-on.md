@@ -11,8 +11,10 @@ what the session then did, with a sample checked by the user.
 
 - A script that collects the cases, labels them, and runs the selector
   against the labels: precision, recall, and how often it says nothing
-  when nothing applies.
-- The labelled set is kept in the repo so the measurement can be rerun.
+  when nothing applies (`scripts/recall-eval.py`).
+- The labelled set is kept so the measurement can be rerun — outside
+  the repository (`~/.local/state/ilar/recall-eval/`), since it holds
+  private prompts and notes.
 
 ## Acceptance Criteria
 
