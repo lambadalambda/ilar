@@ -125,7 +125,17 @@ impl OpenAIProvider {
             .collect::<Vec<_>>();
         let mut body = serde_json::Map::new();
         body.insert("model".into(), serde_json::json!(model_id));
-        body.insert("instructions".into(), serde_json::json!(req.system_prompt));
+        // Patched here, where every request to the model passes — turn,
+        // aside, topic, summary — so they all keep one cached prefix.
+        let instructions = match (
+            req.system_prompt.as_deref(),
+            crate::model::prompt_patch(&req.model),
+        ) {
+            (Some(prompt), Some(patch)) => Some(format!("{prompt}\n\n{patch}")),
+            (None, Some(patch)) => Some(patch.to_string()),
+            (prompt, None) => prompt.map(str::to_string),
+        };
+        body.insert("instructions".into(), serde_json::json!(instructions));
         body.insert("input".into(), serde_json::json!(input));
         body.insert(
             "tools".into(),
@@ -1354,6 +1364,34 @@ mod tests {
         assert_eq!(items[0]["phase"], "commentary");
         assert_eq!(items[1]["phase"], "final_answer");
         assert_eq!(items[1]["content"][0]["text"], "all green");
+    }
+
+    /// GPT hears how its channels work, at the end of whatever system
+    /// prompt the caller sent; other rows get the prompt untouched.
+    #[test]
+    fn the_channel_patch_rides_only_gpt_requests() {
+        let provider = OpenAIProvider::new("test".into(), None);
+        let instructions = |model: &str| {
+            let mut request = Request::with_model(model);
+            request.system_prompt = Some("You are ilar.".into());
+            provider.wire_body(&request).unwrap()["instructions"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let patch = crate::model::prompt_patch("openai/gpt-6.1-sol").expect("gpt is patched");
+        assert_eq!(
+            instructions("openai/gpt-6.1-sol"),
+            format!("You are ilar.\n\n{patch}")
+        );
+        assert_eq!(instructions("openai/gpt-5.2"), "You are ilar.");
+
+        let patched = |id| crate::model::prompt_patch(id).is_some();
+        assert!(patched("opencode/gpt-6-sol"));
+        assert!(patched("opencode-go/gpt-6-luna"));
+        assert!(!patched("opencode-go/muse-spark-1.3-contributor"));
+        assert!(!patched("opencode/grok-4.7"));
+        assert!(!patched("zai/glm-5.3"));
     }
 
     /// Codex knows a third phase; dropped as unknown, the text would

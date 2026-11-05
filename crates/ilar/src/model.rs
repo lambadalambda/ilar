@@ -1997,6 +1997,29 @@ pub fn replays_thinking(full_id: &str) -> bool {
     find(full_id).is_some_and(ModelInfo::replays_thinking)
 }
 
+/// How GPT's two channels work, said the way Codex and OpenCode say it
+/// to the same models; without it, long runs drift and stop on a plan.
+const GPT_CHANNELS: &str = "# Commentary and final answer\n\n\
+While you work, short updates go to the commentary channel: what you \
+found, what you assume, or what changed the plan, in a sentence or two, \
+and only when they add something; never narrate routine reads, searches \
+or edits. An update does not end your turn: make the tool call it leads \
+into in the same response. Your turn ends with a message in the final \
+channel: the outcome, self-contained, once the work is done or you are \
+truly blocked, or the one-line status that waits on a background job. \
+Do not end on a plan, a list of next steps or an offer to continue when \
+the next step is clear and inside the task: take it. A question that \
+blocks you goes in the final channel, never in commentary.";
+
+/// Text appended to the system prompt for this model's family, where
+/// its own client tells it something ilar's base prompt does not.
+pub fn prompt_patch(full_id: &str) -> Option<&'static str> {
+    // The GPT rows that speak in phases: on the API, ChatGPT, Zen or Go.
+    find(full_id)
+        .filter(|model| model.message_phase && model.id.starts_with("gpt-"))
+        .map(|_| GPT_CHANNELS)
+}
+
 /// `options` with the wire's output cap added, spelled the way the
 /// model's access wants it — `max_output_tokens` on the Responses API,
 /// `max_tokens` on chat completions — unless the options already name
