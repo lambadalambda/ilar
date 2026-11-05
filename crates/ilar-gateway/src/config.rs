@@ -80,8 +80,9 @@ pub struct Memory {
     /// daily note at every compaction. On unless said otherwise.
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Each prompt surfaces the notes it matches, after the message.
-    /// Off unless asked: of 65 notes it surfaced in a week, 5 helped.
+    /// Each prompt surfaces the notes a selector model picks for it.
+    /// Off unless asked: the word ranking before it surfaced 65 notes
+    /// in a week, of which 5 helped.
     #[serde(default)]
     pub recall: bool,
     /// A chat opens with the newest notes' index beside the core.

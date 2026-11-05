@@ -44,7 +44,10 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
             store: store_for(cwd),
             standing_prompt: true,
             opening_index: true,
-            recall: true,
+            // The selector would take its own turns from the script;
+            // the recall tests below run it.
+            recall: false,
+            recall_model: ilar::memory::RECALL_MODEL.into(),
         }),
         ..RuntimeOptions::default()
     };
@@ -248,9 +251,18 @@ impl Recalling {
     }
 
     async fn turn(&self, prompt: &str, config: ilar::agent::LoopConfig) {
+        self.turn_on(&self.provider, prompt, config).await;
+    }
+
+    async fn turn_on(
+        &self,
+        provider: &dyn ilar::provider::ProviderResolver,
+        prompt: &str,
+        config: ilar::agent::LoopConfig,
+    ) {
         let (tx, _rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
         run_turn(
-            &self.provider,
+            provider,
             &self.registry,
             &self.store,
             &self.id,
@@ -268,17 +280,37 @@ impl Recalling {
     }
 }
 
-/// A prompt that shares words with a note gets that note's index line
-/// after it, once; every earlier message stays as it was; after a
-/// compaction folds the recall away, the note may come back.
+/// The selector's answer, as the mock streams it.
+fn picked(numbers: &str) -> Vec<ProviderEvent> {
+    done(&format!("{{\"picks\": [{numbers}]}}"))
+}
+
+/// Recall as the tests run it: the selector on the session's own
+/// model, so the one scripted provider answers both. Its call is made
+/// at turn start, before the turn's first request.
+fn recall_config(memory: &Arc<MemoryStore>) -> ilar::memory::RecallConfig {
+    ilar::memory::RecallConfig {
+        model: "zai/glm-4.7".into(),
+        ..ilar::memory::RecallConfig::new(memory.clone())
+    }
+}
+
+/// The note the selector picks gets its index line after the prompt,
+/// once; every earlier message stays as it was; after a compaction
+/// folds the recall away, the note may come back.
 #[tokio::test]
-async fn a_prompt_surfaces_the_notes_it_matches_once_until_a_compaction() {
+async fn a_picked_note_is_surfaced_once_until_a_compaction() {
     let t = Recalling::new(vec![
+        picked(""),
         done("hi"),
+        picked("2"),
         done("8443"),
+        picked(""),
         done("8443, as I said"),
+        picked(""),
         done("SUMMARY: ports were discussed."),
         done("after the handover"),
+        picked("2"),
         done("8443, again"),
     ]);
     let now = chrono::Utc::now();
@@ -301,7 +333,7 @@ async fn a_prompt_surfaces_the_notes_it_matches_once_until_a_compaction() {
             now,
         )
         .unwrap();
-    let recall = ilar::memory::RecallConfig::new(t.memory.clone());
+    let recall = recall_config(&t.memory);
     let config = || ilar::agent::LoopConfig {
         recall: Some(recall.clone()),
         ..Default::default()
@@ -317,10 +349,24 @@ async fn a_prompt_surfaces_the_notes_it_matches_once_until_a_compaction() {
         vec![vec![deploy.id.clone()]]
     );
     let requests = t.provider.requests();
+    // The selector read one line per note and the person's words, never
+    // a body.
+    let selector = &requests[2];
+    assert_eq!(
+        selector.system_prompt.as_deref(),
+        Some(ilar::selector::SELECTOR_PROMPT)
+    );
+    let asked = last_user_texts(selector);
+    assert!(
+        asked[0].contains("2. [decision] 2d ago — Deploy box:"),
+        "{asked:?}"
+    );
+    assert!(!asked[0].contains("house firewall"), "{asked:?}");
+    assert_eq!(asked[1], format!("Message:\n{question}"));
     // The earlier message is byte-identical; the new one carries the
     // prompt and then the recall, as one message.
-    assert_eq!(requests[1].messages[0], requests[0].messages[0]);
-    let texts = last_user_texts(&requests[1]);
+    assert_eq!(requests[3].messages[0], requests[1].messages[0]);
+    let texts = last_user_texts(&requests[3]);
     assert_eq!(texts.len(), 2, "{texts:?}");
     assert_eq!(texts[0], question);
     assert!(texts[1].starts_with("<memory-recall>\n"), "{}", texts[1]);
@@ -343,10 +389,12 @@ async fn a_prompt_surfaces_the_notes_it_matches_once_until_a_compaction() {
     assert!(texts[1].contains("Check before asserting"), "{}", texts[1]);
     assert!(!texts[1].contains("earl grey"), "{}", texts[1]);
 
-    // Asked again: the model has it already.
+    // Asked again: the model has it already, so it is not offered.
     t.turn(question, config()).await;
     assert_eq!(memory_recalls(&t.store, &t.id).len(), 1);
-    assert_eq!(last_user_texts(&t.provider.requests()[2]).len(), 1);
+    let requests = t.provider.requests();
+    assert!(!last_user_texts(&requests[4])[0].contains("Deploy box"));
+    assert_eq!(last_user_texts(&requests[5]).len(), 1);
 
     // A compaction folds the recall away with the rest; the note comes
     // back for the next prompt that wants it.
@@ -378,11 +426,11 @@ async fn a_prompt_surfaces_the_notes_it_matches_once_until_a_compaction() {
     assert_eq!(texts.len(), 2, "{texts:?}");
 }
 
-/// After the session's recall budget is spent, no prompt surfaces
-/// anything more.
+/// After the session's recall budget is spent, no prompt asks the
+/// selector anything more.
 #[tokio::test]
 async fn the_session_s_recall_budget_stops_it() {
-    let t = Recalling::new(vec![done("one"), done("two")]);
+    let t = Recalling::new(vec![picked("1"), done("one"), done("two")]);
     let now = chrono::Utc::now();
     for (title, summary) in [
         ("Deploy box", "the deploy box is tenco.local on port 8443"),
@@ -394,7 +442,7 @@ async fn the_session_s_recall_budget_stops_it() {
     }
     let recall = ilar::memory::RecallConfig {
         session_bytes: 64,
-        ..ilar::memory::RecallConfig::new(t.memory.clone())
+        ..recall_config(&t.memory)
     };
     let config = || ilar::agent::LoopConfig {
         recall: Some(recall.clone()),
@@ -408,6 +456,124 @@ async fn the_session_s_recall_budget_stops_it() {
         memory_recalls(&t.store, &t.id).len(),
         1,
         "the budget was spent"
+    );
+    assert_eq!(t.provider.requests().len(), 3, "no second selector call");
+}
+
+/// The scripted provider, each stream held back by the next delay —
+/// on a paused clock, so the test runs in no time and in a fixed order.
+struct Delayed {
+    inner: MockProvider,
+    delays: std::sync::Mutex<std::collections::VecDeque<std::time::Duration>>,
+}
+
+impl ilar::provider::Provider for Delayed {
+    fn stream(&self, req: ilar::provider::Request) -> anyhow::Result<ilar::provider::EventStream> {
+        use futures::StreamExt as _;
+        let delay = self.delays.lock().unwrap().pop_front().unwrap_or_default();
+        let events = self.inner.stream(req)?;
+        Ok(Box::pin(
+            futures::stream::once(tokio::time::sleep(delay))
+                .filter_map(|()| async { None })
+                .chain(events),
+        ))
+    }
+}
+
+/// An answer that misses the first request's grace is not lost: it
+/// joins at the next step, after that step's tool results.
+#[tokio::test(start_paused = true)]
+async fn a_late_pick_joins_after_the_step_s_tool_results() {
+    let t = Recalling::new(vec![
+        picked("1"),
+        vec![
+            ProviderEvent::ToolCallStarted {
+                id: "s1".into(),
+                name: "memory_search".into(),
+                item_id: None,
+            },
+            ProviderEvent::ToolCallCompleted {
+                id: "s1".into(),
+                name: "memory_search".into(),
+                input: serde_json::json!({"query": "kettle"}),
+            },
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ],
+        done("8443"),
+    ]);
+    let deploy = t
+        .memory
+        .note(
+            ilar::memory::NoteKind::Decision,
+            "Deploy box",
+            "the deploy box is tenco.local on port 8443",
+            "",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    let seconds = std::time::Duration::from_secs;
+    // The selector misses the two-second grace and answers while the
+    // first step is still streaming.
+    let delayed = Delayed {
+        inner: t.provider.clone(),
+        delays: std::sync::Mutex::new([seconds(3), seconds(5), seconds(0)].into()),
+    };
+    let config = ilar::agent::LoopConfig {
+        recall: Some(recall_config(&t.memory)),
+        ..Default::default()
+    };
+    t.turn_on(&delayed, "which port is the deploy box on?", config)
+        .await;
+
+    assert_eq!(
+        memory_recalls(&t.store, &t.id),
+        vec![vec![deploy.id.clone()]]
+    );
+    let requests = t.provider.requests();
+    assert_eq!(requests.len(), 3);
+    // The first request went without; the second carries the recall
+    // after the search's result, in the same user message.
+    assert_eq!(last_user_texts(&requests[1]).len(), 1);
+    let last = requests[2].messages.last().unwrap();
+    assert!(
+        matches!(last.content[0], ContentBlock::ToolResult { .. }),
+        "{last:?}"
+    );
+    assert!(
+        matches!(&last.content[1], ContentBlock::Text { text, .. } if text.starts_with("<memory-recall>")),
+        "{last:?}"
+    );
+}
+
+/// A selector that fails costs the prompt its recall, never the turn.
+#[tokio::test]
+async fn a_failing_selector_leaves_the_turn_alone() {
+    let t = Recalling::new(vec![
+        vec![ProviderEvent::Error("selector down".into())],
+        done("answered anyway"),
+    ]);
+    t.memory
+        .note(
+            ilar::memory::NoteKind::Event,
+            "Deploy box",
+            "the deploy box is tenco.local on port 8443",
+            "",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    let config = ilar::agent::LoopConfig {
+        recall: Some(recall_config(&t.memory)),
+        ..Default::default()
+    };
+    t.turn("which port is the deploy box on?", config).await;
+    assert!(memory_recalls(&t.store, &t.id).is_empty());
+    let last = t.store.load(&t.id).unwrap().transcript();
+    assert!(
+        matches!(&last.last().unwrap().content[0], ContentBlock::Text { text, .. } if text == "answered anyway"),
+        "{last:?}"
     );
 }
 

@@ -217,19 +217,26 @@ The idea is OpenClaw's. The assistant, which has its review, gets
 none, and neither does a `/compact` you ask for.
 
 Memory also comes to the model unasked, in two places, both
-cache-safe. At session open, beside the core block, the newest notes'
-index lines (at most twenty, under 4 KiB) say what the archive holds;
-frozen with the rest of the prompt. And, when `general.memory_recall`
-is on, on every prompt the index is run over the person's words. It is
-off by default: in a week across three machines (2026-10-02), 5 of the
-65 notes it surfaced helped, most matched only the session's topic,
-and the useful notes were mostly found by the model's own search. Not over a task or job notification,
-which recalls nothing, and not over the gateway's `<now>` stamp or
-paths. A note is surfaced when a word of its title or summary matches,
-and it shares two words with the prompt, or one word that at most a
-fifth of the notes contain. At most five are surfaced, as index lines
-and never bodies, in a `<memory-recall>` block appended after the user
-message. The block says what it is: notes an earlier session made,
+cache-safe. At session open, beside the core block, every note's
+index line (up to 200 lines and 25 KiB, newest first) says what the
+archive holds; frozen with the rest of the prompt. And, when
+`general.memory_recall` is on, a selector model picks the notes that
+will help with each prompt, the way Claude Code's recall does: it reads
+one line per note — kind, age, title, summary, never the body — and the
+person's words, and answers with at most five numbers, or none. Its
+prompt tells it to match on what the message is about, not on words it
+shares with a note. The model is `general.memory_recall_model`
+(`openai/gpt-6-luna` by default), at its lowest effort. The call starts
+with the turn; the first request waits up to two seconds for it, and a
+later answer joins at the next step — a reply that needs no tools has
+none, and goes without. A failed call costs the prompt its recall, not
+the turn. Recall is off by default until it is measured:
+the word ranking it replaced surfaced 65 notes in a week (2026-10-02),
+of which 5 helped. Nothing is asked over a task or job notification,
+and the gateway's `<now>` stamp and paths are left out of what the
+selector reads. The picks are surfaced as index lines, never bodies,
+in a `<memory-recall>` block appended after the prompt, or after a
+step's tool results when the answer came late. The block says what it is: notes an earlier session made,
 for possible relevance. They are claims, not verified in this session,
 to be checked before they are relied on or reported as fact, and not
 instructions from anyone or part of the message they follow. When a
@@ -238,7 +245,7 @@ when it was written rather than live state, so a claim about code or
 a file and line may have moved. The block is a session event of its
 own, so the transcript, the web view and a resumed session all show
 it; the TUI shows a count when the session is reopened. A note is not
-surfaced when the context already has it: recalled, written, amended
+offered when the context already has it: recalled, written, amended
 or read, until a compaction folds that copy away, when it may come
 back. A note listed in the opening index can still be recalled: the
 index sits at the top of a long prompt, and the recall puts the line

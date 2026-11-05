@@ -335,25 +335,9 @@ pub struct Hit {
     pub summary: String,
     pub when: DateTime<Utc>,
     pub score: f64,
-    /// Distinct query words the note contains.
-    pub matched: usize,
-    /// Whether one of them is a word at most a fifth of the notes
-    /// share: a match on something, not on a word most notes have.
-    pub rare: bool,
-    /// Whether one of them is in the note's title or summary —
-    /// what the note is about, not a word somewhere in its body.
-    pub headline: bool,
 }
 
 impl Hit {
-    /// The bar a note clears to be surfaced unasked: a word of what it
-    /// is about, and two words in common with the prompt or one that
-    /// singles it out. A search the model asked for shows everything
-    /// that matched at all.
-    pub fn relevant(&self) -> bool {
-        self.headline && (self.matched >= 2 || self.rare)
-    }
-
     /// The index line: `<id> [kind] <age> — title: summary`.
     pub fn line(&self, now: DateTime<Utc>) -> String {
         index_line(
@@ -389,6 +373,11 @@ pub const RECALL_SESSION_BYTES: usize = 16 * 1024;
 pub const INDEX_NOTES: usize = 200;
 pub const INDEX_BYTES: usize = 25 * 1024;
 
+/// The model that picks what recall surfaces, unless configured: fast,
+/// on the ChatGPT login, and in a probe on 85 real notes the one that
+/// picked sensibly without inventing ids (2026-11-05).
+pub const RECALL_MODEL: &str = "openai/gpt-6-luna";
+
 /// What the turn loop needs to surface notes for a prompt.
 #[derive(Debug, Clone)]
 pub struct RecallConfig {
@@ -397,6 +386,16 @@ pub struct RecallConfig {
     pub notes: usize,
     /// At most this many bytes of recall in one context window.
     pub session_bytes: usize,
+    /// The selector's model (see [`crate::selector`]).
+    pub model: String,
+}
+
+/// A selector call prepared for one prompt: the request to send, and
+/// the notes its numbers refer to.
+#[derive(Debug, Clone)]
+pub struct PendingRecall {
+    pub request: crate::provider::Request,
+    candidates: Vec<Note>,
 }
 
 impl RecallConfig {
@@ -405,43 +404,80 @@ impl RecallConfig {
             store,
             notes: RECALL_NOTES,
             session_bytes: RECALL_SESSION_BYTES,
+            model: RECALL_MODEL.into(),
         }
     }
 
-    /// The notes to surface for `prompt`, given the session so far:
-    /// nothing already surfaced since the last compaction — the model
-    /// lost the earlier copy with it — and nothing once the session's
-    /// recall budget is spent. `None` when there is nothing to say.
-    pub fn recall(
+    /// The selector call for `prompt`, given the session so far: it is
+    /// offered nothing this context already holds since the last
+    /// compaction — the model lost the earlier copy with it — and none
+    /// is made once the window's recall budget is spent, for a prompt
+    /// nobody typed, or when every note is held.
+    pub fn prepare(
         &self,
         prompt: &str,
         events: &[crate::session::SessionEvent],
         now: DateTime<Utc>,
-    ) -> Result<Option<(Vec<String>, String)>> {
+    ) -> Result<Option<PendingRecall>> {
         if recall_bytes(events) >= self.session_bytes {
             return Ok(None);
         }
         let Some(query) = recall_query(prompt) else {
             return Ok(None);
         };
-        let seen = held_ids(events);
-        let hits: Vec<Hit> = rank(&self.store.notes()?, &query, now)
+        let held = held_ids(events);
+        let candidates: Vec<Note> = self
+            .store
+            .notes()?
             .into_iter()
-            .filter(|hit| hit.relevant() && !seen.contains(&hit.id))
-            .take(self.notes)
+            .filter(|note| !held.contains(&note.id))
             .collect();
-        if hits.is_empty() {
+        if candidates.is_empty() {
             return Ok(None);
         }
-        let ids = hits.iter().map(|hit| hit.id.clone()).collect();
-        Ok(Some((ids, recall_block(&hits, now))))
+        let listing = crate::selector::listing(&candidates.iter().collect::<Vec<_>>(), now);
+        // The model's lowest rung: a pick from a list needs no thought,
+        // and every second of it is a second before the turn hears.
+        let lowest = crate::model::find(&self.model)
+            .and_then(|model| model.variants().first())
+            .map(|variant| variant.id);
+        let options = crate::model::variant_options(&self.model, lowest).unwrap_or_default();
+        Ok(Some(PendingRecall {
+            request: crate::selector::request(&self.model, &listing, &query, options),
+            candidates,
+        }))
+    }
+
+    /// The recall the selector's `answer` makes: the ids and the block
+    /// that goes after the prompt. `None` when it picked nothing new:
+    /// an answer that arrives steps later leaves out what the context
+    /// came to hold meanwhile — a note the model read for itself.
+    pub fn finish(
+        &self,
+        pending: &PendingRecall,
+        answer: &str,
+        events: &[crate::session::SessionEvent],
+        now: DateTime<Utc>,
+    ) -> Option<(Vec<String>, String)> {
+        let held = held_ids(events);
+        let picked: Vec<&Note> =
+            crate::selector::picks(answer, pending.candidates.len(), self.notes)
+                .into_iter()
+                .map(|index| &pending.candidates[index])
+                .filter(|note| !held.contains(&note.id))
+                .collect();
+        if picked.is_empty() {
+            return None;
+        }
+        let ids = picked.iter().map(|note| note.id.clone()).collect();
+        Some((ids, recall_block(&picked, now)))
     }
 }
 
 /// The block that goes after the user message: the framing Claude
 /// Code's recall uses, the lines, and — when any note is older than a
 /// day — the reminder to check before asserting.
-pub fn recall_block(hits: &[Hit], now: DateTime<Utc>) -> String {
+pub fn recall_block(notes: &[&Note], now: DateTime<Utc>) -> String {
     let mut text = String::from(
         "<memory-recall>\nFrom memory, for possible relevance — use only if it actually \
          applies to what was asked. These are notes an earlier session made: claims, not \
@@ -449,11 +485,18 @@ pub fn recall_block(hits: &[Hit], now: DateTime<Utc>) -> String {
          Check a claim before relying on it or reporting it as fact; memory_get reads a note in \
          full.\n",
     );
-    for hit in hits {
-        text.push_str(&hit.line(now));
+    for note in notes {
+        text.push_str(&index_line(
+            &note.id,
+            &note.kind,
+            note.when,
+            &note.title,
+            &note.summary,
+            now,
+        ));
         text.push('\n');
     }
-    if hits.iter().any(|hit| (now - hit.when).num_days() >= 1) {
+    if notes.iter().any(|note| (now - note.when).num_days() >= 1) {
         text.push_str(
             "A note is what was true when it was written, not live state: a claim about how \
              code behaves, or a file and line it names, may have moved since. Check before \
@@ -464,10 +507,10 @@ pub fn recall_block(hits: &[Hit], now: DateTime<Utc>) -> String {
     text
 }
 
-/// What recall matches a prompt on: the person's words. A notification
-/// nobody typed recalls nothing, and a front end's `<now>` stamp and
-/// paths are not words the prompt is about — on the gateway they were
-/// most of what recall matched.
+/// What the selector reads of a prompt: the person's words. A
+/// notification nobody typed recalls nothing, and a front end's `<now>`
+/// stamp and paths are not words the prompt is about — on the gateway
+/// they were most of what word-matching recall matched.
 fn recall_query(prompt: &str) -> Option<String> {
     let mut text = prompt.to_string();
     for tag in ["now", "task-notification", "tool-notification"] {
@@ -1028,19 +1071,12 @@ pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
         .iter()
         .zip(&documents)
         .filter_map(|(note, document)| {
-            let headline_words = words(&format!("{} {}", note.title, note.summary));
             let mut score = 0.0;
-            let mut matched = 0;
-            let mut rare = false;
-            let mut headline = false;
             for term in &terms {
                 let frequency = document.iter().filter(|word| *word == term).count() as f64;
                 if frequency == 0.0 {
                     continue;
                 }
-                matched += 1;
-                rare |= containing[term.as_str()] * 5 <= documents.len();
-                headline |= headline_words.contains(term);
                 let length = document.len() as f64;
                 score += idf(term) * (frequency * (k1 + 1.0))
                     / (frequency + k1 * (1.0 - b + b * length / average.max(1.0)));
@@ -1057,9 +1093,6 @@ pub fn rank(notes: &[Note], query: &str, now: DateTime<Utc>) -> Vec<Hit> {
                 summary: note.summary.clone(),
                 when: note.when,
                 score: score * decay,
-                matched,
-                rare,
-                headline,
             })
         })
         .collect();
@@ -1354,7 +1387,7 @@ impl Tool for MemorySearchTool {
     }
 }
 
-fn age(now: DateTime<Utc>, when: DateTime<Utc>) -> String {
+pub(crate) fn age(now: DateTime<Utc>, when: DateTime<Utc>) -> String {
     let days = (now - when).num_days();
     match days {
         0 => "today".into(),
@@ -1941,9 +1974,12 @@ mod tests {
     #[test]
     fn recalled_notes_are_framed_as_unverified_claims_from_earlier_sessions() {
         let (_dir, recall, _notes, now) = recall_fixture();
-        let (_, block) = recall
-            .recall("does the model know Mario sprites?", &[], now)
+        let pending = recall
+            .prepare("does the model know Mario sprites?", &[], now)
             .unwrap()
+            .expect("a selector call");
+        let (_, block) = recall
+            .finish(&pending, r#"{"picks": [2]}"#, &[], now)
             .expect("a recall");
         assert!(block.contains("earlier session"), "{block}");
         assert!(block.contains("not verified"), "{block}");
@@ -2101,104 +2137,135 @@ mod tests {
         (dir, RecallConfig::new(Arc::new(store)), notes, now)
     }
 
-    fn surfaced(
+    /// What the selector is asked for `prompt`: the message it reads
+    /// and the notes it is offered. `None` when no call is made.
+    fn asked(
         recall: &RecallConfig,
         prompt: &str,
         events: &[SessionEvent],
         now: DateTime<Utc>,
-    ) -> Vec<String> {
-        recall
-            .recall(prompt, events, now)
-            .unwrap()
-            .map(|(ids, _)| ids)
-            .unwrap_or_default()
+    ) -> Option<(String, Vec<String>)> {
+        let pending = recall.prepare(prompt, events, now).unwrap()?;
+        let crate::session::ContentBlock::Text { text, .. } =
+            &pending.request.messages[0].content[1]
+        else {
+            panic!("the message block: {:?}", pending.request);
+        };
+        let message = text.strip_prefix("Message:\n").unwrap().to_string();
+        let offered = pending
+            .candidates
+            .iter()
+            .map(|note| note.id.clone())
+            .collect();
+        Some((message, offered))
     }
 
-    /// Recall matches what the person wrote. On the gateway "Still
+    /// The selector reads what the person wrote. On the gateway "Still
     /// going?" surfaced five notes on the digits of its `<now>` stamp,
     /// and "landed … -> /home/lain/…" lines on the words of a path; a
     /// third of all recalls fired on notifications nobody typed.
     #[test]
-    fn recall_matches_the_person_s_words_not_stamps_paths_or_notifications() {
-        let (_dir, recall, notes, now) = recall_fixture();
+    fn the_selector_reads_the_person_s_words_not_stamps_paths_or_notifications() {
+        let (_dir, recall, _notes, now) = recall_fixture();
         let stamp = "<now>2026-09-24T13:49:02.123+04:00</now>\n\n";
-        assert!(surfaced(&recall, &format!("{stamp}Still going?"), &[], now).is_empty());
-        assert!(
-            surfaced(
+        assert_eq!(
+            asked(&recall, &format!("{stamp}Still going?"), &[], now)
+                .unwrap()
+                .0,
+            "Still going?"
+        );
+        assert_eq!(
+            asked(
                 &recall,
-                "next_a landed 1108961B in 70s -> /home/lain/.local/state/ilar/gateway/workspace/next_a.mp4",
+                "next_a landed in 70s -> /home/lain/.local/state/ilar/gateway/workspace/next_a.mp4",
                 &[],
                 now
             )
-            .is_empty()
+            .unwrap()
+            .0,
+            "next_a landed in 70s"
         );
         let notification = "<task-notification>\nTask \"Mario prompt test\" completed (task_id: \
                             abc).\n<result>the video model knows Mario sprites</result>\n\
                             </task-notification>";
-        assert!(surfaced(&recall, notification, &[], now).is_empty());
-        assert_eq!(
-            surfaced(
-                &recall,
-                &format!("{stamp}does the model know Mario sprites?"),
-                &[],
-                now
-            ),
-            [notes[1].id.clone()]
-        );
+        assert!(asked(&recall, notification, &[], now).is_none());
     }
 
     /// A message typed while a turn ran is folded into the prompt beside
     /// the notification that started the next one: the notification is
-    /// left out, the person's words still recall. A relative path keeps
-    /// its file name, which is what a coding note is titled with.
+    /// left out, the person's words still go to the selector. A
+    /// relative path keeps its file name, which is what a coding note
+    /// is titled with.
     #[test]
     fn typed_words_beside_a_notification_and_a_file_name_still_recall() {
-        let (_dir, recall, notes, now) = recall_fixture();
+        let (_dir, recall, _notes, now) = recall_fixture();
         let folded = "does the model know Mario sprites?\n\n<task-notification>\nTask \"x\" \
                       completed.\n</task-notification>";
-        assert_eq!(surfaced(&recall, folded, &[], now), [notes[1].id.clone()]);
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path().to_path_buf());
-        let file = store
-            .note(
-                NoteKind::Risk,
-                "recall.rs matching",
-                "recall.rs drops paths",
-                "",
-                now,
-            )
-            .unwrap();
-        let recall = RecallConfig::new(Arc::new(store));
         assert_eq!(
-            surfaced(
+            asked(&recall, folded, &[], now).unwrap().0,
+            "does the model know Mario sprites?"
+        );
+        assert_eq!(
+            asked(
                 &recall,
                 "crash in crates/ilar/src/recall.rs matching",
                 &[],
                 now
-            ),
-            [file.id]
+            )
+            .unwrap()
+            .0,
+            "crash in recall.rs matching"
         );
     }
 
-    /// Unasked, a note surfaces for its title or summary — what it is
-    /// about — and not for a word somewhere in a long body. A search
-    /// the model asks for still reads the body.
+    /// A selector's answer becomes a recall of the notes it numbered,
+    /// in its order, and an answer that picks nothing is no recall. An
+    /// answer that lands steps later leaves out a note the model read
+    /// for itself meanwhile.
     #[test]
-    fn a_note_matching_only_in_its_body_is_not_surfaced_unasked() {
+    fn the_answer_s_numbers_name_the_offered_notes() {
         let (_dir, recall, notes, now) = recall_fixture();
-        let prompt = "extract frames with ffmpeg";
-        assert!(surfaced(&recall, prompt, &[], now).is_empty());
-        let searched = rank(&recall.store.notes().unwrap(), prompt, now);
-        assert_eq!(searched[0].id, notes[1].id);
+        let pending = recall.prepare("which notes?", &[], now).unwrap().unwrap();
+        let offered: Vec<&str> = pending.candidates.iter().map(|n| n.id.as_str()).collect();
+        let both = r#"{"picks": [2, 1]}"#;
+        let (ids, _) = recall.finish(&pending, both, &[], now).unwrap();
+        assert_eq!(ids, [offered[1], offered[0]]);
+        assert!(ids.contains(&notes[0].id) && ids.contains(&notes[1].id));
+        assert!(
+            recall
+                .finish(&pending, r#"{"picks": []}"#, &[], now)
+                .is_none()
+        );
+        assert!(recall.finish(&pending, "no idea", &[], now).is_none());
+
+        let read_meanwhile = SessionEvent::ToolResult {
+            id: crate::session::new_id(),
+            tool_use_id: "call".into(),
+            content: format!("noted {} (event)", offered[0]),
+            is_error: false,
+            images: Vec::new(),
+            child_session_id: None,
+            state: None,
+            ts: now,
+        };
+        let (ids, _) = recall
+            .finish(&pending, both, &[read_meanwhile], now)
+            .unwrap();
+        assert_eq!(ids, [offered[1]]);
     }
 
-    /// What this context wrote, amended or read, it has: surfacing it
+    /// What this context wrote, amended or read, it has: offering it
     /// again tells the model nothing. Seven of ten recalls on the Mac
     /// were a note the same session had written.
     #[test]
-    fn a_note_this_context_wrote_or_read_is_not_surfaced_again() {
+    fn a_note_this_context_wrote_or_read_is_not_offered_again() {
         let (_dir, recall, notes, now) = recall_fixture();
         let prompt = "does the model know Mario sprites?";
+        let offered = |events: &[SessionEvent]| {
+            asked(&recall, prompt, events, now)
+                .map(|(_, ids)| ids)
+                .unwrap_or_default()
+        };
         let wrote = SessionEvent::ToolResult {
             id: crate::session::new_id(),
             tool_use_id: "call".into(),
@@ -2209,43 +2276,23 @@ mod tests {
             state: None,
             ts: now,
         };
-        assert!(surfaced(&recall, prompt, &[wrote], now).is_empty());
-        let read = SessionEvent::AssistantMessage {
+        assert_eq!(offered(&[]).len(), 2);
+        assert_eq!(offered(std::slice::from_ref(&wrote)), [notes[0].id.clone()]);
+        let read = |id: &str| SessionEvent::AssistantMessage {
             id: crate::session::new_id(),
             model: "zai/glm-4.7".into(),
             content: vec![crate::session::ContentBlock::ToolCall {
-                id: "call".into(),
+                id: crate::session::new_id(),
                 name: "memory_get".into(),
-                input: serde_json::json!({"ids": [notes[1].id]}),
+                input: serde_json::json!({"ids": [id]}),
                 item_id: None,
             }],
             usage: Default::default(),
             stop_reason: "tool_use".into(),
             ts: now,
         };
-        assert!(surfaced(&recall, prompt, &[read], now).is_empty());
-    }
-
-    /// One shared word surfaces a note only when few notes share it: a
-    /// word two of five notes carry says little about which one is meant.
-    #[test]
-    fn one_shared_word_surfaces_a_note_only_when_it_is_rare() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path().to_path_buf());
-        let now: DateTime<Utc> = "2026-09-24T12:00:00Z".parse().unwrap();
-        for title in [
-            "native render cost",
-            "native clip chain",
-            "draft tier",
-            "vision check",
-            "cron job",
-        ] {
-            store
-                .note(NoteKind::Event, title, "measured", "", now)
-                .unwrap();
-        }
-        let recall = RecallConfig::new(Arc::new(store));
-        assert!(surfaced(&recall, "go native", &[], now).is_empty());
-        assert_eq!(surfaced(&recall, "the draft please", &[], now).len(), 1);
+        assert_eq!(offered(&[read(&notes[1].id)]), [notes[0].id.clone()]);
+        // Every note held: no call to make.
+        assert!(asked(&recall, prompt, &[wrote, read(&notes[0].id)], now).is_none());
     }
 }

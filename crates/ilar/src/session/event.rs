@@ -147,11 +147,13 @@ pub enum SessionEvent {
         before: usize,
         ts: DateTime<Utc>,
     },
-    /// Notes the memory index surfaced for the user message just
-    /// before this: their ids, and the block the model is sent after
-    /// that message — index lines, never bodies. Written by the turn
-    /// loop, at most one per prompt; a compaction that folds it away
-    /// lets the same notes come back, since the model lost them too.
+    /// Notes the recall selector picked for the turn's prompt: their
+    /// ids, and the block the model is sent — index lines, never
+    /// bodies. Written by the turn loop at the top of a step, at most
+    /// one per prompt: after the prompt when the answer came in time
+    /// for the first request, after a step's tool results when later.
+    /// A compaction that folds it away lets the same notes come back,
+    /// since the model lost them too.
     MemoryRecall {
         id: String,
         ids: Vec<String>,

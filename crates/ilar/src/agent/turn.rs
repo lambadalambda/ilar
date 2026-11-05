@@ -1708,6 +1708,11 @@ async fn run_turn_steps(
             crate::compaction::CompactionCut::ActiveHistory
         }
     };
+    // The selector call for this prompt, while it runs.
+    let mut recalling: Option<(
+        crate::memory::PendingRecall,
+        tokio::task::JoinHandle<Option<String>>,
+    )> = None;
     match start {
         TurnStart::User(user_input, images) => {
             if session.pending_question().is_some() {
@@ -1755,25 +1760,25 @@ async fn run_turn_steps(
                     ts: Utc::now(),
                 })
                 .map_err(|error| TurnNeverStarted::mark(error.into()))?;
-            // What memory has to say about this prompt goes right
-            // after it, as its own event: index lines the model can
-            // follow up with memory_get, never bodies, never anything
-            // it was handed already this side of a compaction. Root
-            // sessions only — a child's memory would be its parent's.
-            // Best effort, like the snapshot above: an archive that
-            // cannot be read costs the prompt its recall, not the turn
-            // — the memory tools report the same error when asked.
+            // What memory has to say about this prompt is picked by the
+            // selector, which starts now and runs beside the turn; its
+            // answer lands at the top of a step (below). Root sessions
+            // only — a child's memory would be its parent's. Best
+            // effort, like the snapshot above: an archive that cannot
+            // be read, or a selector that cannot be reached, costs the
+            // prompt its recall, not the turn.
             if tool_ctx.depth == 0
                 && let Some(recall) = &config.recall
-                && let Ok(Some((ids, text))) =
-                    recall.recall(user_input, session.events(), Utc::now())
+                && let Ok(Some(pending)) = recall.prepare(user_input, session.events(), Utc::now())
+                && let Ok(selector) = resolver.resolve_provider(&recall.model)
+                // Its own conversation for the provider's cache: the
+                // listing is the same prefix prompt after prompt.
+                && let Ok(stream) = selector.as_provider().stream(crate::provider::Request {
+                    cache_key: Some(format!("{session_id}-recall")),
+                    ..pending.request.clone()
+                })
             {
-                session.append(SessionEvent::MemoryRecall {
-                    id: new_id(),
-                    ids,
-                    text,
-                    ts: Utc::now(),
-                })?;
+                recalling = Some((pending, tokio::spawn(crate::selector::answer(stream))));
             }
         }
         TurnStart::Continue => {
@@ -1901,6 +1906,7 @@ async fn run_turn_steps(
     // top of the next one.
     let mut pending_steers: Vec<Steer> = Vec::new();
     let mut told_of_leak = false;
+    let mut first_step = true;
     while iterations < config.max_iterations {
         if cancel.is_cancelled() {
             events.publish_terminal(LoopEvent::TurnDone {
@@ -1950,6 +1956,42 @@ async fn run_turn_steps(
             // inheriting whatever the interrupted work had left.
             iterations = 0;
         }
+
+        // The selector's answer, at a settled step like a steer: the
+        // first request waits a moment for it, a later step takes it
+        // when it is there, and a turn that ends first goes without.
+        if let Some((pending, mut selector)) = recalling.take() {
+            let answer = if first_step {
+                tokio::select! {
+                    answer = tokio::time::timeout(crate::selector::GRACE, &mut selector) => {
+                        answer.ok()
+                    }
+                    // Esc is not held up by a selector.
+                    _ = cancel.cancelled() => None,
+                }
+            } else if selector.is_finished() {
+                Some((&mut selector).await)
+            } else {
+                None
+            };
+            match answer {
+                Some(answer) => {
+                    if let (Some(recall), Ok(Some(answer))) = (&config.recall, answer)
+                        && let Some((ids, text)) =
+                            recall.finish(&pending, &answer, session.events(), Utc::now())
+                    {
+                        session.append(SessionEvent::MemoryRecall {
+                            id: new_id(),
+                            ids,
+                            text,
+                            ts: Utc::now(),
+                        })?;
+                    }
+                }
+                None => recalling = Some((pending, selector)),
+            }
+        }
+        first_step = false;
 
         // A single agentic turn can outgrow the window on its own, so the
         // threshold is re-checked before every step, not only at turn

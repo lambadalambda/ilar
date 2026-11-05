@@ -1370,6 +1370,7 @@ fn directory_memory(
         standing_prompt: true,
         opening_index: config.general.memory_index,
         recall: config.general.memory_recall,
+        recall_model: config.general.memory_recall_model.clone(),
     })
 }
 

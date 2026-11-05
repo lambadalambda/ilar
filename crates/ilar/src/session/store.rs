@@ -2380,8 +2380,8 @@ fn render_transcript(events: &[SessionEvent], model: Option<&str>) -> Vec<ChatMe
             | SessionEvent::Rewind { .. }
             | SessionEvent::TurnEnded { .. }
             | SessionEvent::TurnFinished { .. } => {}
-            // After the user message it was surfaced for, as one more
-            // block of that message.
+            // One more block of the user message it follows: the
+            // prompt, or a step's tool results when it came late.
             SessionEvent::MemoryRecall { text, .. } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));

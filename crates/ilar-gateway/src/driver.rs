@@ -943,6 +943,7 @@ pub fn plan(
                 standing_prompt: false,
                 opening_index: gateway.memory.index,
                 recall: gateway.memory.recall,
+                recall_model: ilar::memory::RECALL_MODEL.into(),
             }),
         },
     )?;

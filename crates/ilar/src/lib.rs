@@ -23,6 +23,7 @@ pub(crate) mod redact;
 pub mod rewind;
 pub mod runtime;
 pub mod secrets;
+pub mod selector;
 pub mod session;
 pub mod skill;
 pub mod subagent;

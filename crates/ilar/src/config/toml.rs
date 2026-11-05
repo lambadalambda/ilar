@@ -32,11 +32,15 @@ pub struct GeneralConfig {
     /// unless said otherwise; `false` leaves the store on disk alone
     /// and the model without the tools.
     pub memory: Option<bool>,
-    /// Whether each prompt surfaces the notes it matches, after the
-    /// message. Off unless said otherwise; nothing without `memory`.
+    /// Whether each prompt surfaces the notes a selector model picks
+    /// for it, after the message. Off unless said otherwise; nothing
+    /// without `memory`.
     pub memory_recall: Option<bool>,
-    /// Whether a session opens with the newest notes' index lines
-    /// beside the core block. On unless said otherwise.
+    /// The selector's model; [`crate::memory::RECALL_MODEL`] unless
+    /// said otherwise.
+    pub memory_recall_model: Option<String>,
+    /// Whether a session opens with every note's index line beside
+    /// the core block. On unless said otherwise.
     pub memory_index: Option<bool>,
 }
 
@@ -603,9 +607,11 @@ pub struct GeneralConfigResolved {
     /// Whether a terminal session has a memory; see docs/sessions.md
     /// ("Memory that outlives a session").
     pub memory: bool,
-    /// Whether each prompt surfaces the notes it matches.
+    /// Whether each prompt surfaces the notes a selector picks.
     pub memory_recall: bool,
-    /// Whether a session opens with the newest notes' index.
+    /// The selector's model.
+    pub memory_recall_model: String,
+    /// Whether a session opens with every note's index line.
     pub memory_index: bool,
 }
 
@@ -901,6 +907,11 @@ impl Config {
                     .as_ref()
                     .and_then(|general| general.memory_recall)
                     .unwrap_or(false),
+                memory_recall_model: merged
+                    .general
+                    .as_ref()
+                    .and_then(|general| general.memory_recall_model.clone())
+                    .unwrap_or_else(|| crate::memory::RECALL_MODEL.into()),
                 memory_index: merged
                     .general
                     .as_ref()
@@ -1197,6 +1208,7 @@ impl Config {
                 replay_thinking: Default::default(),
                 memory: true,
                 memory_recall: false,
+                memory_recall_model: crate::memory::RECALL_MODEL.into(),
                 memory_index: true,
             },
             agent: AgentConfig::default(),
@@ -1529,6 +1541,7 @@ fn merge_file(
             replay_thinking,
             memory,
             memory_recall,
+            memory_recall_model,
             memory_index,
         );
     }

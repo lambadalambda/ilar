@@ -92,8 +92,11 @@ pub struct MemoryOptions {
     /// Open with the newest notes' index lines beside the core block,
     /// so the session knows what the archive holds.
     pub opening_index: bool,
-    /// Surface the notes each prompt matches, after the message.
+    /// Surface the notes a selector picks for each prompt, after the
+    /// message.
     pub recall: bool,
+    /// The selector's model.
+    pub recall_model: String,
 }
 
 /// The session a driver is about to run, before anything is written.
@@ -857,7 +860,10 @@ impl RuntimePlan {
                 .memory
                 .as_ref()
                 .filter(|memory| memory.recall)
-                .map(|memory| crate::memory::RecallConfig::new(memory.store.clone())),
+                .map(|memory| crate::memory::RecallConfig {
+                    model: memory.recall_model.clone(),
+                    ..crate::memory::RecallConfig::new(memory.store.clone())
+                }),
             // A session told to write its own memory gets a turn at it
             // before each compaction; one with a review does not.
             memory_flush: self
@@ -1405,6 +1411,7 @@ mod tests {
                         standing_prompt: true,
                         opening_index: true,
                         recall: true,
+                        recall_model: crate::memory::RECALL_MODEL.into(),
                     }),
                     ..RuntimeOptions::default()
                 },
