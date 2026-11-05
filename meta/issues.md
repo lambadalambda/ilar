@@ -31,7 +31,6 @@
 ## Milestone 7 — Unscheduled
 
 - [ ] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
-- [ ] [Know the partial_answer phase](issues/know-the-partial-answer-phase.md)
 - [ ] [A channel prompt patch for GPT](issues/a-channel-prompt-patch-for-gpt.md)
 - [ ] [Server-side compaction for OpenAI](issues/server-side-compaction-for-openai.md)
 - [ ] [Replay message item ids](issues/replay-message-item-ids.md)
