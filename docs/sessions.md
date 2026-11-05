@@ -294,6 +294,12 @@ Exit codes: 0 completed, 2 hit the iteration limit, 130 aborted, 1
 failed. The `question` tool is not attached, since nobody is there to
 answer; a model that asks is told so immediately.
 
+`ilar models` lists the ids `--model` accepts — the models your
+configuration reaches, with context, price and reasoning variants, as
+the `models` tool shows them. `ilar models --json` prints the same as a
+JSON array (`id`, `name`, `context`, `pricing`, `reasoning`). No model
+is called.
+
 A run waits for the work it sent to the background: each task or job
 that reports starts a follow-up turn, exactly as in the TUI, and the
 run ends once nothing is running and nothing is owed. So stdout carries

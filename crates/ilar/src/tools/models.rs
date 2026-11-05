@@ -22,12 +22,12 @@ fn context_label(tokens: u64) -> String {
     }
 }
 
-fn describe(model: &crate::model::ModelInfo) -> String {
+fn pricing_label(model: &crate::model::ModelInfo) -> String {
     let full_id = model.full_id();
     // A configured endpoint has no price to quote, so it says where it is
     // instead — which is the thing worth knowing about a model whose id
     // was invented by whoever wrote the config.
-    let pricing = if let Some(origin) = model.origin() {
+    if let Some(origin) = model.origin() {
         origin.to_string()
     } else if crate::model::plan_billed(&full_id) {
         "subscription plan".to_string()
@@ -37,21 +37,54 @@ fn describe(model: &crate::model::ModelInfo) -> String {
             Some(pricing) => format!("${}/{} per Mtok in/out", pricing.input, pricing.output),
             None => "pricing unknown".to_string(),
         }
-    };
-    let variants = model
-        .variants()
-        .iter()
-        .map(|variant| variant.id)
-        .collect::<Vec<_>>();
+    }
+}
+
+fn variant_ids(model: &crate::model::ModelInfo) -> Vec<&'static str> {
+    model.variants().iter().map(|variant| variant.id).collect()
+}
+
+fn describe(model: &crate::model::ModelInfo) -> String {
+    let variants = variant_ids(model);
     let reasoning = if variants.is_empty() {
         String::new()
     } else {
         format!(" · reasoning: {}", variants.join("/"))
     };
     format!(
-        "{full_id} · ctx {} · {pricing}{reasoning}",
-        context_label(model.context_limit)
+        "{} · ctx {} · {}{reasoning}",
+        model.full_id(),
+        context_label(model.context_limit),
+        pricing_label(model)
     )
+}
+
+/// One line per model: what the tool answers and `ilar models` prints.
+pub fn listing(models: &[&crate::model::ModelInfo]) -> String {
+    if models.is_empty() {
+        return "no models available".to_string();
+    }
+    models
+        .iter()
+        .map(|model| describe(model))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The same listing for a script: `ilar models --json`.
+pub fn listing_json(models: &[&crate::model::ModelInfo]) -> serde_json::Value {
+    models
+        .iter()
+        .map(|model| {
+            serde_json::json!({
+                "id": model.full_id(),
+                "name": model.name,
+                "context": model.context_limit,
+                "pricing": pricing_label(model),
+                "reasoning": variant_ids(model),
+            })
+        })
+        .collect()
 }
 
 impl Tool for ModelsTool {
@@ -78,15 +111,7 @@ impl Tool for ModelsTool {
     }
 
     fn run(&self, _input: serde_json::Value, _ctx: ToolContext) -> ToolFuture {
-        let listing = if self.models.is_empty() {
-            "no models available".to_string()
-        } else {
-            self.models
-                .iter()
-                .map(|model| describe(model))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        let listing = listing(&self.models);
         Box::pin(async move { ToolOutput::text(listing) })
     }
 }
@@ -112,6 +137,35 @@ mod tests {
             lines[1].contains("zai/glm-4.7") && lines[1].contains("$0.6/2.2 per Mtok"),
             "{lines:?}"
         );
+    }
+
+    /// The CLI's `--json`: one object per model, the id first among
+    /// equals, for a script that only wants to pick one.
+    #[test]
+    fn json_listing_names_id_context_pricing_and_variants() {
+        let models = vec![crate::model::find("zai/glm-5.3").expect("catalog model")];
+        let json = listing_json(&models);
+        assert_eq!(json[0]["id"], "zai/glm-5.3");
+        assert_eq!(json[0]["context"], models[0].context_limit);
+        assert_eq!(json[0]["pricing"], "subscription plan");
+        assert_eq!(
+            json[0]["reasoning"],
+            serde_json::json!(["low", "high", "max"])
+        );
+        assert!(json[0]["name"].is_string(), "{json}");
+    }
+
+    #[test]
+    fn text_listing_is_one_described_line_per_model() {
+        let models: Vec<&'static crate::model::ModelInfo> = ["zai/glm-5.3", "zai/glm-4.7"]
+            .iter()
+            .map(|id| crate::model::find(id).expect("catalog model"))
+            .collect();
+        assert_eq!(
+            listing(&models),
+            format!("{}\n{}", describe(models[0]), describe(models[1]))
+        );
+        assert_eq!(listing(&[]), "no models available");
     }
 
     /// A configured endpoint is listed like any other model, with where

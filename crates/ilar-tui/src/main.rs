@@ -182,6 +182,12 @@ enum Command {
     },
     /// Run one turn without a terminal and print the answer
     Exec(ExecArgs),
+    /// List the models this configuration reaches (ids for --model)
+    Models {
+        /// Print a JSON array instead of one line per model
+        #[arg(long)]
+        json: bool,
+    },
     /// Read the session store over HTTP (read-only, no turns run)
     #[cfg(feature = "serve")]
     Serve(ServeArgs),
@@ -1456,6 +1462,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let config = Loader::new().resolve().context("loading config")?;
+    // No unlock, as for exec: a provider whose key is sealed away is
+    // one exec could not reach either.
+    if let Some(Command::Models { json }) = args.command {
+        let models = config.available_models();
+        if json {
+            println!("{}", ilar::tools::models::listing_json(&models));
+        } else {
+            println!("{}", ilar::tools::models::listing(&models));
+        }
+        return Ok(());
+    }
     if let Some(Command::Exec(exec_args)) = args.command {
         // No unlock: exec is the driver with nobody to answer anything,
         // which is why it takes neither questions nor grants. A prompt

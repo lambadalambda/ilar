@@ -121,6 +121,7 @@ ilar                             # the TUI; F1 shows every keybinding
 ilar --continue                  # resume the latest session
 ilar --view <session-id>         # watch a session read-only, live (a gateway chat, say)
 ilar exec "what broke in CI?"    # headless one-shot, answer on stdout
+ilar models                      # the ids --model accepts (--json for scripts)
 ilar-gateway                     # the assistant, on the channels in ilar.toml
 ```
 
