@@ -34,6 +34,12 @@
 - [ ] [A channel prompt patch for GPT](issues/a-channel-prompt-patch-for-gpt.md) — *built; awaiting a live long run*
 - [ ] [Server-side compaction for OpenAI](issues/server-side-compaction-for-openai.md)
 - [ ] [Replay message item ids](issues/replay-message-item-ids.md)
+- [ ] [Recall that picks by meaning](issues/recall-that-picks-by-meaning.md) — index
+- [ ] [The opening index lists every note](issues/the-opening-index-lists-every-note.md)
+- [ ] [A model picks what recall surfaces](issues/a-model-picks-what-recall-surfaces.md)
+- [ ] [Recall is measured before it is on](issues/recall-is-measured-before-it-is-on.md)
+- [ ] [Note bodies say why and how to apply](issues/note-bodies-say-why-and-how-to-apply.md)
+- [ ] [Terminal stores get consolidated](issues/terminal-stores-get-consolidated.md)
 
 
 ## Milestone 9 — Time travel follow-ups
