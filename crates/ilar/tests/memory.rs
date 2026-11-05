@@ -91,7 +91,7 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
     assert!(opened_with.contains("# Remembering"), "{opened_with}");
     assert!(!opened_with.contains("# Memory"), "{opened_with}");
     assert!(
-        opened_with.contains("## Newest notes (1 of 1"),
+        opened_with.contains("## Notes (1 in the archive"),
         "{opened_with}"
     );
     assert!(
@@ -151,7 +151,7 @@ async fn a_write_mid_session_reaches_the_next_session_s_prompt_and_not_this_one_
         next.contains("# Memory") && next.contains("Likes tea"),
         "{next}"
     );
-    assert!(next.contains("## Newest notes (2 of 2"), "{next}");
+    assert!(next.contains("## Notes (2 in the archive"), "{next}");
     assert!(next.contains("Tea: the person likes earl grey"), "{next}");
 }
 

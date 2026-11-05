@@ -383,9 +383,11 @@ fn index_line(
 /// compaction opens a new window.
 pub const RECALL_NOTES: usize = 5;
 pub const RECALL_SESSION_BYTES: usize = 16 * 1024;
-/// The opening index: the newest notes' lines, once, at session open.
-pub const INDEX_NOTES: usize = 20;
-pub const INDEX_BYTES: usize = 4096;
+/// The opening index: every note's line, once, at session open, up to
+/// Claude Code's cap for its own index — the model knows what exists,
+/// and a note recall missed is one read away.
+pub const INDEX_NOTES: usize = 200;
+pub const INDEX_BYTES: usize = 25 * 1024;
 
 /// What the turn loop needs to surface notes for a prompt.
 #[derive(Debug, Clone)]
@@ -889,11 +891,16 @@ impl MemoryStore {
             lines.push_str(&line);
             lines.push('\n');
         }
-        Ok(Some(format!(
-            "## Newest notes ({} of {} in the archive; memory_search finds the rest)\n\n{lines}",
-            lines.lines().count(),
-            all.len()
-        )))
+        let shown = lines.lines().count();
+        let heading = if shown == all.len() {
+            format!("{shown} in the archive; memory_get reads one in full")
+        } else {
+            format!(
+                "newest {shown} of {}; memory_search finds the rest",
+                all.len()
+            )
+        };
+        Ok(Some(format!("## Notes ({heading})\n\n{lines}")))
     }
 }
 
@@ -1825,6 +1832,43 @@ mod tests {
         );
         let again = store.forget(&wrong.id).unwrap_err();
         assert!(again.to_string().contains("no note"), "{again}");
+    }
+
+    /// The model sees every note it has, as Claude Code's index does,
+    /// so a recall that misses still leaves the note one read away.
+    #[test]
+    fn the_opening_index_lists_every_note_up_to_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().to_path_buf());
+        let now = Utc::now();
+        for n in 0..30 {
+            store
+                .note(
+                    NoteKind::Decision,
+                    &format!("Note number {n}"),
+                    "what it says",
+                    "body",
+                    now - chrono::Duration::hours(n),
+                )
+                .unwrap();
+        }
+
+        let index = store
+            .opening_index(INDEX_NOTES, INDEX_BYTES, now)
+            .unwrap()
+            .unwrap();
+        assert!(index.starts_with("## Notes (30 in the archive"), "{index}");
+        assert!(
+            (0..30).all(|n| index.contains(&format!("Note number {n}:"))),
+            "{index}"
+        );
+
+        let capped = store.opening_index(5, INDEX_BYTES, now).unwrap().unwrap();
+        assert!(
+            capped.starts_with("## Notes (newest 5 of 30; memory_search finds the rest)"),
+            "{capped}"
+        );
+        assert!(capped.contains("Note number 4:") && !capped.contains("Note number 5:"));
     }
 
     /// An id reaches the store from a model's tool call, so it is not

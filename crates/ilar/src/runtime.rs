@@ -1443,7 +1443,7 @@ mod tests {
         );
         // The archive's newest lines open the session too: the index
         // line, not the body.
-        assert!(prompt.contains("## Newest notes (1 of 1"), "{prompt}");
+        assert!(prompt.contains("## Notes (1 in the archive"), "{prompt}");
         assert!(
             prompt.contains("[decision] today — Postgres: the app database"),
             "{prompt}"
