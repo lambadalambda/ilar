@@ -485,3 +485,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Provider state goes back only to its model](issues/provider-state-goes-back-only-to-its-model.md)
 - [x] [Know the partial_answer phase](issues/know-the-partial-answer-phase.md)
 - [x] [The opening index lists every note](issues/the-opening-index-lists-every-note.md)
+- [x] [A model picks what recall surfaces](issues/a-model-picks-what-recall-surfaces.md)
