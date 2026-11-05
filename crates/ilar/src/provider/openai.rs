@@ -127,10 +127,10 @@ impl OpenAIProvider {
         body.insert("model".into(), serde_json::json!(model_id));
         // Patched here, where every request to the model passes — turn,
         // aside, topic, summary — so they all keep one cached prefix.
-        let instructions = match (
-            req.system_prompt.as_deref(),
-            crate::model::prompt_patch(&req.model),
-        ) {
+        // Not a request without tools (the recall selector): the patch
+        // is about the calls an update leads into.
+        let patch = crate::model::prompt_patch(&req.model).filter(|_| !req.tools.is_empty());
+        let instructions = match (req.system_prompt.as_deref(), patch) {
             (Some(prompt), Some(patch)) => Some(format!("{prompt}\n\n{patch}")),
             (None, Some(patch)) => Some(patch.to_string()),
             (prompt, None) => prompt.map(str::to_string),
@@ -1374,6 +1374,11 @@ mod tests {
         let instructions = |model: &str| {
             let mut request = Request::with_model(model);
             request.system_prompt = Some("You are ilar.".into());
+            request.tools = vec![ToolDefinition {
+                name: "read".into(),
+                description: "Read a file.".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }];
             provider.wire_body(&request).unwrap()["instructions"]
                 .as_str()
                 .unwrap()
@@ -1385,6 +1390,15 @@ mod tests {
             format!("You are ilar.\n\n{patch}")
         );
         assert_eq!(instructions("openai/gpt-5.2"), "You are ilar.");
+
+        // A request without tools — the recall selector — has no
+        // tool call for an update to lead into.
+        let mut toolless = Request::with_model("openai/gpt-6.1-sol");
+        toolless.system_prompt = Some("Pick notes.".into());
+        assert_eq!(
+            provider.wire_body(&toolless).unwrap()["instructions"],
+            "Pick notes."
+        );
 
         let patched = |id| crate::model::prompt_patch(id).is_some();
         assert!(patched("opencode/gpt-6-sol"));
