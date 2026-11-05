@@ -482,3 +482,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [GPT-6.1 Terra](issues/gpt-6-1-terra.md)
 - [x] [`ilar models` on the CLI](issues/ilar-models-on-the-cli.md)
 - [x] [Replay the commentary phase](issues/replay-the-commentary-phase.md)
+- [x] [Provider state goes back only to its model](issues/provider-state-goes-back-only-to-its-model.md)

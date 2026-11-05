@@ -31,7 +31,6 @@
 ## Milestone 7 — Unscheduled
 
 - [ ] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
-- [ ] [Provider state goes back only to its model](issues/provider-state-goes-back-only-to-its-model.md)
 - [ ] [Know the partial_answer phase](issues/know-the-partial-answer-phase.md)
 - [ ] [A channel prompt patch for GPT](issues/a-channel-prompt-patch-for-gpt.md)
 - [ ] [Server-side compaction for OpenAI](issues/server-side-compaction-for-openai.md)
