@@ -690,10 +690,10 @@ pub(crate) async fn compact_if_needed_locked(
 
     // Build the older transcript for summarization.
     let older = Session::from_events_for_compaction(session.events(), cut);
-    if older.transcript().is_empty() {
+    let transcript = older.transcript_for(model);
+    if transcript.is_empty() {
         return Ok(None);
     }
-    let transcript = older.transcript();
     // The request the turn itself would have sent, with the instruction
     // appended: same system prompt, same tools, same session cache key,
     // so the provider serves the conversation from its prompt cache and

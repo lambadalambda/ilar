@@ -2009,7 +2009,7 @@ async fn run_turn_steps(
         let request = Request {
             model: model.clone(),
             system_prompt: system_prompt.map(String::from),
-            messages: session.transcript(),
+            messages: session.transcript_for(&model),
             tools: tools.clone(),
             cache_key: Some(session_id.to_string()),
             options: request_options.clone(),

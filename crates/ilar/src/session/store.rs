@@ -2034,6 +2034,12 @@ impl Session {
         transcript_of(&self.events)
     }
 
+    /// [`Self::transcript`] as a request to `model` must carry it
+    /// (see [`transcript_for`]).
+    pub fn transcript_for(&self, model: &str) -> Vec<ChatMessage> {
+        transcript_for(&self.events, model)
+    }
+
     pub fn todo_list(&self) -> Option<&crate::todo::TodoList> {
         self.todo_list.as_ref()
     }
@@ -2269,6 +2275,10 @@ impl SessionReader {
         transcript_of(&self.events)
     }
 
+    pub fn transcript_for(&self, model: &str) -> Vec<ChatMessage> {
+        transcript_for(&self.events, model)
+    }
+
     /// Whether the log ends between a tool call and its results. A
     /// reader cannot append, but its caller may be about to: see
     /// [`Session::has_unanswered_calls`]. Unlike a writer's, this may
@@ -2293,8 +2303,42 @@ impl SessionReader {
     }
 }
 
-/// Pure transcript rendering over an event slice.
+/// The transcript as a request to `model` must carry it: another
+/// model's reasoning items, phase marks and item ids are its provider's
+/// state, meaningless here and refused by some servers, so its messages
+/// keep only what was said and done.
+pub fn transcript_for(events: &[SessionEvent], model: &str) -> Vec<ChatMessage> {
+    render_transcript(events, Some(model))
+}
+
+/// Pure transcript rendering over an event slice, every message as its
+/// model wrote it.
 pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
+    render_transcript(events, None)
+}
+
+/// Text, tool calls and readable thinking from another model's
+/// message, without its provider's state.
+fn without_provider_state(content: &[ContentBlock]) -> Vec<ContentBlock> {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Reasoning { .. } => None,
+            ContentBlock::Text { text, .. } => Some(ContentBlock::text(text.clone())),
+            ContentBlock::ToolCall {
+                id, name, input, ..
+            } => Some(ContentBlock::ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                item_id: None,
+            }),
+            block => Some(block.clone()),
+        })
+        .collect()
+}
+
+fn render_transcript(events: &[SessionEvent], model: Option<&str>) -> Vec<ChatMessage> {
     let mut cut = compaction_cut(events);
     let mut summary: Option<&str> = None;
     for event in events {
@@ -2358,14 +2402,22 @@ pub fn transcript_of(events: &[SessionEvent]) -> Vec<ChatMessage> {
                 }
                 push_user_blocks(&mut messages, blocks);
             }
-            SessionEvent::AssistantMessage { content, .. } => {
+            SessionEvent::AssistantMessage {
+                content,
+                model: written_by,
+                ..
+            } => {
                 if !pending_results.is_empty() {
                     push_user_blocks(&mut messages, std::mem::take(&mut pending_results));
                 }
+                let content = match model {
+                    Some(model) if model != written_by => without_provider_state(content),
+                    _ => content.clone(),
+                };
                 if !content.is_empty() {
                     messages.push(ChatMessage {
                         role: Role::Assistant,
-                        content: content.clone(),
+                        content,
                     });
                 }
             }

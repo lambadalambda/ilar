@@ -105,7 +105,7 @@ pub async fn ask(
     // what lets it run beside a live turn.
     let reader = store.load(session_id)?;
     let model = reader.effective_model();
-    let mut messages = settled(reader.transcript());
+    let mut messages = settled(reader.transcript_for(&model));
     messages.push(ChatMessage::user_text(format!(
         "{ASIDE_PREAMBLE}{question}"
     )));

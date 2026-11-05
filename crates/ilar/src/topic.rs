@@ -131,11 +131,11 @@ pub async fn title_session(
     if reader.has_unanswered_calls() {
         return Ok(None);
     }
-    let transcript = reader.transcript();
+    let model = reader.effective_model();
+    let transcript = reader.transcript_for(&model);
     if !transcript.iter().any(|message| message.role == Role::User) {
         return Ok(None);
     }
-    let model = reader.effective_model();
     let options = crate::model::variant_options(&model, reader.effective_variant().as_deref())?;
     let request = topic_request(&model, system_prompt, &transcript, options);
     drop(reader);

@@ -1315,6 +1315,99 @@ fn a_thinking_block_from_a_signed_session_still_loads() {
     );
 }
 
+/// One model's reasoning, phase marks and item ids mean nothing to
+/// another, and may be refused by it. A switch keeps what was said and
+/// done, and drops the provider state of every other model's messages.
+#[test]
+fn a_transcript_for_a_model_strips_other_models_provider_state() {
+    let step = |model: &str, n: &str| SessionEvent::AssistantMessage {
+        id: new_id(),
+        model: model.into(),
+        content: vec![
+            ContentBlock::Reasoning {
+                item: serde_json::json!({"type": "reasoning", "id": format!("rs_{n}")}),
+            },
+            ContentBlock::Thinking {
+                text: format!("thought {n}"),
+                field: None,
+            },
+            ContentBlock::Text {
+                text: format!("checking {n}:"),
+                phase: Some(ilar::session::TextPhase::Commentary),
+            },
+            ContentBlock::ToolCall {
+                id: format!("call_{n}"),
+                name: "read".into(),
+                input: serde_json::json!({}),
+                item_id: Some(format!("fc_{n}")),
+            },
+        ],
+        usage: Usage::default(),
+        stop_reason: "tool_use".into(),
+        ts: Utc::now(),
+    };
+    let result = |n: &str| SessionEvent::ToolResult {
+        id: new_id(),
+        tool_use_id: format!("call_{n}"),
+        content: "ok".into(),
+        is_error: false,
+        images: Vec::new(),
+        child_session_id: None,
+        state: None,
+        ts: Utc::now(),
+    };
+    let events = vec![
+        SessionEvent::UserMessage {
+            id: new_id(),
+            text: "go".into(),
+            images: Vec::new(),
+            ts: Utc::now(),
+        },
+        step("opencode-go/muse-spark-1.3-contributor", "a"),
+        result("a"),
+        step("openai/gpt-6.1-sol", "b"),
+        result("b"),
+    ];
+    let assistant = |messages: &[ChatMessage], n: usize| {
+        messages
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .nth(n)
+            .unwrap()
+            .content
+            .clone()
+    };
+
+    let for_gpt = ilar::session::transcript_for(&events, "openai/gpt-6.1-sol");
+    assert_eq!(
+        assistant(&for_gpt, 0),
+        vec![
+            ContentBlock::Thinking {
+                text: "thought a".into(),
+                field: None,
+            },
+            ContentBlock::text("checking a:"),
+            ContentBlock::ToolCall {
+                id: "call_a".into(),
+                name: "read".into(),
+                input: serde_json::json!({}),
+                item_id: None,
+            },
+        ]
+    );
+    // Its own messages go back untouched: the cached prefix holds.
+    let unscoped = ilar::session::transcript_of(&events);
+    assert_eq!(assistant(&for_gpt, 1), assistant(&unscoped, 1));
+
+    let for_muse = ilar::session::transcript_for(&events, "opencode-go/muse-spark-1.3-contributor");
+    assert_eq!(assistant(&for_muse, 0), assistant(&unscoped, 0));
+    assert!(
+        !assistant(&for_muse, 1)
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
+    );
+}
+
 /// Text written before phases were kept loads without one, and text
 /// without one is written as it always was.
 #[test]
