@@ -71,6 +71,9 @@ pub(crate) enum Intent {
     Steer(String),
     /// Ask a /btw question beside whatever is running.
     Aside(String),
+    /// Open the read-only memory menu, beside whatever is running,
+    /// filtered by what followed `/memory`.
+    OpenMemory(String),
     /// Hold until the running turn completes.
     Queue(String),
     /// Pasted text, routed to whichever surface owned the keyboard.
@@ -125,6 +128,7 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
             Modal::SessionSearch
             | Modal::SessionPicker
             | Modal::TurnPicker
+            | Modal::MemoryMenu
             | Modal::LinkPicker
             | Modal::ModelPicker
             | Modal::SkillPicker
@@ -354,6 +358,10 @@ pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent>
             return vec![Intent::Notice(ASIDE_USAGE.into(), NoticeLevel::Warning)];
         }
         return vec![Intent::Aside(question.to_string())];
+    }
+    // Read-only like the aside: it opens over a running turn.
+    if let Some(("memory", filter)) = crate::parse_slash_invocation(&text) {
+        return vec![Intent::OpenMemory(filter.trim().to_string())];
     }
     // Like the aside, never steering text: a window size is nothing
     // the model can act on.
@@ -809,6 +817,24 @@ mod tests {
             ..idle()
         };
         assert_eq!(submit_target(&aborting, true), SubmitTarget::Queue);
+    }
+
+    #[test]
+    fn memory_opens_its_menu_mid_turn_or_idle_never_steering_text() {
+        let running = LoopState {
+            turn_running: true,
+            steerable: true,
+            ..idle()
+        };
+        assert_eq!(
+            submit(&running, true, "/memory".into()),
+            vec![Intent::OpenMemory(String::new())]
+        );
+        // What follows is the menu's filter.
+        assert_eq!(
+            submit(&idle(), false, "/memory deploy box".into()),
+            vec![Intent::OpenMemory("deploy box".into())]
+        );
     }
 
     #[test]

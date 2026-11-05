@@ -696,6 +696,11 @@ fn apply_intent(
             app.aside_requested = Some(question);
             None
         }
+        Intent::OpenMemory(filter) => {
+            // Consumed by run_app, which has the store.
+            app.memory_menu_requested = Some(filter);
+            None
+        }
         Intent::PastePalette(text) => {
             if let Some(palette) = app.command_palette.as_mut() {
                 palette.insert_query(&text);
@@ -743,6 +748,11 @@ fn apply_intent(
                 Some(Modal::TurnPicker) => {
                     if let Some(picker) = app.turn_picker.as_mut() {
                         picker.insert_query(&text);
+                    }
+                }
+                Some(Modal::MemoryMenu) => {
+                    if let Some(menu) = app.memory_menu.as_mut() {
+                        menu.insert_query(&text);
                     }
                 }
                 Some(Modal::LinkPicker) => {
@@ -905,6 +915,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "btw",
         "ask a quick aside about the session; nothing is recorded",
+    ),
+    (
+        "memory",
+        "show what this session's memory holds, recalled notes marked",
     ),
     (
         "context",
@@ -1604,6 +1618,8 @@ async fn main() -> Result<()> {
         first_run = false;
 
         let cwd = std::env::current_dir().context("no cwd")?;
+        // One store for the session and for /memory.
+        let memory = directory_memory(&config, &cwd);
         let mut plan = ilar::runtime::RuntimePlan::resolve(
             &config,
             &ilar::runtime::RuntimeOptions {
@@ -1629,7 +1645,7 @@ async fn main() -> Result<()> {
                 // The terminal withholds nothing: see the `exec` launch
                 // above.
                 withheld_paths: Vec::new(),
-                memory: directory_memory(&config, &cwd),
+                memory: memory.clone(),
             },
         )?;
         if args.print_prompt {
@@ -1678,6 +1694,7 @@ async fn main() -> Result<()> {
         app.commands = command_inventory;
         app.available_models = model_choices.iter().map(|model| model.full_id()).collect();
         app.session_id = session_id.clone();
+        app.memory = memory.map(|memory| memory.store);
         app.todos = todos;
         // The reader in hand answers the pending-question check;
         // run_app takes the answer instead of re-reading the log for
@@ -3988,6 +4005,37 @@ async fn run_app(
                 }
             }
         }
+        // The memory menu reads the store and this session's recalls.
+        if let Some(filter) = app.memory_menu_requested.take() {
+            let menu = match &app.memory {
+                None => Ok(modals::MemoryMenu::without_memory()),
+                Some(memory) => memory.core_block().and_then(|core| {
+                    let recalled = store
+                        .load(session_id)?
+                        .events()
+                        .iter()
+                        .filter_map(|event| match event {
+                            ilar::session::SessionEvent::MemoryRecall { ids, .. } => {
+                                Some(ids.clone())
+                            }
+                            _ => None,
+                        })
+                        .flatten()
+                        .collect();
+                    Ok(modals::MemoryMenu::new(core, memory.notes()?, recalled))
+                }),
+            };
+            match menu {
+                Ok(mut menu) => {
+                    menu.insert_query(&filter);
+                    app.memory_menu = Some(menu);
+                }
+                // An archive that cannot be read is not an empty one.
+                Err(error) => {
+                    app.set_notice(format!("cannot read memory: {error}"), NoticeLevel::Error);
+                }
+            }
+        }
         if std::mem::take(&mut app.fork_requested) {
             if let Some(reason) = switch_blocked(
                 turn_handle.is_some(),
@@ -4924,6 +4972,13 @@ async fn run_app(
                                         stash: std::mem::take(&mut app.input_stash),
                                     });
                                 }
+                            }
+                        }
+                        Modal::MemoryMenu => {
+                            let menu = app.memory_menu.as_mut().unwrap();
+                            if menu.handle_key(code, control) == modals::MemoryMenuAction::Dismiss {
+                                app.memory_menu = None;
+                                app.clear_transient_notice();
                             }
                         }
                         Modal::TurnPicker => {

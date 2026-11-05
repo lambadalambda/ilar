@@ -1356,6 +1356,10 @@ impl App {
                 frame,
                 self.turn_picker.as_ref().expect("turn picker"),
             )),
+            Some(Modal::MemoryMenu) => Some(crate::modals::render_memory_menu(
+                frame,
+                self.memory_menu.as_ref().expect("memory menu"),
+            )),
             Some(Modal::LinkPicker) => Some(render_link_picker(
                 frame,
                 self.link_picker.as_ref().expect("link picker"),

@@ -146,7 +146,14 @@ take a steer is refused — `wait for the current operation before /goal`
 — with the text left on the prompt, because the commands are armed,
 expanded and routed on the way *into* a turn: steered, `/goal ship the
 parser` would reach the model as that literal line and arm nothing.
-`/btw` and `/context` are the exceptions, and are meant for mid-turn.
+`/btw`, `/memory` and `/context` are the exceptions, and are meant for
+mid-turn. `/memory` (or **Show memories** in the palette) shows what
+the session's memory holds, laid out like the session search: the core
+block and every note's title on the left, newest first, the ones
+recalled into this session marked `↺`, and the selected one in full on
+the right. Type to filter (`/memory deploy` opens filtered), Enter to
+read a note on its own, Esc to step back. It only reads; the model
+writes memory.
 A command with nowhere to steer (a notification turn has no steer
 channel) queues instead and runs when the turn ends, since the queue
 drains through the same path a typed turn does — except the

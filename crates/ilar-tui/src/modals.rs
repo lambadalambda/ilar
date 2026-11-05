@@ -526,6 +526,7 @@ pub(crate) enum Modal {
     SessionPicker,
     SessionSearch,
     TurnPicker,
+    MemoryMenu,
     LinkPicker,
     ModelPicker,
     VariantPicker,
@@ -548,6 +549,7 @@ pub(crate) enum PaletteCommand {
     Context,
     Export,
     Share,
+    Memory,
     Skills,
     Pending,
     Help,
@@ -646,6 +648,13 @@ pub(crate) static PALETTE_COMMANDS: &[PaletteCommandDefinition] = &[
         label: "Share transcript (one HTML file)",
         shortcut: "",
         search_terms: "share html export page send readable offline single file",
+    },
+    PaletteCommandDefinition {
+        id: PaletteCommand::Memory,
+        section: "General",
+        label: "Show memories",
+        shortcut: "/memory",
+        search_terms: "memory notes remember recall core what do you know",
     },
     PaletteCommandDefinition {
         id: PaletteCommand::Skills,
@@ -1002,6 +1011,7 @@ static HELP_SECTIONS: &[HelpSection] = &[
                 "the classic list (filter, delete, fork)"
             ),
             binding!("/btw <question>", "quick aside; answered, never recorded"),
+            binding!("/memory", "what this session's memory holds"),
             binding!("palette: Session usage", "token and cost totals"),
             binding!(
                 "/context [size]",
@@ -2188,6 +2198,290 @@ pub(crate) fn render_turn_picker(frame: &mut Frame, picker: &TurnPicker) -> Moda
             let style = if armed {
                 Style::default().fg(theme::SELECTED_FG).bg(theme::ERROR)
             } else if is_selected {
+                theme::selected()
+            } else {
+                Style::default().fg(theme::PRIMARY)
+            };
+            (format!("{marker}{label:<label_width$} {right}"), style)
+        },
+    )
+}
+
+/// One row of the memory menu: the core block, or a note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryRow {
+    Core,
+    Note(usize),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MemoryMenuAction {
+    Stay,
+    Dismiss,
+}
+
+/// `/memory`: what this session's memory holds — the core block and
+/// every note, newest first, the ones recalled into this session
+/// marked. Read-only: the model writes memory, the person reads it
+/// here; Enter shows a row in full.
+pub(crate) struct MemoryMenu {
+    /// `None` when the session has no memory at all.
+    core: Option<Option<String>>,
+    notes: Vec<ilar::memory::Note>,
+    recalled: std::collections::HashSet<String>,
+    query: String,
+    nav: ListNav,
+    /// The row shown in full, and how far it is scrolled.
+    open: Option<(MemoryRow, usize)>,
+}
+
+impl MemoryMenu {
+    pub(crate) fn new(
+        core: Option<String>,
+        notes: Vec<ilar::memory::Note>,
+        recalled: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            core: Some(core),
+            notes,
+            recalled,
+            query: String::new(),
+            nav: ListNav::default(),
+            open: None,
+        }
+    }
+
+    /// For a session launched without memory: the menu says so.
+    pub(crate) fn without_memory() -> Self {
+        Self {
+            core: None,
+            ..Self::new(None, Vec::new(), Default::default())
+        }
+    }
+
+    fn rows(&self) -> Vec<MemoryRow> {
+        let core = self.core.as_ref().and_then(Option::as_ref);
+        let all = core
+            .map(|_| MemoryRow::Core)
+            .into_iter()
+            .chain((0..self.notes.len()).map(MemoryRow::Note));
+        fuzzy_filter(&self.query, all, |row| match *row {
+            MemoryRow::Core => format!("core memory {}", core.map_or("", String::as_str)),
+            MemoryRow::Note(index) => {
+                let note = &self.notes[index];
+                format!("{} {} {}", note.kind, note.title, note.summary)
+            }
+        })
+    }
+
+    pub(crate) fn select(&mut self, index: usize) {
+        self.nav_to(index);
+    }
+
+    /// The wheel: the list's cursor, or the open row's scroll.
+    pub(crate) fn move_selection(&mut self, delta: isize) {
+        match &mut self.open {
+            Some((_, scroll)) => *scroll = scroll.saturating_add_signed(delta),
+            None => self.nav_by(delta),
+        }
+    }
+
+    pub(crate) fn insert_query(&mut self, text: &str) {
+        if self.open.is_none() {
+            self.paste_query(text);
+        }
+    }
+
+    pub(crate) fn handle_key(&mut self, code: KeyCode, control: bool) -> MemoryMenuAction {
+        let Some((_, scroll)) = &mut self.open else {
+            return self.skeleton_key(code, control);
+        };
+        match code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => self.open = None,
+            KeyCode::Up => *scroll = scroll.saturating_sub(1),
+            KeyCode::Down => *scroll += 1,
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+            KeyCode::PageDown => *scroll += 10,
+            _ => {}
+        }
+        MemoryMenuAction::Stay
+    }
+}
+
+impl Picker for MemoryMenu {
+    type Action = MemoryMenuAction;
+
+    fn nav(&mut self) -> &mut ListNav {
+        &mut self.nav
+    }
+
+    fn row_count(&self) -> usize {
+        self.rows().len()
+    }
+
+    fn stay(&self) -> Self::Action {
+        MemoryMenuAction::Stay
+    }
+
+    fn dismiss(&self) -> Self::Action {
+        MemoryMenuAction::Dismiss
+    }
+
+    fn choose(&mut self) -> Self::Action {
+        if let Some(row) = self.rows().get(self.nav.selected) {
+            self.open = Some((*row, 0));
+        }
+        MemoryMenuAction::Stay
+    }
+
+    fn query(&mut self) -> Option<&mut String> {
+        Some(&mut self.query)
+    }
+}
+
+/// A row in full, as the preview pane and the open view show it: the
+/// frame's title and the markdown under it.
+fn memory_text(menu: &MemoryMenu, row: MemoryRow, now: std::time::SystemTime) -> (String, String) {
+    match row {
+        // Read from disk when the menu opened: the session holds the
+        // copy it started with, which a write since has not changed.
+        MemoryRow::Core => (
+            " core memory ".to_string(),
+            format!(
+                "*On disk now; this session holds the copy it started with.*\n\n{}",
+                menu.core.clone().flatten().unwrap_or_default()
+            ),
+        ),
+        MemoryRow::Note(index) => {
+            let note = &menu.notes[index];
+            let recalled = if menu.recalled.contains(&note.id) {
+                " · recalled into this session"
+            } else {
+                ""
+            };
+            let age = session_age(std::time::SystemTime::from(note.when), now);
+            (
+                format!(" {} ", note.id),
+                format!(
+                    "**{}**\n\n{} · {age}{recalled}\n\n{}\n\n{}",
+                    note.title, note.kind, note.summary, note.body
+                ),
+            )
+        }
+    }
+}
+
+/// Markdown wrapped to `width`: a note is one long line per paragraph.
+fn memory_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+    crate::markdown::render(text, width)
+        .into_iter()
+        .flat_map(|line| crate::text::wrap_styled_line(line, width))
+        .collect()
+}
+
+/// Laid out like the session search: titles on the left, the selected
+/// row in full on the right when the terminal is wide enough for two
+/// readable panes; Enter opens a row on its own, scrollable.
+pub(crate) fn render_memory_menu(frame: &mut Frame, menu: &MemoryMenu) -> ModalHit {
+    let full = frame.area();
+    let area = centered_rect(
+        full,
+        full.width.saturating_sub(4).min(160),
+        full.height.saturating_sub(2),
+    );
+    let now = std::time::SystemTime::now();
+    if let Some((row, scroll)) = menu.open {
+        let (title, text) = memory_text(menu, row, now);
+        if let Some(inner) =
+            modal_frame(frame, area, &title, theme::MARKUP, " ↑↓ scroll · Esc back ")
+        {
+            render_scrolled(
+                frame,
+                inner,
+                memory_lines(&text, inner.width as usize),
+                scroll,
+            );
+        }
+        return ModalHit::default();
+    }
+    let rows = menu.rows();
+    let wide = area.width >= 96;
+    let list_area = if wide {
+        Rect {
+            width: (area.width as usize * 45 / 100) as u16,
+            ..area
+        }
+    } else {
+        area
+    };
+    if wide {
+        let preview_area = Rect {
+            x: area.x + list_area.width,
+            width: area.width - list_area.width,
+            ..area
+        };
+        let selected = rows.get(menu.nav.selected.min(rows.len().saturating_sub(1)));
+        let (title, text) = selected
+            .map(|row| memory_text(menu, *row, now))
+            .unwrap_or_else(|| (" preview ".into(), String::new()));
+        if let Some(inner) = modal_frame(frame, preview_area, &title, theme::PRIMARY, "") {
+            render_scrolled(frame, inner, memory_lines(&text, inner.width as usize), 0);
+        }
+    }
+    let recalled = menu
+        .notes
+        .iter()
+        .filter(|note| menu.recalled.contains(&note.id))
+        .count();
+    let title = format!(
+        " memory · {} notes · {recalled} recalled ",
+        menu.notes.len()
+    );
+    let Some(inner) = modal_frame(
+        frame,
+        list_area,
+        &title,
+        theme::MARKUP,
+        " filter · Enter read · Esc close ",
+    ) else {
+        return ModalHit::default();
+    };
+    let width = inner.width as usize;
+    let empty = match &menu.core {
+        None => "this session has no memory (general.memory = false)",
+        Some(None) if menu.notes.is_empty() => {
+            "nothing remembered yet — the model writes memory with its memory tool"
+        }
+        Some(_) => "no matches",
+    };
+    render_filtered_list(
+        frame,
+        inner,
+        &menu.query,
+        empty,
+        rows.len(),
+        menu.nav.selected,
+        |index, is_selected| {
+            let marker = if is_selected { "> " } else { "  " };
+            let (label, right) = match rows[index] {
+                MemoryRow::Core => ("◆ core memory".to_string(), String::new()),
+                MemoryRow::Note(index) => {
+                    let note = &menu.notes[index];
+                    let age = session_age(std::time::SystemTime::from(note.when), now);
+                    let right = if menu.recalled.contains(&note.id) {
+                        format!("↺ {age}")
+                    } else {
+                        age
+                    };
+                    (format!("[{}] {}", note.kind, note.title), right)
+                }
+            };
+            let label_width = width
+                .saturating_sub(UnicodeWidthStr::width(marker))
+                .saturating_sub(UnicodeWidthStr::width(right.as_str()))
+                .saturating_sub(1);
+            let label = truncate_display(&label, label_width, Truncation::Right);
+            let style = if is_selected {
                 theme::selected()
             } else {
                 Style::default().fg(theme::PRIMARY)
@@ -4944,6 +5238,102 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         (screen, hit)
+    }
+
+    fn memory_note(id: &str, kind: &str, title: &str, body: &str) -> ilar::memory::Note {
+        ilar::memory::Note {
+            id: id.into(),
+            kind: kind.into(),
+            title: title.into(),
+            summary: format!("about {title}"),
+            when: chrono::Utc::now(),
+            body: body.into(),
+        }
+    }
+
+    fn memory_menu() -> MemoryMenu {
+        MemoryMenu::new(
+            Some("# Memory\n\nprefers small commits".into()),
+            vec![
+                memory_note("n1", "decision", "Deploy box", "Behind the house firewall."),
+                memory_note("n2", "preference", "Tea", "Earl grey, never after noon."),
+            ],
+            ["n1".to_string()].into(),
+        )
+    }
+
+    /// Like the session search: titles on the left, the selected row in
+    /// full on the right.
+    #[test]
+    fn memory_menu_lists_titles_and_previews_the_selected_row() {
+        let mut menu = memory_menu();
+        let (screen, _) = draw_modal(120, 30, |frame| render_memory_menu(frame, &menu));
+        assert!(screen.contains("memory · 2 notes · 1 recalled"), "{screen}");
+        assert!(screen.contains("◆ core memory"), "{screen}");
+        assert!(screen.contains("[decision] Deploy box"), "{screen}");
+        assert!(
+            screen.contains("↺"),
+            "the recalled note is marked: {screen}"
+        );
+        assert!(
+            screen.contains("prefers small commits"),
+            "core previewed: {screen}"
+        );
+        assert!(!screen.contains("house firewall"), "{screen}");
+
+        menu.handle_key(KeyCode::Down, false);
+        let (screen, _) = draw_modal(120, 30, |frame| render_memory_menu(frame, &menu));
+        assert!(screen.contains("Behind the house firewall."), "{screen}");
+        assert!(screen.contains("recalled into this session"), "{screen}");
+    }
+
+    #[test]
+    fn memory_menu_filters_and_opens_a_note_in_full_then_steps_back() {
+        let mut menu = memory_menu();
+        menu.insert_query("tea");
+        assert_eq!(menu.rows(), [MemoryRow::Note(1)]);
+        assert_eq!(
+            menu.handle_key(KeyCode::Enter, false),
+            MemoryMenuAction::Stay
+        );
+        let (screen, _) = draw_modal(110, 30, |frame| render_memory_menu(frame, &menu));
+        assert!(screen.contains("Earl grey, never after noon."), "{screen}");
+        assert!(screen.contains("preference"), "{screen}");
+        // Esc closes the note, then the menu.
+        assert_eq!(menu.handle_key(KeyCode::Esc, false), MemoryMenuAction::Stay);
+        assert!(menu.open.is_none());
+        assert_eq!(
+            menu.handle_key(KeyCode::Esc, false),
+            MemoryMenuAction::Dismiss
+        );
+    }
+
+    /// A note's lines wrap in the open view: seen live on tenco, a long
+    /// summary was cut at the frame's edge.
+    #[test]
+    fn memory_menu_wraps_a_long_note() {
+        let long = "word ".repeat(40) + "lastword";
+        let mut menu = MemoryMenu::new(
+            None,
+            vec![ilar::memory::Note {
+                summary: long.clone(),
+                ..memory_note("n1", "decision", "Long one", &long)
+            }],
+            Default::default(),
+        );
+        menu.handle_key(KeyCode::Enter, false);
+        let (screen, _) = draw_modal(70, 30, |frame| render_memory_menu(frame, &menu));
+        assert_eq!(screen.matches("lastword").count(), 2, "{screen}");
+    }
+
+    #[test]
+    fn memory_menu_says_when_there_is_no_memory_or_nothing_in_it() {
+        let menu = MemoryMenu::without_memory();
+        let (screen, _) = draw_modal(110, 20, |frame| render_memory_menu(frame, &menu));
+        assert!(screen.contains("this session has no memory"), "{screen}");
+        let empty = MemoryMenu::new(None, Vec::new(), Default::default());
+        let (screen, _) = draw_modal(110, 20, |frame| render_memory_menu(frame, &empty));
+        assert!(screen.contains("nothing remembered yet"), "{screen}");
     }
 
     fn link(label: &str, url: &str) -> crate::links::LinkEntry {

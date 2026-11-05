@@ -716,6 +716,14 @@ pub(crate) struct App {
     pub(crate) turn_picker_requested: bool,
     /// A whole-session fork (/fork); consumed by run_app.
     pub(crate) fork_requested: bool,
+    /// `/memory`: what the session's memory holds, read-only.
+    pub(crate) memory_menu: Option<crate::modals::MemoryMenu>,
+    /// The menu needs the store and the session's recalls; set by
+    /// /memory or the palette with the filter to open it at, consumed
+    /// by run_app.
+    pub(crate) memory_menu_requested: Option<String>,
+    /// The session's memory store, when it has one.
+    pub(crate) memory: Option<std::sync::Arc<ilar::memory::MemoryStore>>,
     /// What this session is about, once it has been named.
     pub(crate) topic: Option<String>,
     pub(crate) help_visible: bool,
@@ -912,6 +920,9 @@ impl App {
             link_picker: None,
             turn_picker_requested: false,
             fork_requested: false,
+            memory_menu: None,
+            memory_menu_requested: None,
+            memory: None,
             topic: None,
             help_visible: false,
             help_scroll: 0,
@@ -998,6 +1009,8 @@ impl App {
             Some(Modal::SessionPicker)
         } else if self.turn_picker.is_some() {
             Some(Modal::TurnPicker)
+        } else if self.memory_menu.is_some() {
+            Some(Modal::MemoryMenu)
         } else if self.link_picker.is_some() {
             Some(Modal::LinkPicker)
         } else if self.model_picker.is_some() {
@@ -1187,6 +1200,9 @@ impl App {
             Some(Modal::TurnPicker) => {
                 self.turn_picker.as_mut().unwrap().move_selection(rows);
             }
+            Some(Modal::MemoryMenu) => {
+                self.memory_menu.as_mut().unwrap().move_selection(rows);
+            }
             Some(Modal::LinkPicker) => {
                 self.link_picker.as_mut().unwrap().move_selection(rows);
             }
@@ -1256,6 +1272,7 @@ impl App {
                 Modal::SessionPicker => self.session_picker.as_mut().unwrap().select(index),
                 Modal::SessionSearch => self.session_search.as_mut().unwrap().select(index),
                 Modal::TurnPicker => self.turn_picker.as_mut().unwrap().select(index),
+                Modal::MemoryMenu => self.memory_menu.as_mut().unwrap().select(index),
                 Modal::LinkPicker => self.link_picker.as_mut().unwrap().select(index),
                 Modal::SkillPicker => self.skill_picker.as_mut().unwrap().select(index),
                 Modal::CommandPalette => self.command_palette.as_mut().unwrap().select(index),
@@ -3340,6 +3357,10 @@ pub(crate) fn activate_palette_command(
             // palette only records the request.
             app.turn_picker_requested = true;
         }
+        PaletteCommand::Memory => {
+            // Like the turns: read by the caller, which has the store.
+            app.memory_menu_requested = Some(String::new());
+        }
         PaletteCommand::Usage => {
             let total = app.session_usage;
             let cost = match app.session_cost {
@@ -5023,9 +5044,9 @@ mod tests {
 
         // All candidates on bare slash, fuzzy-filtered as the name grows.
         let all = slash_candidates("/", &inventory);
-        assert_eq!(all.len(), 9);
+        assert_eq!(all.len(), 10);
         for builtin in [
-            "goal", "compact", "rewind", "fork", "sessions", "btw", "context",
+            "goal", "compact", "rewind", "fork", "sessions", "btw", "memory", "context",
         ] {
             assert_eq!(
                 all.iter().filter(|(name, _)| name == builtin).count(),
@@ -10462,6 +10483,21 @@ mod tests {
 
         assert!(app.session_search.is_some());
         assert_eq!(app.active_modal(), Some(Modal::SessionSearch));
+    }
+
+    /// One palette entry; the store is read where the menu is built,
+    /// and a running turn does not block it.
+    #[test]
+    fn the_palette_asks_for_the_memory_menu() {
+        let mut app = App::new();
+        activate_palette_command(&mut app, PaletteCommand::Memory, Vec::new());
+        assert_eq!(app.memory_menu_requested.as_deref(), Some(""));
+        assert_eq!(palette_command_blocked(PaletteCommand::Memory), None);
+        assert!(
+            crate::modals::PALETTE_COMMANDS
+                .iter()
+                .any(|command| command.label == "Show memories")
+        );
     }
 
     #[test]
