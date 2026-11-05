@@ -39,6 +39,9 @@ pub enum StopReason {
 pub enum ProviderEvent {
     /// A chunk of assistant text.
     TextDelta(String),
+    /// What the text that follows is, sent ahead of it by a wire that
+    /// says (see [`crate::session::TextPhase`]).
+    TextPhase(crate::session::TextPhase),
     /// A chunk of extended thinking (providers may forward none).
     ThinkingDelta(String),
     /// A thinking block completed. Nobody signs its thinking, so the

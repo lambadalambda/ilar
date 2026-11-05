@@ -204,31 +204,43 @@ fn wire_input_items(msg: &ChatMessage, message_phase: bool) -> Vec<serde_json::V
         }
         _ => parts.push(serde_json::json!({"type": text_part, "text": t})),
     };
-    // A model that tags its lead-ins wrote any text beside a call as
-    // commentary; sent back bare, it reads as a final answer, and the
-    // model learns to announce a call and stop.
-    let commentary = message_phase
-        && matches!(msg.role, Role::Assistant)
+    // A model that tags its lead-ins gets the tag back: as the wire
+    // gave it when the log kept it, else derived — text beside a call
+    // is commentary. Sent back bare, a lead-in reads as a final answer,
+    // and the model learns to announce a call and stop.
+    let derived = (matches!(msg.role, Role::Assistant)
         && msg
             .content
             .iter()
-            .any(|block| matches!(block, ContentBlock::ToolCall { .. }));
-    let flush_parts = |parts: &mut Vec<serde_json::Value>, items: &mut Vec<serde_json::Value>| {
+            .any(|block| matches!(block, ContentBlock::ToolCall { .. })))
+    .then_some(crate::session::TextPhase::Commentary);
+    let flush_parts = |parts: &mut Vec<serde_json::Value>,
+                       items: &mut Vec<serde_json::Value>,
+                       stored: Option<crate::session::TextPhase>| {
         if !parts.is_empty() {
             let mut message = serde_json::json!({
                 "type": "message",
                 "role": role,
                 "content": std::mem::take(parts),
             });
-            if commentary {
-                message["phase"] = serde_json::json!("commentary");
+            if let Some(phase) = message_phase.then(|| stored.or(derived)).flatten() {
+                message["phase"] = serde_json::json!(phase);
             }
             items.push(message);
         }
     };
+    // The phase of the text gathered so far: text the wire sent as two
+    // phases goes back as two items, never one.
+    let mut run_phase = None;
     for block in &msg.content {
         match block {
-            ContentBlock::Text { text: t, .. } => push_text(&mut parts, t),
+            ContentBlock::Text { text: t, phase } => {
+                if *phase != run_phase {
+                    flush_parts(&mut parts, &mut items, run_phase);
+                    run_phase = *phase;
+                }
+                push_text(&mut parts, t);
+            }
             ContentBlock::Image { image } => parts.push(serde_json::json!({
                 "type": "input_image",
                 "image_url": image.data_url(),
@@ -237,7 +249,7 @@ fn wire_input_items(msg: &ChatMessage, message_phase: bool) -> Vec<serde_json::V
             ContentBlock::ReasoningSummary { .. } => {}
             ContentBlock::Diagnostic { .. } => {}
             ContentBlock::Reasoning { item } => {
-                flush_parts(&mut parts, &mut items);
+                flush_parts(&mut parts, &mut items, run_phase);
                 items.push(item.clone());
             }
             ContentBlock::ToolCall {
@@ -246,7 +258,7 @@ fn wire_input_items(msg: &ChatMessage, message_phase: bool) -> Vec<serde_json::V
                 input,
                 item_id,
             } => {
-                flush_parts(&mut parts, &mut items);
+                flush_parts(&mut parts, &mut items, run_phase);
                 let input = input
                     .is_object()
                     .then_some(input)
@@ -273,7 +285,7 @@ fn wire_input_items(msg: &ChatMessage, message_phase: bool) -> Vec<serde_json::V
                 images,
                 ..
             } => {
-                flush_parts(&mut parts, &mut items);
+                flush_parts(&mut parts, &mut items, run_phase);
                 // Text first, then the images, as parts of the one output
                 // the call is waiting for. Every OpenAI model on the
                 // catalog sees, so nothing is gated away here.
@@ -298,7 +310,7 @@ fn wire_input_items(msg: &ChatMessage, message_phase: bool) -> Vec<serde_json::V
             }
         }
     }
-    flush_parts(&mut parts, &mut items);
+    flush_parts(&mut parts, &mut items, run_phase);
     items
 }
 
@@ -670,6 +682,14 @@ impl TransportEventMapper for EventMapper {
                         return Err(format!("duplicate OpenAI reasoning item {item_id:?}"));
                     }
                     Vec::new()
+                } else if item_type == "message" {
+                    // A phase this build does not know is dropped, not
+                    // guessed: the message replays as it did before.
+                    item.get("phase")
+                        .and_then(|phase| serde_json::from_value(phase.clone()).ok())
+                        .map(ProviderEvent::TextPhase)
+                        .into_iter()
+                        .collect()
                 } else {
                     Vec::new()
                 }
@@ -1274,6 +1294,66 @@ mod tests {
 
         let user = wire_input_items(&ChatMessage::user_text("go"), true);
         assert!(user[0].get("phase").is_none(), "{:?}", user[0]);
+    }
+
+    /// What the wire said wins over the guess, and only a flagged row
+    /// hears either: a session moved to Grok sends no phase at all.
+    #[test]
+    fn a_stored_phase_goes_back_as_received() {
+        let stored = |phase| ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "done, and one last look:".into(),
+                    phase: Some(phase),
+                },
+                ContentBlock::ToolCall {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                    item_id: None,
+                },
+            ],
+        };
+        let final_answer = stored(crate::session::TextPhase::FinalAnswer);
+        assert_eq!(
+            wire_input_items(&final_answer, true)[0]["phase"],
+            "final_answer"
+        );
+        assert!(
+            wire_input_items(&final_answer, false)[0]
+                .get("phase")
+                .is_none()
+        );
+
+        let answer = ChatMessage {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "all green".into(),
+                phase: Some(crate::session::TextPhase::FinalAnswer),
+            }],
+        };
+        assert_eq!(wire_input_items(&answer, true)[0]["phase"], "final_answer");
+
+        // One response, two messages: each goes back as its own item.
+        let both = ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "checking once more".into(),
+                    phase: Some(crate::session::TextPhase::Commentary),
+                },
+                ContentBlock::Text {
+                    text: "all green".into(),
+                    phase: Some(crate::session::TextPhase::FinalAnswer),
+                },
+            ],
+        };
+        let items = wire_input_items(&both, true);
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0]["phase"], "commentary");
+        assert_eq!(items[1]["phase"], "final_answer");
+        assert_eq!(items[1]["content"][0]["text"], "all green");
     }
 
     #[test]

@@ -83,16 +83,28 @@ pub enum DiagnosticKind {
     TurnError,
 }
 
+/// What the model said a piece of text was, on a Responses wire that
+/// says: the lead-in before a tool call, or the answer. It goes back
+/// as it came, and a model told nothing reads its lead-in as an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextPhase {
+    Commentary,
+    FinalAnswer,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text {
         text: String,
+        /// Absent for every wire that sends none, and for sessions
+        /// written before it was kept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<TextPhase>,
     },
     /// User-supplied image; only ever appears in user messages.
-    Image {
-        image: ImageContent,
-    },
+    Image { image: ImageContent },
     /// Raw thinking. Persisted only for a model whose chat wire takes
     /// it back; for every other model the same thought lands in
     /// [`ContentBlock::Diagnostic`] as a local note. Nobody signs
@@ -107,14 +119,9 @@ pub enum ContentBlock {
         field: Option<ReasoningField>,
     },
     /// Provider-approved reasoning summary shown to the user but never replayed.
-    ReasoningSummary {
-        text: String,
-        completed: bool,
-    },
+    ReasoningSummary { text: String, completed: bool },
     /// Opaque provider state required to continue stateless reasoning turns.
-    Reasoning {
-        item: serde_json::Value,
-    },
+    Reasoning { item: serde_json::Value },
     /// Locally visible provider diagnostics that must never be replayed.
     /// Two unrelated things arrive here — raw thinking, kept because a
     /// provider will not take it back, and the reason a turn died — so
@@ -154,7 +161,10 @@ impl ContentBlock {
     /// Plain text, the block every surface builds; fields added later
     /// default here instead of at each call site.
     pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into() }
+        Self::Text {
+            text: text.into(),
+            phase: None,
+        }
     }
 }
 

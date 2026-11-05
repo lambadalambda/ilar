@@ -16,7 +16,7 @@ pub use live::{
 };
 pub use model::{
     ChatMessage, ContentBlock, DiagnosticKind, ImageContent, InputTokenAccounting, ReasoningField,
-    Role, Usage,
+    Role, TextPhase, Usage,
 };
 pub use store::{
     ChildSummary, PendingQuestion, RewindOutcome, Session, SessionHead, SessionId, SessionReader,

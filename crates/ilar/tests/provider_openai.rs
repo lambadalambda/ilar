@@ -150,6 +150,41 @@ async fn reasoning_summary_fixture_maps_public_summary_separately() {
     );
 }
 
+/// The phase rides the message item's announcement, ahead of its text;
+/// a value this build does not know is left out rather than guessed.
+#[tokio::test]
+async fn a_message_phase_is_announced_before_its_text() {
+    let sse = |phase: &str| {
+        format!(
+            "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"phase\":\"{phase}\"}}}}\n\n\
+             data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"checking:\"}}\n\n\
+             data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp_1\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}}}\n\n"
+        )
+        .into_bytes()
+    };
+    let events = drain(
+        provider(http_server(sse("commentary")).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        events[..2],
+        [
+            ProviderEvent::TextPhase(ilar::session::TextPhase::Commentary),
+            ProviderEvent::TextDelta("checking:".into()),
+        ]
+    );
+
+    let events = drain(
+        provider(http_server(sse("soliloquy")).0)
+            .stream(request_with_tool())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(events[0], ProviderEvent::TextDelta("checking:".into()));
+}
+
 #[tokio::test]
 async fn reasoning_summary_completion_must_match_streamed_text() {
     let sse = concat!(

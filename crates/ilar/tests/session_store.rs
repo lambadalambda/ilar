@@ -1315,6 +1315,32 @@ fn a_thinking_block_from_a_signed_session_still_loads() {
     );
 }
 
+/// Text written before phases were kept loads without one, and text
+/// without one is written as it always was.
+#[test]
+fn a_text_block_keeps_its_phase_and_old_lines_load_without_one() {
+    let old: ContentBlock = serde_json::from_str(r#"{"type":"text","text":"hi"}"#).unwrap();
+    assert_eq!(old, ContentBlock::text("hi"));
+    assert_eq!(
+        serde_json::to_string(&old).unwrap(),
+        r#"{"type":"text","text":"hi"}"#
+    );
+
+    let lead_in = ContentBlock::Text {
+        text: "checking:".into(),
+        phase: Some(ilar::session::TextPhase::Commentary),
+    };
+    let line = serde_json::to_string(&lead_in).unwrap();
+    assert_eq!(
+        line,
+        r#"{"type":"text","text":"checking:","phase":"commentary"}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<ContentBlock>(&line).unwrap(),
+        lead_in
+    );
+}
+
 #[test]
 fn a_known_event_type_with_broken_fields_is_still_malformed() {
     let message = error_for_committed_line("{\"type\":\"user_message\",\"id\":\"a\"}");

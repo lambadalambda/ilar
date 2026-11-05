@@ -401,6 +401,9 @@ struct StepAccumulator {
     /// said it was not the default: stamped on every thinking block of
     /// the step, so it goes back under the same name.
     thinking_field: Option<crate::session::ReasoningField>,
+    /// The phase the wire announced for the text about to stream,
+    /// taken by the block that text opens.
+    text_phase: Option<crate::session::TextPhase>,
 }
 
 impl StepAccumulator {
@@ -433,9 +436,11 @@ impl StepAccumulator {
 
     fn push_text(&mut self, delta: String) {
         self.thinking_open = None;
-        match self.content.last_mut() {
-            Some(ContentBlock::Text { text, .. }) => text.push_str(&delta),
-            _ => self.content.push(ContentBlock::text(delta)),
+        // An announced phase opens a block of its own: it names the
+        // text after it, not text already said.
+        match (self.content.last_mut(), self.text_phase.take()) {
+            (Some(ContentBlock::Text { text, .. }), None) => text.push_str(&delta),
+            (_, phase) => self.content.push(ContentBlock::Text { text: delta, phase }),
         }
     }
 
@@ -455,6 +460,10 @@ impl StepAccumulator {
         if let ContentBlock::Thinking { text, .. } = &mut self.content[index] {
             text.push_str(&delta);
         }
+    }
+
+    fn set_text_phase(&mut self, phase: crate::session::TextPhase) {
+        self.text_phase = Some(phase);
     }
 
     /// The wire said this response's thinking comes under another name
@@ -2083,6 +2092,7 @@ async fn run_turn_steps(
                     ProviderEvent::ThinkingField(field) => {
                         acc.set_thinking_field(field);
                     }
+                    ProviderEvent::TextPhase(phase) => acc.set_text_phase(phase),
                     ProviderEvent::ReasoningSummaryDelta(summary) => {
                         live.thinking(&summary);
                         events
@@ -3200,6 +3210,33 @@ mod tests {
         };
         assert_eq!(id, "call_1");
         assert_eq!(item_id.as_deref(), Some("fc_1"));
+    }
+
+    #[test]
+    fn a_text_phase_lands_on_the_text_that_follows_it() {
+        let mut acc = StepAccumulator::default();
+        acc.set_text_phase(crate::session::TextPhase::Commentary);
+        acc.push_text("checking".into());
+        acc.push_text(":".into());
+
+        assert_eq!(
+            acc.content_blocks(),
+            vec![ContentBlock::Text {
+                text: "checking:".into(),
+                phase: Some(crate::session::TextPhase::Commentary),
+            }]
+        );
+
+        // A second message's phase opens its own block.
+        acc.set_text_phase(crate::session::TextPhase::FinalAnswer);
+        acc.push_text("all green".into());
+        assert_eq!(
+            acc.content_blocks()[1],
+            ContentBlock::Text {
+                text: "all green".into(),
+                phase: Some(crate::session::TextPhase::FinalAnswer),
+            }
+        );
     }
 
     #[test]
