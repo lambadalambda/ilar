@@ -1130,7 +1130,7 @@ static CATALOG: &[ModelInfo] = &[
         "GPT-5.3 Codex Spark",
         128_000,
         32_000,
-        OpenAiBoth
+        OpenAi
     )
     .input(100_000)
     .vision()
@@ -2420,6 +2420,14 @@ mod tests {
             price("opencode/gpt-5.6-terra"),
             (2.5, 15.0, Some(0.25), Some(3.125))
         );
+    }
+
+    /// The ChatGPT backend refuses Spark ("not supported when using
+    /// Codex with a ChatGPT account", probed 2026-11-05): API key only.
+    #[test]
+    fn codex_spark_is_not_offered_to_a_chatgpt_login() {
+        let row = find("openai/gpt-5.3-codex-spark").unwrap();
+        assert_eq!(row.access, ModelAccess::OpenAi);
     }
 
     /// GPT-6.1 Terra (2026-10-26): on ChatGPT and the API, not yet on
