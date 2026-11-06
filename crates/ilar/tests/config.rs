@@ -344,12 +344,21 @@ fn recall_is_off_by_default_and_can_be_turned_on() {
     assert_eq!(
         on.general.memory_recall_settings(),
         ilar::memory::RecallSettings {
-            model: "opencode-go/deepseek-v4.1-flash".into(),
+            model: Some("opencode-go/deepseek-v4.1-flash".into()),
             bodies: false,
             history: false,
         }
     );
     assert!(on.warnings.is_empty(), "{:?}", on.warnings);
+
+    // "main" is the conversation's own model.
+    let (_main_guard, main) = tempdir();
+    write(
+        &main.join("ilar.toml"),
+        "[general]\nmemory_recall_model = \"main\"\n",
+    );
+    let main = Loader::no_env().config_dir(main).resolve().unwrap();
+    assert_eq!(main.general.memory_recall_settings().model, None);
 }
 
 #[test]

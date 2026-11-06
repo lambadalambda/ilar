@@ -382,11 +382,23 @@ pub const INDEX_BYTES: usize = 25 * 1024;
 /// picked sensibly without inventing ids (2026-11-05).
 pub const RECALL_MODEL: &str = "openai/gpt-6-luna";
 
+/// The model setting that means the conversation's own model.
+pub const RECALL_MODEL_MAIN: &str = "main";
+
+impl RecallSettings {
+    /// A configured model name as the selector's: `"main"` is the
+    /// conversation's model, anything else a model id.
+    pub fn model_named(name: &str) -> Option<String> {
+        (name != RECALL_MODEL_MAIN).then(|| name.to_string())
+    }
+}
+
 /// How recall runs, as configured: Claude Code's way unless told
 /// otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecallSettings {
-    pub model: String,
+    /// The selector's model; `None` for the conversation's own.
+    pub model: Option<String>,
     pub bodies: bool,
     pub history: bool,
 }
@@ -394,7 +406,7 @@ pub struct RecallSettings {
 impl Default for RecallSettings {
     fn default() -> Self {
         Self {
-            model: RECALL_MODEL.into(),
+            model: Some(RECALL_MODEL.into()),
             bodies: true,
             history: true,
         }
@@ -409,8 +421,9 @@ pub struct RecallConfig {
     pub notes: usize,
     /// At most this many bytes of recall in one context window.
     pub session_bytes: usize,
-    /// The selector's model (see [`crate::selector`]).
-    pub model: String,
+    /// The selector's model (see [`crate::selector`]); `None` for the
+    /// conversation's, which the turn fills in ([`Self::for_model`]).
+    pub model: Option<String>,
     /// Recall carries each note's body, as Claude Code's does; off,
     /// the index line alone.
     pub bodies: bool,
@@ -440,6 +453,15 @@ impl RecallConfig {
             model: settings.model,
             bodies: settings.bodies,
             history: settings.history,
+        }
+    }
+
+    /// This config for a turn on `model`: the conversation's model is
+    /// the selector's unless one was set.
+    pub fn for_model(&self, model: &str) -> Self {
+        Self {
+            model: Some(self.model.clone().unwrap_or_else(|| model.to_string())),
+            ..self.clone()
         }
     }
 
@@ -487,15 +509,19 @@ impl RecallConfig {
         if candidates.iter().all(|note| held.contains(&note.id)) {
             return Ok(None);
         }
+        // Filled in by the turn when it is the conversation's.
+        let Some(model) = self.model.as_deref() else {
+            return Ok(None);
+        };
         let listing = crate::selector::listing(&candidates.iter().collect::<Vec<_>>(), ages_from);
         // The model's lowest rung: a pick from a list needs no thought,
         // and every second of it is a second before the turn hears.
-        let lowest = crate::model::find(&self.model)
+        let lowest = crate::model::find(model)
             .and_then(|model| model.variants().first())
             .map(|variant| variant.id);
-        let options = crate::model::variant_options(&self.model, lowest).unwrap_or_default();
+        let options = crate::model::variant_options(model, lowest).unwrap_or_default();
         Ok(Some(PendingRecall {
-            request: crate::selector::request(&self.model, &listing, &past, &query, options),
+            request: crate::selector::request(model, &listing, &past, &query, options),
             candidates,
         }))
     }
@@ -2452,7 +2478,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let expected = crate::selector::request(
-            &recall.model,
+            RECALL_MODEL,
             &crate::selector::listing(&[&old, &new], now),
             &[
                 ("fix the PPU timing".into(), vec![0]),

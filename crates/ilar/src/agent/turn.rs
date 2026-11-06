@@ -1769,8 +1769,11 @@ async fn run_turn_steps(
             // prompt its recall, not the turn.
             if tool_ctx.depth == 0
                 && let Some(recall) = &config.recall
-                && let Ok(Some(pending)) = recall.prepare(user_input, session.events(), Utc::now())
-                && let Ok(selector) = resolver.resolve_provider(&recall.model)
+                && let Ok(Some(pending)) =
+                    recall
+                        .for_model(&model)
+                        .prepare(user_input, session.events(), Utc::now())
+                && let Ok(selector) = resolver.resolve_provider(&pending.request.model)
                 // Its own conversation for the provider's cache: the
                 // listing is the same prefix prompt after prompt.
                 && let Ok(stream) = selector.as_provider().stream(crate::provider::Request {

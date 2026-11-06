@@ -600,7 +600,7 @@ impl GeneralConfigResolved {
     /// How recall runs, from the three `memory_recall_*` settings.
     pub fn memory_recall_settings(&self) -> crate::memory::RecallSettings {
         crate::memory::RecallSettings {
-            model: self.memory_recall_model.clone(),
+            model: crate::memory::RecallSettings::model_named(&self.memory_recall_model),
             bodies: self.memory_recall_bodies,
             history: self.memory_recall_history,
         }

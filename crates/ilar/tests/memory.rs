@@ -299,7 +299,7 @@ fn recall_config(memory: &Arc<MemoryStore>) -> ilar::memory::RecallConfig {
 
 fn claude_code_recall(memory: &Arc<MemoryStore>) -> ilar::memory::RecallConfig {
     ilar::memory::RecallConfig {
-        model: "zai/glm-4.7".into(),
+        model: Some("zai/glm-4.7".into()),
         ..ilar::memory::RecallConfig::new(memory.clone())
     }
 }
@@ -620,6 +620,39 @@ async fn a_late_pick_joins_after_the_step_s_tool_results() {
         matches!(&last.content[1], ContentBlock::Text { text, .. } if text.starts_with("<memory-recall>")),
         "{last:?}"
     );
+}
+
+/// Without a model of its own, the selector runs on the conversation's
+/// — what the gateway asks for.
+#[tokio::test]
+async fn a_recall_without_a_model_asks_the_conversation_s() {
+    let t = Recalling::new(vec![picked(""), done("hi")]);
+    t.memory
+        .note(
+            ilar::memory::NoteKind::Event,
+            "Deploy box",
+            "the deploy box is tenco.local",
+            "",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    let config = ilar::agent::LoopConfig {
+        recall: Some(ilar::memory::RecallConfig::with(
+            t.memory.clone(),
+            ilar::memory::RecallSettings {
+                model: None,
+                ..Default::default()
+            },
+        )),
+        ..Default::default()
+    };
+    t.turn("where is the deploy box?", config).await;
+    let requests = t.provider.requests();
+    assert_eq!(
+        requests[0].system_prompt.as_deref(),
+        Some(ilar::selector::SELECTOR_PROMPT)
+    );
+    assert_eq!(requests[0].model, "zai/glm-4.7");
 }
 
 /// A selector that fails costs the prompt its recall, never the turn.

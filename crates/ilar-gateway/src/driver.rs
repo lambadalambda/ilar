@@ -942,7 +942,10 @@ pub fn plan(
                 // "when to write" section is a terminal session's.
                 standing_prompt: false,
                 opening_index: gateway.memory.index,
-                recall: gateway.memory.recall.then(Default::default),
+                recall: gateway
+                    .memory
+                    .recall
+                    .then(|| gateway.memory.recall_settings()),
             }),
         },
     )?;

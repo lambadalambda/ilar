@@ -64,7 +64,8 @@ declares them is warned about and ignored.
 | `gateway.heartbeat.chats` | `[]` | Session keys to beat on, e.g. `deltachat:12`. |
 | `gateway.scheduler_tick_secs` | `30` | How often due jobs and heartbeats are looked for. |
 | `gateway.memory.enabled` | `true` | Core memory in the prompt, the archive behind the tools, a daily note at each compaction. |
-| `gateway.memory.recall` | `false` | Each prompt surfaces the notes a selector model picks for it, after the message; see [sessions](sessions.md#memory-that-outlives-a-session). The selector is `openai/gpt-6-luna`, so this needs a ChatGPT login or OpenAI key on the box; without one, recall stays silent. |
+| `gateway.memory.recall` | `false` | Each prompt surfaces the notes a selector model picks for it, after the message; see [sessions](sessions.md#memory-that-outlives-a-session). The selector is `gateway.memory.recall_model`. |
+| `gateway.memory.recall_model` | `"openai/gpt-6-luna"` | The selector's model, which needs its provider on the box (a ChatGPT login for the default; without it, recall stays silent), or `"main"` for the chat's own model. |
 | `gateway.memory.index` | `true` | A chat opens with the newest notes' index lines beside the core. |
 | `gateway.review.enabled` | `true` | The review after a turn; see below. |
 | `gateway.review.min_tool_calls` | `5` | An episode with fewer, and no error, is not reviewed. |

@@ -85,9 +85,28 @@ pub struct Memory {
     /// in a week, of which 5 helped.
     #[serde(default)]
     pub recall: bool,
+    /// The selector's model: a model id, or `"main"` for the chat's
+    /// own model.
+    #[serde(default = "default_recall_model")]
+    pub recall_model: String,
     /// A chat opens with the newest notes' index beside the core.
     #[serde(default = "default_true")]
     pub index: bool,
+}
+
+fn default_recall_model() -> String {
+    ilar::memory::RECALL_MODEL.into()
+}
+
+impl Memory {
+    /// How recall runs for the gateway: Claude Code's way, on the
+    /// configured selector model.
+    pub fn recall_settings(&self) -> ilar::memory::RecallSettings {
+        ilar::memory::RecallSettings {
+            model: ilar::memory::RecallSettings::model_named(&self.recall_model),
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for GatewayConfig {
@@ -117,6 +136,7 @@ impl Default for Memory {
         Self {
             enabled: true,
             recall: false,
+            recall_model: default_recall_model(),
             index: true,
         }
     }
@@ -253,6 +273,12 @@ mod tests {
         let table: toml::Table = toml::from_str("[memory]\nrecall = true").unwrap();
         let parsed: GatewayConfig = table.try_into().unwrap();
         assert!(parsed.memory.recall);
+        assert_eq!(parsed.memory.recall_model, ilar::memory::RECALL_MODEL);
+        // "main": the selector runs on the conversation's model.
+        let table: toml::Table =
+            toml::from_str("[memory]\nrecall = true\nrecall_model = \"main\"").unwrap();
+        let parsed: GatewayConfig = table.try_into().unwrap();
+        assert_eq!(parsed.memory.recall_settings().model, None);
         let table: toml::Table = toml::from_str("model = \"zai/glm-4.7\"").unwrap();
         let parsed: GatewayConfig = table.try_into().unwrap();
         assert_eq!(parsed.model.as_deref(), Some("zai/glm-4.7"));
