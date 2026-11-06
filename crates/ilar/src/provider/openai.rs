@@ -1385,6 +1385,8 @@ mod tests {
                 .to_string()
         };
         let patch = crate::model::prompt_patch("openai/gpt-6.1-sol").expect("gpt is patched");
+        // GPT briefs subagents in clipped notes "to save tokens".
+        assert!(patch.contains("# Subagents") && patch.contains("full sentences"));
         assert_eq!(
             instructions("openai/gpt-6.1-sol"),
             format!("You are ilar.\n\n{patch}")

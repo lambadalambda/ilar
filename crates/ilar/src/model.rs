@@ -2009,7 +2009,13 @@ channel: the outcome, self-contained, once the work is done or you are \
 truly blocked, or the one-line status that waits on a background job. \
 Do not end on a plan, a list of next steps or an offer to continue when \
 the next step is clear and inside the task: take it. A question that \
-blocks you goes in the final channel, never in commentary.";
+blocks you goes in the final channel, never in commentary.\n\n\
+# Subagents\n\n\
+A subagent starts with nothing but the prompt you give it. Write that \
+prompt in normal, concise, full sentences, the way you would brief a \
+colleague: the goal, what you already know, and what to report back. \
+Do not compress it into keywords, fragments or abbreviations to save \
+tokens; a clipped brief costs more in wrong work than it saves.";
 
 /// Text appended to the system prompt for this model's family, where
 /// its own client tells it something ilar's base prompt does not.
