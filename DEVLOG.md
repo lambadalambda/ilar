@@ -1,5 +1,23 @@
 # DEVLOG
 
+## 2026-11-07 — Memory checked against Anthropic's component study
+
+Compared the code and focused tests with Anthropic's 6 November
+[article](https://www.anthropic.com/research/components-of-agent-memory).
+The capped core, opening index and searchable notes fit. The missing
+loop is checking durable claims against original evidence: gateway
+weekly review starts from notes and handover summaries, and terminal
+stores still have no consolidation pass. A wiki is not the next step.
+
+Three write problems were filed: separate stores lose concurrent
+updates, idle review can write with memory off, and group handovers
+enter shared daily memory. An isolated two-store diagnostic kept 50
+lines after 100 successful adds. All 174 focused memory and gateway
+tests passed. The selector evaluation uses current note versions for
+historical cases and model-generated labels; its scores do not yet
+establish better task outcomes. No runtime behavior changed. The
+[assessment](meta/memory-review-2026-11-07.md) records sources and limits.
+
 ## 2026-11-05 — A model picks what recall surfaces
 
 Recall now asks a selector model, the way Claude Code's recall does:
@@ -7,8 +25,9 @@ one numbered line per note (kind, age, title, summary — never the
 body), the person's words, and an answer of at most five numbers or
 none. Measured with `scripts/recall-eval.py` on 60 typed prompts from
 the tenco gateway (median 42 notes per prompt), against labels from
-gpt-6.1-sol at high effort, which read every note in full and what the
-session did next. 23 of the 60 prompts had a helpful note.
+gpt-6.1-sol at high effort, which received each note's first 800 body
+characters and what the session did next. 23 of the 60 prompts had a
+helpful note. The 7 November review records the evaluation's limits.
 
 | Selector | Precision | Recall | Quiet when none helps | Median / p90 |
 |---|---|---|---|---|

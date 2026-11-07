@@ -489,3 +489,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Note bodies say why and how to apply](issues/note-bodies-say-why-and-how-to-apply.md)
 - [x] [A memory menu](issues/a-memory-menu.md)
 - [x] [Recall the Claude Code way](issues/recall-the-claude-code-way.md)
+- [x] [Review memory against Anthropic's components article](issues/review-memory-against-anthropics-components-article.md)

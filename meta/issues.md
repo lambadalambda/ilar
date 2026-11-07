@@ -135,5 +135,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Review follow-ups
 
-(all complete — see issues_archive.md)
+- [ ] [Serialize shared memory writes](issues/serialize-shared-memory-writes.md)
+- [ ] [Memory off stops review writes](issues/memory-off-stops-review-writes.md)
+- [ ] [Group handovers stay out of personal memory](issues/group-handovers-stay-out-of-personal-memory.md)
 
