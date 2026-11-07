@@ -131,7 +131,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Milestone 23 — Memory, the write side
 
-(all complete — see issues_archive.md)
+- [ ] [Import Claude Code's memories](issues/import-claude-codes-memories.md)
 
 ## Review follow-ups
 
