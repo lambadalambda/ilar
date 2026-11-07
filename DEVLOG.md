@@ -1,5 +1,15 @@
 # DEVLOG
 
+## 2026-11-07 — Images can attach while a turn runs
+
+The TUI still rejected new attachments while busy, although steering
+and the message queue already carried images. Removed that old guard;
+model vision support and image-size limits still apply. Regression tests
+cover mid-turn attachment, queue delivery after completion, steering,
+a closed steer channel and multiple dropped files. Pending images now
+count as a draft for automatic dispatch, so a goal round or an earlier
+queued message cannot take an image before the user submits it.
+
 ## 2026-11-07 — Memory checked against Anthropic's component study
 
 Compared the code and focused tests with Anthropic's 6 November

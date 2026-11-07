@@ -655,7 +655,7 @@ mod tests {
             LoopState {
                 turn_running: self.turn_running,
                 modal: app.active_modal(),
-                input_blank: app.input.is_blank(),
+                input_blank: app.input.is_blank() && app.pending_images.is_empty(),
                 pending_event: false,
                 queued: app.queued_messages.len(),
                 steerable: false,

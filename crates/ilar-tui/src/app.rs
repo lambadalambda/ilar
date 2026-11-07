@@ -755,7 +755,7 @@ pub(crate) struct App {
     /// Pointer position within the transcript, viewport-relative; the
     /// row under it gets the hover underline when it is clickable.
     pub(crate) hover: Option<crate::selection::SelectionPoint>,
-    /// Images attached with Ctrl-V, waiting to ride the next fresh turn.
+    /// Images attached with Ctrl-V, waiting to ride the next message.
     pub(crate) pending_images: Vec<ilar::session::ImageContent>,
     /// The exited-services disclosure: open?, and where its toggle
     /// line landed on screen last frame (None when not drawn).
@@ -2668,9 +2668,9 @@ impl App {
         self.touch_transcript(Some(toggled.unwrap_or(0)));
     }
 
-    /// Attach an image to the next fresh turn, or say why not: mid-turn
-    /// attachments would ride steering (text-only), and a model without
+    /// Attach an image to the draft, or say why not: a model without
     /// vision would silently ignore what the user thinks it saw.
+    /// Images follow the next message, whether started, steered or queued.
     /// Returns whether it attached, so multi-file drops can summarize.
     pub(crate) fn attach_image(&mut self, image: ilar::session::ImageContent) -> bool {
         /// Payload cap, on the picture as it will be *stored*, after
@@ -2679,14 +2679,6 @@ impl App {
         /// ingest cap, which weighs the file on its way in and is
         /// generous because most of what it weighs is about to go.
         const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-        if self.busy {
-            self.set_notice(
-                "a turn is running — attach when it ends; a draft that already has \
-                 attachments still sends them, as a steer or a queued message",
-                NoticeLevel::Warning,
-            );
-            return false;
-        }
         if !ilar::model::supports_vision(&self.current_model) {
             self.set_notice(
                 format!("{} cannot view images", self.current_model),
@@ -7631,7 +7623,7 @@ mod tests {
     }
 
     #[test]
-    fn attaching_an_image_gates_on_vision_and_busy_then_rides_the_next_turn() {
+    fn attaching_an_image_gates_on_vision_then_rides_the_next_turn() {
         use crate::{Intent, apply_intent};
 
         let mut app = App::new();
@@ -7645,15 +7637,9 @@ mod tests {
                 .is_some_and(|notice| notice.text.contains("cannot view images"))
         );
 
-        // Mid-turn attachments would ride steering (text-only): refused.
-        app.current_model = "openai/gpt-5.6-sol".into();
-        app.busy = true;
-        app.attach_image(ilar::session::ImageContent::png(b"fake png bytes"));
-        assert!(app.pending_images.is_empty());
-
         // Idle on a vision model: attached, listed, and drained into
         // the turn request with a marker on the transcript row.
-        app.busy = false;
+        app.current_model = "openai/gpt-5.6-sol".into();
         app.attach_image(ilar::session::ImageContent::png(b"fake png bytes"));
         assert_eq!(app.pending_images.len(), 1);
         let strip = app.pending_strip_lines(80);
@@ -7715,7 +7701,7 @@ mod tests {
     }
 
     #[test]
-    fn a_multi_file_drop_attaches_every_image() {
+    fn a_multi_file_drop_attaches_every_image_mid_turn() {
         use crate::{Intent, apply_intent};
 
         let dir = tempfile::tempdir().unwrap();
@@ -7726,6 +7712,7 @@ mod tests {
 
         let mut app = App::new();
         app.current_model = "openai/gpt-5.6-sol".into();
+        app.busy = true;
         let paste = format!("{} '{}'", first.display(), second.display());
         apply_intent(&mut app, Intent::PasteInput(paste), None);
 
@@ -10897,39 +10884,70 @@ mod tests {
     }
 
     /// Attached images ride whichever way a mid-turn message goes.
-    /// Submitting with an attachment used to be refused outright, which
-    /// left the text back in the box and the images pending; now the
-    /// prompt hands them over and the message is whole wherever it
-    /// waits.
+    /// Attach while a turn runs, then submit through the normal decision
+    /// path. A closed steer channel must keep the whole message queued.
     #[test]
-    fn a_mid_turn_message_takes_its_images_with_it() {
-        use crate::{Intent, TurnRequest, apply_intent};
+    fn an_image_attached_mid_turn_follows_its_message() {
+        use crate::decide::{self, LoopState, after_turn};
+        use crate::{TurnRequest, apply_intent};
 
         let screenshot = ilar::session::ImageContent::png(b"screenshot");
-        let mut app = App::new();
-        let (tx, mut rx) = ilar::agent::steer_channel();
-        app.pending_images = vec![screenshot.clone()];
+        for (steerable, closed) in [(false, false), (true, false), (true, true)] {
+            let mut app = App::new();
+            app.current_model = "openai/gpt-5.6-sol".into();
+            app.busy = true;
+            assert!(app.attach_image(screenshot.clone()));
+            let (tx, rx) = ilar::agent::steer_channel();
+            let mut rx = if closed {
+                drop(rx);
+                None
+            } else {
+                Some(rx)
+            };
+            let running = LoopState {
+                turn_running: true,
+                steerable,
+                input_blank: true,
+                ..LoopState::default()
+            };
+            for intent in decide::submit(&running, app.busy, "look at this".into()) {
+                assert_eq!(apply_intent(&mut app, intent, Some(&tx)), None);
+            }
+            assert!(app.pending_images.is_empty(), "the prompt kept a copy");
 
-        apply_intent(&mut app, Intent::Steer("look at this".into()), Some(&tx));
-        let steered = rx.try_recv().expect("the channel took it");
-        assert_eq!(steered.images, vec![screenshot.clone()], "sent bare");
-        assert!(app.pending_images.is_empty(), "the prompt kept a copy");
-        assert_eq!(app.pending_steers[0].images, vec![screenshot.clone()]);
-
-        // Queued the same way — and the queue is where a steer with no
-        // live channel lands, so the images must survive that hop too.
-        let mut app = App::new();
-        app.pending_images = vec![screenshot.clone()];
-        apply_intent(&mut app, Intent::Queue("look at this".into()), None);
-        assert!(app.pending_images.is_empty());
-        assert_eq!(app.queued_messages[0].images, vec![screenshot.clone()]);
-
-        // Sent, it reaches the spawn exactly as a fresh attachment does.
-        let sent = apply_intent(&mut app, Intent::SendQueued, None).expect("a turn to start");
-        assert_eq!(
-            sent,
-            TurnRequest::New("look at this".into(), vec![screenshot])
-        );
+            if steerable && !closed {
+                let steered = rx
+                    .as_mut()
+                    .unwrap()
+                    .try_recv()
+                    .expect("the channel took it");
+                assert_eq!(steered.text, "look at this");
+                assert_eq!(steered.images, vec![screenshot.clone()]);
+                assert_eq!(app.pending_steers, vec![steered]);
+                assert!(app.queued_messages.is_empty());
+            } else {
+                assert_eq!(waiting_texts(&app.queued_messages), vec!["look at this"]);
+                assert_eq!(app.queued_messages[0].images, vec![screenshot.clone()]);
+                let idle = LoopState {
+                    input_blank: true,
+                    queued: app.queued_messages.len(),
+                    ..LoopState::default()
+                };
+                app.busy = false;
+                let mut sent = None;
+                for intent in after_turn(&idle, true, None, false, 25) {
+                    sent = sent.or(apply_intent(&mut app, intent, None));
+                }
+                assert_eq!(
+                    sent,
+                    Some(TurnRequest::New(
+                        "look at this".into(),
+                        vec![screenshot.clone()]
+                    ))
+                );
+                assert!(app.queued_messages.is_empty());
+            }
+        }
     }
 
     #[test]

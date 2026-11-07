@@ -1067,7 +1067,7 @@ fn observe(
     LoopState {
         turn_running: turn_handle.is_some(),
         modal: app.active_modal(),
-        input_blank: app.input.is_blank(),
+        input_blank: app.input.is_blank() && app.pending_images.is_empty(),
         pending_event: pending_terminal_event.is_some(),
         queued: app.queued_messages.len(),
         steerable: steer_tx.as_ref().is_some_and(|tx| !tx.is_closed()),
@@ -6326,6 +6326,42 @@ mod tests {
         assert!(paused);
         assert!(detached_clause(2).contains("held until your next message"));
         assert_eq!(detached_clause(0), "");
+    }
+
+    #[test]
+    fn automatic_continuation_holds_an_unsubmitted_image_draft() {
+        let image = ilar::session::ImageContent::png(b"unsent screenshot");
+        for queued in [false, true] {
+            let mut app = App::new();
+            app.current_model = "openai/gpt-5.6-sol".into();
+            app.busy = true;
+            app.goal = Some(("ship it".into(), 3));
+            if queued {
+                app.queued_messages.push("sent earlier".into());
+            }
+            assert!(app.attach_image(image.clone()));
+            app.busy = false;
+
+            let state = observe(&app, &None, &None, &None, false);
+            let intents = decide::after_turn(&state, true, Some(("ship it", 3)), false, 25);
+            for intent in intents {
+                assert_eq!(apply_intent(&mut app, intent, None), None);
+            }
+            assert_eq!(app.pending_images, vec![image.clone()]);
+            assert_eq!(app.goal, Some(("ship it".into(), 3)));
+            assert_eq!(app.queued_messages.len(), usize::from(queued));
+
+            // Putting the draft aside makes automatic dispatch safe again.
+            app.stash_or_pop_input();
+            let state = observe(&app, &None, &None, &None, false);
+            let intents = decide::after_turn(&state, true, Some(("ship it", 3)), false, 25);
+            assert!(
+                intents
+                    .iter()
+                    .any(|intent| matches!(intent, Intent::StartTurn(_) | Intent::SendQueued))
+            );
+            assert_eq!(app.input_stash[0].images, vec![image.clone()]);
+        }
     }
 
     /// The switch carries the stash, so the pops still work on the
