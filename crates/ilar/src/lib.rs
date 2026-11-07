@@ -8,6 +8,7 @@ pub mod aside;
 mod atomic_file;
 pub mod auth;
 pub mod checkpoint;
+pub mod claude_memory;
 pub mod command;
 pub mod compaction;
 pub mod config;

@@ -155,7 +155,7 @@ fn memory_key(cwd: &Path) -> PathBuf {
 /// answer unless it names a common one, and a linked worktree's
 /// `.git` is a file that names its own git directory, which does.
 /// `None` when there is no repository above `from`.
-fn common_git_dir(from: &Path) -> Option<PathBuf> {
+pub(crate) fn common_git_dir(from: &Path) -> Option<PathBuf> {
     let git = from
         .ancestors()
         .map(|dir| dir.join(".git"))
@@ -213,16 +213,22 @@ fn slug(path: &Path) -> String {
         .collect();
     let start = flat.len().saturating_sub(SLUG_CHARS);
     let name = flat[start..].trim_matches('-');
+    let hash = short_hash(&text);
+    if name.is_empty() {
+        format!("{hash:08x}")
+    } else {
+        format!("{name}-{hash:08x}")
+    }
+}
+
+/// FNV-1a, cut to 32 bits: a stable name for a string, not a secret.
+pub(crate) fn short_hash(text: &str) -> u32 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
-    if name.is_empty() {
-        format!("{:08x}", hash as u32)
-    } else {
-        format!("{name}-{:08x}", hash as u32)
-    }
+    hash as u32
 }
 
 /// Write through a rename. The temporary name is unique per write, so
@@ -277,7 +283,7 @@ pub enum NoteKind {
 }
 
 impl NoteKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Decision => "decision",
             Self::Solution => "solution",
@@ -1014,6 +1020,33 @@ impl MemoryStore {
         ));
         write_atomically(&path, existing.as_bytes())?;
         Ok(path)
+    }
+
+    /// A note written as it is, id and all, unless one with its id is
+    /// already there. For an importer, whose ids are its own.
+    pub(crate) fn put(&self, note: &Note) -> Result<()> {
+        let path = self.note_path(&note.id)?;
+        let _write = self.write.lock().unwrap();
+        if path.exists() {
+            bail!("a note {} is already there", note.id);
+        }
+        write_atomically(&path, note_file(note).as_bytes())
+    }
+
+    /// Every note id the store has held: the live ones and the
+    /// forgotten ones.
+    pub(crate) fn ids_ever(&self) -> Vec<String> {
+        let notes = self.dir.join("notes");
+        [notes.clone(), notes.join(FORGOTTEN)]
+            .iter()
+            .filter_map(|dir| std::fs::read_dir(dir).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                name.strip_suffix(".md").map(str::to_string)
+            })
+            .collect()
     }
 
     pub fn notes(&self) -> Result<Vec<Note>> {

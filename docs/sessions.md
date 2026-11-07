@@ -265,6 +265,20 @@ message: the prefix a provider cached stays put.
 `general.memory_recall = true` switches recall on, and
 `general.memory_index = false` switches the index off.
 
+A folder Claude Code has worked in has Claude Code's memories of it.
+`ilar memory import-claude`, run in that folder, copies them into the
+project's ilar store, one note per file. It looks in
+`$CLAUDE_CONFIG_DIR` (else `~/.claude`) under `projects/<path with
+every non-alphanumeric character as ->/memory`, for the main checkout
+first and then the launch directory; `--from <dir>` names another.
+The title comes from Claude Code's `MEMORY.md` line, the summary from
+`description`, and the kind from `metadata.type` (user and feedback
+become preferences, project a decision, reference a solution). The
+body says the Claude Code name, so its `[[links]]` stay searchable.
+Running it again adds only the new ones; a note imported once is not
+brought back after an amend or a forget. `--dry-run` lists and writes
+nothing.
+
 ## Rewind and fork
 
 When the working directory is a git repository, ilar snapshots the

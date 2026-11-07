@@ -182,6 +182,11 @@ enum Command {
     },
     /// Run one turn without a terminal and print the answer
     Exec(ExecArgs),
+    /// Work with this directory's memory
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
     /// List the models this configuration reaches (ids for --model)
     Models {
         /// Print a JSON array instead of one line per model
@@ -191,6 +196,69 @@ enum Command {
     /// Read the session store over HTTP (read-only, no turns run)
     #[cfg(feature = "serve")]
     Serve(ServeArgs),
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum MemoryCommand {
+    /// Copy Claude Code's memories of this project into ilar's
+    ImportClaude {
+        /// Claude Code's memory directory, when the project's is not found
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
+        /// List what would be imported and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// `ilar memory import-claude`: Claude Code's memories of the launch
+/// directory into its ilar store, one line per memory.
+fn import_claude_memory(
+    config: &ilar::config::Config,
+    from: Option<std::path::PathBuf>,
+    dry_run: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("reading the current directory")?;
+    let from = match from {
+        Some(from) => from,
+        None => {
+            let home = ilar::claude_memory::claude_home(
+                std::env::var_os("CLAUDE_CONFIG_DIR").map(Into::into),
+                &std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()),
+            );
+            let tried = ilar::claude_memory::memory_dirs(&home, &cwd);
+            match tried.iter().find(|dir| dir.is_dir()) {
+                Some(dir) => dir.clone(),
+                None => anyhow::bail!(
+                    "no Claude Code memory for this directory; looked in:\n  {}\n\
+                     name one with --from",
+                    tried
+                        .iter()
+                        .map(|dir| dir.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n  ")
+                ),
+            }
+        }
+    };
+    let store = ilar::memory::MemoryStore::new(ilar::memory::dir_for(config.state_dir(), &cwd));
+    let done = ilar::claude_memory::import(&store, &from, dry_run)?;
+    for each in &done {
+        let mark = if each.added { "+" } else { "=" };
+        println!("{mark} [{}] {}", each.note.kind, each.note.title);
+    }
+    let added = done.iter().filter(|each| each.added).count();
+    let verb = if dry_run { "would add" } else { "added" };
+    println!(
+        "{verb} {added} of {} from {} to {}",
+        done.len(),
+        from.display(),
+        store.dir().display()
+    );
+    if !config.general.memory {
+        println!("note: [general] memory = false, so sessions do not read this store");
+    }
+    Ok(())
 }
 
 #[cfg(feature = "serve")]
@@ -1481,6 +1549,12 @@ async fn main() -> Result<()> {
     let config = Loader::new().resolve().context("loading config")?;
     // No unlock, as for exec: a provider whose key is sealed away is
     // one exec could not reach either.
+    if let Some(Command::Memory {
+        command: MemoryCommand::ImportClaude { from, dry_run },
+    }) = args.command
+    {
+        return import_claude_memory(&config, from, dry_run);
+    }
     if let Some(Command::Models { json }) = args.command {
         // An endpoint that did not answer is missing from the list; its
         // warning says why, on stderr so --json stays parseable.
