@@ -134,6 +134,13 @@ pub(crate) fn memory_recall_display(count: usize) -> String {
     }
 }
 
+/// The live line for a recall: the log keeps ids, the loop hands over
+/// the titles, which say more.
+pub(crate) fn memory_recalled_display(titles: &[String]) -> String {
+    let quoted: Vec<String> = titles.iter().map(|title| format!("\"{title}\"")).collect();
+    format!("memory: recalled {}", quoted.join(", "))
+}
+
 pub(crate) fn task_notification_display(text: &str) -> Option<String> {
     notification_display(text, "task-notification", normalize_task_notification)
 }

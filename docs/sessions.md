@@ -254,7 +254,8 @@ note is older than a day, the block adds that a note is what was true
 when it was written rather than live state, so a claim about code or
 a file and line may have moved. The block is a session event of its
 own, so the transcript, the web view and a resumed session all show
-it; the TUI shows a count when the session is reopened. A note is not
+it; the TUI shows a line with the titles as it happens, and a count
+when the session is reopened. A note is not
 offered when the context already has it: recalled, written, amended
 or read, until a compaction folds that copy away, when it may come
 back. A note listed in the opening index can still be recalled: the

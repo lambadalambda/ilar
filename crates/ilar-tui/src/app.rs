@@ -1833,6 +1833,12 @@ impl App {
                 }
                 Some(touched)
             }
+            LoopEvent::MemoryRecalled { titles } => {
+                self.close_open_rows();
+                let line = crate::session_view::memory_recalled_display(titles);
+                self.lines.push(Line_::System(line));
+                Some(self.lines.len() - 1)
+            }
             LoopEvent::StepInterrupted {
                 attempt,
                 max_resumes,
@@ -10924,6 +10930,19 @@ mod tests {
             sent,
             TurnRequest::New("look at this".into(), vec![screenshot])
         );
+    }
+
+    #[test]
+    fn a_recall_is_a_line_with_its_titles() {
+        let mut app = App::new();
+        app.push_loop_event(&LoopEvent::MemoryRecalled {
+            titles: vec!["Run tests on tenco".into(), "Use the Edit tool".into()],
+        });
+        assert!(app.lines.iter().any(|line| matches!(
+            line,
+            Line_::System(text)
+                if text == "memory: recalled \"Run tests on tenco\", \"Use the Edit tool\""
+        )));
     }
 
     /// Delivery removes the pending entry the moment the loop reports

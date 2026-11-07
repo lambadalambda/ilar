@@ -1768,7 +1768,9 @@ pub(crate) fn apply_child_loop_event(
             lines.push(Line_::System(format!("transcript compacted\n{summary}")));
             Some(lines.len() - 1)
         }
+        // A child runs without recall.
         LoopEvent::TurnStarted
+        | LoopEvent::MemoryRecalled { .. }
         | LoopEvent::ProviderRetry { .. }
         | LoopEvent::StepInterrupted { .. } => None,
     }
