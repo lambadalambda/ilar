@@ -135,7 +135,13 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Review follow-ups
 
+- [ ] [Memory follow-ups from the component review](issues/memory-follow-ups-from-the-component-review.md)
 - [ ] [Serialize shared memory writes](issues/serialize-shared-memory-writes.md)
 - [ ] [Memory off stops review writes](issues/memory-off-stops-review-writes.md)
 - [ ] [Group handovers stay out of personal memory](issues/group-handovers-stay-out-of-personal-memory.md)
+- [ ] [Memory notes keep their evidence](issues/memory-notes-keep-their-evidence.md)
+- [ ] [History can show the evidence it finds](issues/history-can-show-the-evidence-it-finds.md)
+- [ ] [Agents can read scoped source transcripts](issues/agents-can-read-scoped-source-transcripts.md)
+- [ ] [Consolidation checks claims against sources](issues/consolidation-checks-claims-against-sources.md)
+- [ ] [Memory is measured by later task results](issues/memory-is-measured-by-later-task-results.md)
 
