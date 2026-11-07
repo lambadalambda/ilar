@@ -135,6 +135,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Review follow-ups
 
+- [ ] [Allow image attachments while a turn runs](issues/allow-image-attachments-while-a-turn-runs.md)
 - [ ] [Memory follow-ups from the component review](issues/memory-follow-ups-from-the-component-review.md)
 - [ ] [Serialize shared memory writes](issues/serialize-shared-memory-writes.md)
 - [ ] [Memory off stops review writes](issues/memory-off-stops-review-writes.md)
