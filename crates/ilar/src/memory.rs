@@ -542,7 +542,7 @@ impl RecallConfig {
         answer: &str,
         events: &[crate::session::SessionEvent],
         now: DateTime<Utc>,
-    ) -> Option<(Vec<String>, String)> {
+    ) -> Option<Recalled> {
         let held = held_ids(events);
         let picked: Vec<&Note> =
             crate::selector::picks(answer, pending.candidates.len(), usize::MAX)
@@ -555,9 +555,21 @@ impl RecallConfig {
         if picked.is_empty() {
             return None;
         }
-        let ids = picked.iter().map(|note| note.id.clone()).collect();
-        Some((ids, recall_block(&picked, now, self.bodies)))
+        Some(Recalled {
+            ids: picked.iter().map(|note| note.id.clone()).collect(),
+            titles: picked.iter().map(|note| note.title.clone()).collect(),
+            text: recall_block(&picked, now, self.bodies),
+        })
     }
+}
+
+/// What a recall put into the context: the notes, by id for the log
+/// and by title for the person, and the block the model reads.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recalled {
+    pub ids: Vec<String>,
+    pub titles: Vec<String>,
+    pub text: String,
 }
 
 /// The selector's conversation so far, rebuilt from the log: each
@@ -2162,9 +2174,10 @@ mod tests {
             .prepare("does the model know Mario sprites?", &[], now)
             .unwrap()
             .expect("a selector call");
-        let (_, block) = recall
+        let block = recall
             .finish(&pending, r#"{"picks": [2]}"#, &[], now)
-            .expect("a recall");
+            .expect("a recall")
+            .text;
         assert!(block.contains("earlier session"), "{block}");
         assert!(block.contains("not verified"), "{block}");
         assert!(!block.contains("you wrote"), "{block}");
@@ -2425,7 +2438,7 @@ mod tests {
         let pending = recall.prepare("which notes?", &[], now).unwrap().unwrap();
         let offered: Vec<&str> = pending.candidates.iter().map(|n| n.id.as_str()).collect();
         let both = r#"{"picks": [2, 1]}"#;
-        let (ids, _) = recall.finish(&pending, both, &[], now).unwrap();
+        let ids = recall.finish(&pending, both, &[], now).unwrap().ids;
         assert_eq!(ids, [offered[1], offered[0]]);
         assert!(ids.contains(&notes[0].id) && ids.contains(&notes[1].id));
         assert!(
@@ -2445,9 +2458,10 @@ mod tests {
             state: None,
             ts: now,
         };
-        let (ids, _) = recall
+        let ids = recall
             .finish(&pending, both, &[read_meanwhile], now)
-            .unwrap();
+            .unwrap()
+            .ids;
         assert_eq!(ids, [offered[1]]);
     }
 
@@ -2535,17 +2549,19 @@ mod tests {
     fn a_recall_carries_the_note_s_body_unless_told_not_to() {
         let (_dir, recall, _notes, now) = recall_fixture();
         let pending = recall.prepare("which notes?", &[], now).unwrap().unwrap();
-        let (_, block) = recall
+        let block = recall
             .finish(&pending, r#"{"picks": [1, 2]}"#, &[], now)
-            .unwrap();
+            .unwrap()
+            .text;
         assert!(block.contains("ffmpeg frames extracted"), "{block}");
         let lines_only = RecallConfig {
             bodies: false,
             ..recall.clone()
         };
-        let (_, block) = lines_only
+        let block = lines_only
             .finish(&pending, r#"{"picks": [1, 2]}"#, &[], now)
-            .unwrap();
+            .unwrap()
+            .text;
         assert!(!block.contains("ffmpeg frames extracted"), "{block}");
 
         // Cut one byte off a character boundary, inside a code fence.
@@ -2639,9 +2655,10 @@ mod tests {
         let events = [recalled(&[&ids[5]]), user("which?")];
         let pending = recall.prepare("which?", &events, now).unwrap().unwrap();
         // Oldest first: number 1 is the held note.
-        let (picked, _) = recall
+        let picked = recall
             .finish(&pending, r#"{"picks": [1, 2, 3, 4, 5, 6]}"#, &events, now)
-            .unwrap();
+            .unwrap()
+            .ids;
         assert_eq!(picked.len(), 5);
         assert!(!picked.contains(&ids[5]));
     }

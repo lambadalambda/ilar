@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use ilar::agent::{LOOP_EVENT_CAPACITY, loop_event_channel, run_turn};
+use ilar::agent::{LOOP_EVENT_CAPACITY, LoopEvent, loop_event_channel, run_turn};
 use ilar::memory::{CoreFile, MemoryStore, PROMPT_SECTION, SUMMARY_RULE, dir_for};
 use ilar::provider::{MockProvider, ProviderEvent, StopReason};
 use ilar::runtime::{MemoryOptions, RuntimeOptions, RuntimePlan};
@@ -249,17 +249,18 @@ impl Recalling {
         }
     }
 
-    async fn turn(&self, prompt: &str, config: ilar::agent::LoopConfig) {
-        self.turn_on(&self.provider, prompt, config).await;
+    async fn turn(&self, prompt: &str, config: ilar::agent::LoopConfig) -> Vec<LoopEvent> {
+        self.turn_on(&self.provider, prompt, config).await
     }
 
+    /// The turn, and what it published for the UI.
     async fn turn_on(
         &self,
         provider: &dyn ilar::provider::ProviderResolver,
         prompt: &str,
         config: ilar::agent::LoopConfig,
-    ) {
-        let (tx, _rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
+    ) -> Vec<LoopEvent> {
+        let (tx, mut rx) = loop_event_channel(LOOP_EVENT_CAPACITY);
         run_turn(
             provider,
             &self.registry,
@@ -276,6 +277,7 @@ impl Recalling {
         )
         .await
         .unwrap();
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
     }
 }
 
@@ -340,10 +342,18 @@ async fn the_selector_remembers_the_session_and_recalls_bodies() {
         recall: Some(claude_code_recall(&t.memory)),
         ..Default::default()
     };
-    t.turn("fix the PPU timing", config()).await;
+    let shown = t.turn("fix the PPU timing", config()).await;
     t.turn("are you sure this is right?", config()).await;
 
     assert_eq!(memory_recalls(&t.store, &t.id), vec![vec![ppu.id.clone()]]);
+    // The UI hears of it as it happens, by title.
+    assert!(
+        shown.iter().any(|event| matches!(
+            event,
+            LoopEvent::MemoryRecalled { titles } if titles == &["PPU timing"]
+        )),
+        "{shown:?}"
+    );
     let requests = t.provider.requests();
     let (first, second) = (&requests[0], &requests[2]);
     assert_eq!(

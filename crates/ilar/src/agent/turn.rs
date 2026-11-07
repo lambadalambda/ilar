@@ -1980,15 +1980,24 @@ async fn run_turn_steps(
             match answer {
                 Some(answer) => {
                     if let (Some(recall), Ok(Some(answer))) = (&config.recall, answer)
-                        && let Some((ids, text)) =
+                        && let Some(recalled) =
                             recall.finish(&pending, &answer, session.events(), Utc::now())
                     {
                         session.append(SessionEvent::MemoryRecall {
                             id: new_id(),
-                            ids,
-                            text,
+                            ids: recalled.ids,
+                            text: recalled.text,
                             ts: Utc::now(),
                         })?;
+                        // Only after the append: what is shown was sent.
+                        events
+                            .publish(
+                                LoopEvent::MemoryRecalled {
+                                    titles: recalled.titles,
+                                },
+                                &cancel,
+                            )
+                            .await;
                     }
                 }
                 None => recalling = Some((pending, selector)),

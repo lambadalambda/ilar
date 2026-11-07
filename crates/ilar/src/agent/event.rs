@@ -57,6 +57,10 @@ pub enum LoopEvent {
         text: String,
         images: Vec<crate::session::ImageContent>,
     },
+    /// Notes recall put into the context for this prompt, by title.
+    MemoryRecalled {
+        titles: Vec<String>,
+    },
     ProviderRetry {
         attempt: usize,
         max_retries: usize,
