@@ -17,3 +17,7 @@ Clipboard image processing runs on a worker. Enter can submit text before the wo
 - Once processing succeeds, the submitted message has its images in paste order.
 - Processing errors do not cause a text-only message or a lost draft.
 - Relevant tests pass.
+
+## Notes
+
+- Enter during processing keeps the draft and shows a notice. The user presses Enter again after the attachment appears. It does not schedule a delayed send that could race with later edits.

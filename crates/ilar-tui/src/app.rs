@@ -757,6 +757,8 @@ pub(crate) struct App {
     pub(crate) hover: Option<crate::selection::SelectionPoint>,
     /// Images attached with Ctrl-V, waiting to ride the next message.
     pub(crate) pending_images: Vec<ilar::session::ImageContent>,
+    /// Clipboard images being prepared for this draft, in paste order.
+    pub(crate) clipboard_images: Vec<crate::PendingImage>,
     /// The exited-services disclosure: open?, and where its toggle
     /// line landed on screen last frame (None when not drawn).
     pub(crate) services_show_exited: bool,
@@ -818,6 +820,11 @@ pub(crate) fn windowed_rate(
 }
 
 impl App {
+    /// Whether the draft has neither text nor ready or processing images.
+    pub(crate) fn draft_is_blank(&self) -> bool {
+        self.input.is_blank() && self.pending_images.is_empty() && self.clipboard_images.is_empty()
+    }
+
     /// A fresh app without the welcome line — for a surface whose keys
     /// are not the ones it names.
     pub(crate) fn without_greeting(mut self) -> Self {
@@ -943,6 +950,7 @@ impl App {
             transcript_pressed_target: None,
             hover: None,
             pending_images: Vec::new(),
+            clipboard_images: Vec::new(),
             services_show_exited: false,
 
             agents_show_all: false,
@@ -3016,8 +3024,7 @@ impl App {
         Some(format!("Ctrl-D again quits — {}", parts.join("; ")))
     }
 
-    /// The notice line's text, for tests that assert what stays off it.
-    #[cfg(test)]
+    /// The notice line's current text.
     pub(crate) fn notice_text(&self) -> Option<&str> {
         self.notice.as_ref().map(|notice| notice.text.as_str())
     }

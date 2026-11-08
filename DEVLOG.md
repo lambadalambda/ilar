@@ -1,5 +1,16 @@
 # DEVLOG
 
+## 2026-11-08 — Enter cannot outrun clipboard image processing
+
+Clipboard image workers now belong to the app's draft. Enter keeps the
+draft and asks for another Enter once the images attach, rather than
+sending text alone or scheduling a delayed send after an edit. The
+normal loop observer counts processing images as a draft, so automatic
+queue delivery and goal continuation also hold. Finished workers attach
+in paste order; polling never waits for unfinished work. Tests control
+worker completion and cover text and image-only drafts, out-of-order
+completion, encoding errors and worker crashes.
+
 ## 2026-11-08 — Enter can send an image without text
 
 The root prompt now checks both text and attached images before it

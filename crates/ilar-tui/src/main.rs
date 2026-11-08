@@ -963,10 +963,19 @@ fn apply_event_intents(
     }
 }
 
+const CLIPBOARD_PROCESSING_NOTICE: &str =
+    "clipboard images are still processing — press Enter when attached";
+
 /// Take an explicit submission from the draft. Keep refused commands
 /// available for editing, and leave a truly empty prompt alone.
 fn submit_prompt(app: &mut App, state: &LoopState) -> Vec<Intent> {
-    if app.input.is_blank() && app.pending_images.is_empty() {
+    if !app.clipboard_images.is_empty() {
+        return vec![Intent::Notice(
+            CLIPBOARD_PROCESSING_NOTICE.into(),
+            NoticeLevel::Info,
+        )];
+    }
+    if app.draft_is_blank() {
         return Vec::new();
     }
     let text = app.input.take();
@@ -1084,7 +1093,7 @@ fn observe(
     LoopState {
         turn_running: turn_handle.is_some(),
         modal: app.active_modal(),
-        input_blank: app.input.is_blank() && app.pending_images.is_empty(),
+        input_blank: app.draft_is_blank(),
         pending_event: pending_terminal_event.is_some(),
         queued: app.queued_messages.len(),
         steerable: steer_tx.as_ref().is_some_and(|tx| !tx.is_closed()),
@@ -2150,20 +2159,46 @@ struct RoutedDelivery {
     parcel: ilar::delivery::Parcel,
 }
 
-/// A message typed into a focus view, on its way to that agent through
-/// the same path the model's `task_message` takes: a running agent is
-/// steered, a finished one resumed with the message as its prompt. The
-/// root keeps drawing; the ending lands as a transcript line.
 /// An image on its way from the clipboard to the draft.
 ///
 /// The downscale and the PNG encode are hundreds of milliseconds on a
 /// Retina screenshot, and they used to run on the render task, so
 /// Ctrl-V froze the terminal for as long as they took. Only the
 /// clipboard read stays there, because it needs the handle.
-struct PendingImage {
+pub(crate) struct PendingImage {
     handle: tokio::task::JoinHandle<Result<ilar::session::ImageContent>>,
 }
 
+/// Join only a ready prefix, so attachment order follows paste order.
+/// Checking before awaiting keeps image processing off the render task.
+async fn attach_ready_clipboard_images(app: &mut App) {
+    while app
+        .clipboard_images
+        .first()
+        .is_some_and(|image| image.handle.is_finished())
+    {
+        match app.clipboard_images.remove(0).handle.await {
+            Ok(Ok(image)) => {
+                app.attach_image(image);
+            }
+            Ok(Err(error)) => {
+                app.set_notice(format!("clipboard: {error:#}"), NoticeLevel::Error);
+            }
+            Err(error) => app.set_notice(
+                format!("the image never finished encoding: {error}"),
+                NoticeLevel::Error,
+            ),
+        }
+    }
+    if app.clipboard_images.is_empty() && app.notice_text() == Some(CLIPBOARD_PROCESSING_NOTICE) {
+        app.clear_transient_notice();
+    }
+}
+
+/// A message typed into a focus view, on its way to that agent through
+/// the same path the model's `task_message` takes: a running agent is
+/// steered, a finished one resumed with the message as its prompt. The
+/// root keeps drawing; the ending lands as a transcript line.
 struct FocusMessage {
     handle: tokio::task::JoinHandle<ilar::subagent::TaskMessage>,
     target: String,
@@ -3732,7 +3767,6 @@ async fn run_app(
     // Deliveries to other sessions, running beside the turn slot.
     let mut routed: Vec<RoutedDelivery> = Vec::new();
     let mut focus_messages: Vec<FocusMessage> = Vec::new();
-    let mut pending_images: Vec<PendingImage> = Vec::new();
     let mut session_labels = std::collections::HashMap::new();
     let mut cancel: Option<CancellationToken> = None;
     // Live only while a root turn runs, so a message typed during that
@@ -4413,30 +4447,9 @@ async fn run_app(
             });
         }
 
-        // A focus message's ending: a running agent took it (or queued
-        // An image finished encoding: it joins the draft it was meant
-        // for. A draft sent meanwhile takes it on the next one, which
-        // is what attaching before a send has always done.
-        let mut index = 0;
-        while index < pending_images.len() {
-            if !pending_images[index].handle.is_finished() {
-                index += 1;
-                continue;
-            }
-            match pending_images.remove(index).handle.await {
-                Ok(Ok(image)) => {
-                    app.attach_image(image);
-                }
-                Ok(Err(error)) => {
-                    app.set_notice(format!("clipboard: {error:#}"), NoticeLevel::Error);
-                }
-                Err(error) => app.set_notice(
-                    format!("the image never finished encoding: {error}"),
-                    NoticeLevel::Error,
-                ),
-            }
-        }
+        attach_ready_clipboard_images(app).await;
 
+        // A focus message's ending: a running agent took it (or queued
         // it), a finished one answered, or the send failed. Said in the
         // root's transcript, where the send was recorded.
         let mut index = 0;
@@ -5654,7 +5667,7 @@ async fn run_app(
                         // handle; encoded on a worker, because that is
                         // the slow half and this is the render task.
                         Ok(Some(image)) => {
-                            pending_images.push(PendingImage {
+                            app.clipboard_images.push(PendingImage {
                                 handle: tokio::task::spawn_blocking(move || {
                                     App::clipboard_image_png(image)
                                 }),
@@ -6387,6 +6400,149 @@ mod tests {
             assert_eq!(app.input.text(), text);
             assert!(!app.busy);
             assert!(app.queued_messages.is_empty());
+        }
+    }
+
+    fn preparing_clipboard_image(
+        app: &mut App,
+    ) -> tokio::sync::oneshot::Sender<Result<ilar::session::ImageContent>> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        app.clipboard_images.push(PendingImage {
+            handle: tokio::spawn(async move { receive.await.unwrap() }),
+        });
+        send
+    }
+
+    async fn wait_for_clipboard_worker(app: &App, index: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !app.clipboard_images[index].handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the released image worker finishes");
+    }
+
+    #[tokio::test]
+    async fn clipboard_processing_holds_submission_until_images_are_ready() {
+        let image = ilar::session::ImageContent::png(b"clipboard image");
+        for text in ["", "look at this"] {
+            for busy in [false, true] {
+                let mut app = App::new();
+                app.current_model = "openai/gpt-5.6-sol".into();
+                app.input = InputBuffer::from(text);
+                app.busy = busy;
+                let release = preparing_clipboard_image(&mut app);
+                let state = observe(&app, &None, &None, &None, false);
+                let decided = submit_prompt(&mut app, &state);
+                assert!(decide::refused(&decided), "Enter must keep the draft");
+                for intent in decided {
+                    assert_eq!(apply_intent(&mut app, intent, None), None);
+                }
+                assert!(app.notice_text().unwrap().contains("Enter"));
+                assert_eq!(app.input.text(), text);
+                assert!(app.queued_messages.is_empty());
+
+                // Polling the worker does not wait for image processing.
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    attach_ready_clipboard_images(&mut app),
+                )
+                .await
+                .unwrap();
+                assert!(app.pending_images.is_empty());
+                release.send(Ok(image.clone())).unwrap();
+                wait_for_clipboard_worker(&app, 0).await;
+                attach_ready_clipboard_images(&mut app).await;
+                assert_eq!(app.pending_images, vec![image.clone()]);
+                assert_eq!(
+                    app.notice_text(),
+                    None,
+                    "the processing notice is now stale"
+                );
+
+                let state = observe(&app, &None, &None, &None, false);
+                let decided = submit_prompt(&mut app, &state);
+                assert_eq!(decided.len(), 1);
+                let sent = apply_intent(&mut app, decided.into_iter().next().unwrap(), None);
+                if busy {
+                    assert_eq!(app.queued_messages[0].images, vec![image.clone()]);
+                    assert_eq!(app.queued_messages[0].text, text);
+                } else {
+                    assert_eq!(
+                        sent,
+                        Some(TurnRequest::New(text.into(), vec![image.clone()]))
+                    );
+                }
+                assert!(app.pending_images.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn clipboard_images_attach_in_paste_order_not_worker_completion_order() {
+        let mut app = App::new();
+        app.current_model = "openai/gpt-5.6-sol".into();
+        let first = preparing_clipboard_image(&mut app);
+        let second = preparing_clipboard_image(&mut app);
+        let one = ilar::session::ImageContent::png(b"first");
+        let two = ilar::session::ImageContent::png(b"second");
+        second.send(Ok(two.clone())).unwrap();
+        wait_for_clipboard_worker(&app, 1).await;
+        attach_ready_clipboard_images(&mut app).await;
+        assert!(
+            app.pending_images.is_empty(),
+            "the first paste is not ready"
+        );
+        first.send(Ok(one.clone())).unwrap();
+        wait_for_clipboard_worker(&app, 0).await;
+        attach_ready_clipboard_images(&mut app).await;
+        assert_eq!(app.pending_images, vec![one, two]);
+        assert!(app.clipboard_images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn automatic_continuation_holds_a_processing_clipboard_image() {
+        for queued in [false, true] {
+            let mut app = App::new();
+            if queued {
+                app.queued_messages.push("sent earlier".into());
+            }
+            let _release = preparing_clipboard_image(&mut app);
+            let state = observe(&app, &None, &None, &None, false);
+            let intents = decide::after_turn(&state, true, Some(("ship it", 3)), false, 25);
+            assert!(
+                !intents
+                    .iter()
+                    .any(|intent| matches!(intent, Intent::StartTurn(_) | Intent::SendQueued))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn clipboard_processing_failures_preserve_the_draft() {
+        for crash in [false, true] {
+            let mut app = App::new();
+            app.input = InputBuffer::from("look at this");
+            app.clipboard_images.push(PendingImage {
+                handle: tokio::spawn(async move {
+                    assert!(!crash, "test image worker crash");
+                    anyhow::bail!("test image encoding error");
+                }),
+            });
+            let state = observe(&app, &None, &None, &None, false);
+            assert!(decide::refused(&submit_prompt(&mut app, &state)));
+            wait_for_clipboard_worker(&app, 0).await;
+            attach_ready_clipboard_images(&mut app).await;
+            assert_eq!(app.input.text(), "look at this");
+            assert!(app.notice_text().unwrap().contains(if crash {
+                "never finished encoding"
+            } else {
+                "test image encoding error"
+            }));
+            assert!(app.clipboard_images.is_empty());
+            assert!(app.queued_messages.is_empty());
+            assert!(!app.busy);
         }
     }
 
