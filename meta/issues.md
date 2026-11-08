@@ -135,7 +135,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Review follow-ups
 
-- [ ] [Submit image-only messages](issues/submit-image-only-messages.md)
 - [ ] [Keep clipboard images with the submitted message](issues/keep-clipboard-images-with-the-submitted-message.md)
 - [ ] [Memory follow-ups from the component review](issues/memory-follow-ups-from-the-component-review.md)
 - [ ] [Serialize shared memory writes](issues/serialize-shared-memory-writes.md)

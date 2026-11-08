@@ -491,3 +491,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Recall the Claude Code way](issues/recall-the-claude-code-way.md)
 - [x] [Review memory against Anthropic's components article](issues/review-memory-against-anthropics-components-article.md)
 - [x] [Allow image attachments while a turn runs](issues/allow-image-attachments-while-a-turn-runs.md)
+- [x] [Submit image-only messages](issues/submit-image-only-messages.md)

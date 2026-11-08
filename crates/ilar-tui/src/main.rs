@@ -963,6 +963,23 @@ fn apply_event_intents(
     }
 }
 
+/// Take an explicit submission from the draft. Keep refused commands
+/// available for editing, and leave a truly empty prompt alone.
+fn submit_prompt(app: &mut App, state: &LoopState) -> Vec<Intent> {
+    if app.input.is_blank() && app.pending_images.is_empty() {
+        return Vec::new();
+    }
+    let text = app.input.take();
+    app.history.push(&text);
+    let decided = decide::submit(state, app.busy, text.clone());
+    if decide::refused(&decided) {
+        app.input = InputBuffer::from(text);
+    } else if app.ghost.is_some() {
+        app.dismiss_ghost();
+    }
+    decided
+}
+
 /// Rounds after which goal mode gives up (a budget, unlike the
 /// runaway-loop iteration guard).
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -5704,7 +5721,7 @@ async fn run_app(
                         intents.extend(retry_intents(&state, app.busy));
                     }
                     _ => match handle_prompt_key(&mut app.input, key) {
-                        PromptAction::Submit if !app.input.is_blank() => {
+                        PromptAction::Submit => {
                             // Observe before taking the text: the
                             // decision is about the state the user
                             // submitted into.
@@ -5715,31 +5732,11 @@ async fn run_app(
                                 &steer_tx,
                                 notifications_paused,
                             );
-                            let text = app.input.take();
-                            app.history.push(&text);
-                            // The transcript line for a steer appears
-                            // when the loop delivers it, not on submit.
-                            // Attached images are not part of the
-                            // decision: `apply_intent` takes them off
-                            // the prompt whichever way the message goes.
-                            let decided = decide::submit(&state, app.busy, text.clone());
-                            // A refused command keeps its text, exactly
-                            // as `prepare_prompt`'s refusals do: the
-                            // user retypes nothing to fix a typo or to
-                            // wait for the turn to end.
-                            if decide::refused(&decided) {
-                                app.input = InputBuffer::from(text.as_str());
-                            } else if app.ghost.is_some() {
-                                // The send happened, so the offer is
-                                // answered. Dismissing on the keypress
-                                // instead took the offer along with a
-                                // refusal, and nothing brings it back.
-                                app.dismiss_ghost();
-                            }
+                            let decided = submit_prompt(app, &state);
                             apply_event_intents(app, decided, &mut intents, steer_tx.as_ref());
                         }
                         PromptAction::Edited => app.clear_transient_notice(),
-                        PromptAction::Unhandled | PromptAction::Submit => {}
+                        PromptAction::Unhandled => {}
                     },
                 }
             }
@@ -6326,6 +6323,71 @@ mod tests {
         assert!(paused);
         assert!(detached_clause(2).contains("held until your next message"));
         assert_eq!(detached_clause(0), "");
+    }
+
+    #[test]
+    fn image_only_submissions_start_steer_or_queue() {
+        let image = ilar::session::ImageContent::png(b"screenshot");
+        for text in ["", " \t\n"] {
+            for (busy, steerable) in [(false, false), (true, true), (true, false)] {
+                let mut app = App::new();
+                app.input = InputBuffer::from(text);
+                app.pending_images = vec![image.clone()];
+                app.busy = busy;
+                let (tx, mut rx) = ilar::agent::steer_channel();
+                let state = LoopState {
+                    turn_running: busy,
+                    steerable,
+                    ..observe(&app, &None, &None, &None, false)
+                };
+                let decided = submit_prompt(&mut app, &state);
+                let expected = if !busy {
+                    Intent::StartTurn(text.into())
+                } else if steerable {
+                    Intent::Steer(text.into())
+                } else {
+                    Intent::Queue(text.into())
+                };
+                assert_eq!(decided, vec![expected]);
+                let sent = apply_intent(&mut app, decided.into_iter().next().unwrap(), Some(&tx));
+                if !busy {
+                    assert_eq!(
+                        sent,
+                        Some(TurnRequest::New(text.into(), vec![image.clone()]))
+                    );
+                } else if steerable {
+                    assert_eq!(
+                        rx.try_recv().unwrap(),
+                        ilar::agent::Steer {
+                            text: text.into(),
+                            images: vec![image.clone()],
+                        }
+                    );
+                } else {
+                    assert_eq!(app.queued_messages[0].images, vec![image.clone()]);
+                    app.busy = false;
+                    assert_eq!(
+                        apply_intent(&mut app, Intent::SendQueued, None),
+                        Some(TurnRequest::New(text.into(), vec![image.clone()]))
+                    );
+                }
+                assert!(app.pending_images.is_empty());
+                assert!(app.input.text().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_submission_without_images_does_nothing() {
+        for text in ["", " \t\n"] {
+            let mut app = App::new();
+            app.input = InputBuffer::from(text);
+            let state = observe(&app, &None, &None, &None, false);
+            assert!(submit_prompt(&mut app, &state).is_empty());
+            assert_eq!(app.input.text(), text);
+            assert!(!app.busy);
+            assert!(app.queued_messages.is_empty());
+        }
     }
 
     #[test]

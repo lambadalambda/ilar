@@ -1,5 +1,14 @@
 # DEVLOG
 
+## 2026-11-08 — Enter can send an image without text
+
+The root prompt now checks both text and attached images before it
+ignores Enter. The submit handler is shared by the keyboard path and
+its tests. Empty and whitespace-only text with images can start a turn,
+steer a running turn or wait in the queue; an empty draft still does
+nothing. The core and provider serializers already accept image-only
+messages, so they need no change.
+
 ## 2026-11-07 — Images can attach while a turn runs
 
 The TUI still rejected new attachments while busy, although steering
