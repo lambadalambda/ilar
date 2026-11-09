@@ -829,6 +829,7 @@ impl RuntimePlan {
             ))
             .with_loop_config(loop_config.clone())
             .with_services(services.clone())
+            .with_allowed_models(config.subagents.allowed_models.clone())
             .with_available_models(config.available_models())
             .with_secrets(secrets.clone())
             .with_sudo(config.agent.sudo)

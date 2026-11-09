@@ -5048,3 +5048,55 @@ async fn a_notifying_service_reports_failure_stop_and_cancel_truthfully() {
     .expect("the service stops with its cancelled watcher");
     spawner.shutdown().await;
 }
+
+#[tokio::test]
+async fn recovered_notification_cannot_resume_a_disallowed_child() {
+    let (store, root_id) = temp_store();
+    let child_id = new_id();
+    store
+        .create(SessionMeta {
+            session_id: child_id.clone(),
+            parent_id: Some(root_id.clone()),
+            agent: "explore".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: None,
+            cwd: None,
+        })
+        .unwrap();
+    store
+        .acquire_writer(&child_id)
+        .unwrap()
+        .load()
+        .unwrap()
+        .append(SessionEvent::ModelChange {
+            id: new_id(),
+            model: "zai/glm-4.7-flash".into(),
+            variant: None,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    let provider = Arc::new(MockProvider::new(vec![]));
+    let spawner = spawner(provider.clone(), &store);
+    for policy in [None, Some(vec![])] {
+        spawner.set_allowed_models(policy);
+        let outcome = spawner
+            .route_notification(
+                Notification {
+                    parent_session_id: child_id.clone(),
+                    description: "recovered".into(),
+                    text: format!("recovered child result {}", new_id()),
+                    is_error: false,
+                },
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        // A failed resume reports to the child's own parent, not the root model.
+        let RouteOutcome::Replace(replacement) = outcome else {
+            panic!("expected replacement notification");
+        };
+        assert_eq!(replacement.parent_session_id, root_id);
+        assert!(replacement.is_error && replacement.text.contains("not allowed"));
+    }
+    assert!(provider.requests().is_empty());
+}

@@ -2487,6 +2487,7 @@ async fn subagent_model_override_resolves_its_own_provider() {
         3,
         ProjectInstructions::Include,
     ));
+    spawner.set_allowed_models(Some(vec!["openai/gpt-5.2".into()]));
     let task = parent_registry(spawner).get("task").unwrap();
     let mut ctx = ToolContext::root(std::env::temp_dir());
     ctx.session_id = session_id;
@@ -2558,6 +2559,7 @@ async fn resumed_subagent_uses_its_persisted_model() {
         3,
         ProjectInstructions::Include,
     ));
+    spawner.set_allowed_models(Some(vec!["openai/gpt-5.2".into()]));
     let task = parent_registry(spawner).get("task").unwrap();
     let mut ctx = ToolContext::root(std::env::temp_dir());
     ctx.session_id = parent_id;
@@ -2617,6 +2619,10 @@ async fn task_model_override_pins_child_model_and_rejects_unknown() {
         delay_ms: 10,
     });
     let spawner = spawner(child, &store, 10, 3);
+    spawner.set_allowed_models(Some(vec![
+        "zai/glm-4.7-flash".into(),
+        "zai/not-a-model".into(),
+    ]));
     let registry = parent_registry(spawner);
 
     let override_call = |id: &str, model: serde_json::Value| ProviderEvent::ToolCallCompleted {
@@ -2790,9 +2796,9 @@ async fn literal_null_strings_in_optional_task_fields_spawn_as_if_omitted() {
 #[tokio::test]
 async fn an_explicit_bad_reasoning_variant_names_the_reasoning_input() {
     let (store, parent_id) = temp_store();
-    let task = parent_registry(spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3))
-        .get("task")
-        .unwrap();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
+    spawner.set_allowed_models(Some(vec!["openai/gpt-5.2".into()]));
+    let task = parent_registry(spawner).get("task").unwrap();
 
     let output = task
         .run(
@@ -3757,4 +3763,233 @@ async fn a_message_resumes_an_isolated_task_without_being_told_its_worktree() {
         output.content
     );
     assert_eq!(output.child_session_id(), Some(child_id.as_str()));
+}
+
+#[tokio::test]
+async fn subagent_model_policy_is_live_and_defaults_to_parent() {
+    let (store, parent_id) = temp_store();
+    let provider = Arc::new(ScriptedDelayProvider {
+        text: "done",
+        delay_ms: 0,
+    });
+    let spawner = spawner(provider, &store, 10, 3);
+    let mut ctx = ToolContext::root(std::env::temp_dir());
+    ctx.session_id = parent_id.clone();
+    let input = |model: Option<&str>| TaskInput {
+        description: "policy".into(),
+        prompt: "hello".into(),
+        subagent_type: "explore".into(),
+        task_id: None,
+        background: Some(false),
+        workspace: None,
+        model: model.map(str::to_string),
+        reasoning: None,
+    };
+    assert_eq!(spawner.allowed_models(), None);
+    let denied = spawner
+        .run_task(input(Some("zai/glm-4.7-flash")), &ctx)
+        .await;
+    assert!(
+        denied.is_error && denied.content.contains("not allowed"),
+        "{}",
+        denied.content
+    );
+    assert!(!spawner.run_task(input(None), &ctx).await.is_error);
+    spawner.set_allowed_models(Some(vec![]));
+    assert!(spawner.run_task(input(None), &ctx).await.is_error);
+    spawner.set_allowed_models(Some(vec!["zai/glm-4.7-flash".into()]));
+    assert_eq!(
+        spawner.allowed_models(),
+        Some(vec!["zai/glm-4.7-flash".into()])
+    );
+    assert!(
+        !spawner
+            .run_task(input(Some("zai/glm-4.7-flash")), &ctx)
+            .await
+            .is_error
+    );
+    assert!(spawner.run_task(input(None), &ctx).await.is_error);
+    spawner.set_allowed_models(None);
+    let mut parent = store.acquire_writer(&parent_id).unwrap().load().unwrap();
+    parent
+        .append(SessionEvent::ModelChange {
+            id: new_id(),
+            model: "zai/glm-4.7-flash".into(),
+            variant: None,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(parent);
+    assert!(!spawner.run_task(input(None), &ctx).await.is_error);
+    assert!(
+        spawner
+            .run_task(input(Some("zai/glm-4.7")), &ctx)
+            .await
+            .is_error
+    );
+}
+
+#[tokio::test]
+async fn policy_checks_resumed_effective_model_and_preserves_parked_messages() {
+    let (store, parent_id) = temp_store();
+    let child_id = new_id();
+    store
+        .create(SessionMeta {
+            session_id: child_id.clone(),
+            parent_id: Some(parent_id.clone()),
+            agent: "explore".into(),
+            model: "zai/glm-4.7".into(),
+            workspace: None,
+            cwd: None,
+        })
+        .unwrap();
+    store
+        .acquire_writer(&child_id)
+        .unwrap()
+        .load()
+        .unwrap()
+        .append(SessionEvent::ModelChange {
+            id: new_id(),
+            model: "zai/glm-4.7-flash".into(),
+            variant: None,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    let provider = Arc::new(MockProvider::new(vec![vec![
+        ProviderEvent::TextDelta("continued".into()),
+        ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+    ]]));
+    let spawner = spawner(provider.clone(), &store, 10, 3);
+    let registry = parent_registry(spawner.clone());
+    let mut ctx = ToolContext::root(std::env::temp_dir());
+    ctx.session_id = parent_id;
+    let task = registry.get("task").unwrap();
+    let denied = task
+        .run(
+            serde_json::json!({
+                "description": "resume", "prompt": "continue", "subagent_type": "explore",
+                "task_id": child_id, "background": false,
+            }),
+            ctx.clone(),
+        )
+        .await;
+    assert!(
+        denied.is_error && denied.content.contains("not allowed"),
+        "{}",
+        denied.content
+    );
+    let message = registry.get("task_message").unwrap();
+    let denied = message
+        .run(
+            serde_json::json!({
+                "task_id": child_id, "message": "keep this parked message", "background": false,
+            }),
+            ctx.clone(),
+        )
+        .await;
+    assert!(
+        denied.is_error
+            && denied.content.contains("not allowed")
+            && denied.content.contains("queued"),
+        "{}",
+        denied.content
+    );
+    assert!(provider.requests().is_empty());
+    spawner.set_allowed_models(Some(vec!["zai/glm-4.7-flash".into()]));
+    let output = message
+        .run(
+            serde_json::json!({
+                "task_id": child_id, "message": "now continue", "background": false,
+            }),
+            ctx,
+        )
+        .await;
+    assert!(!output.is_error, "{}", output.content);
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].model, "zai/glm-4.7-flash");
+    assert!(format!("{:?}", requests[0]).contains("keep this parked message"));
+}
+
+#[tokio::test]
+async fn agent_default_model_requires_policy_and_availability() {
+    let (store, parent_id) = temp_store();
+    let provider = Arc::new(MockProvider::new(vec![]));
+    for model in ["zai/glm-4.7-flash", "zai/not-a-model"] {
+        let spawner = Arc::new(SubagentSpawner::new(
+            Arc::new(FixedProviderResolver::new(provider.clone())),
+            store.clone(),
+            vec![AgentDefinition {
+                name: "explore".into(),
+                description: "test".into(),
+                model: Some(model.into()),
+                prompt: String::new(),
+                workspace_mode: AgentWorkspaceMode::ReadOnly,
+                tools: None,
+            }],
+            std::env::temp_dir(),
+            0,
+            10,
+            3,
+            ProjectInstructions::Include,
+        ));
+        let mut ctx = ToolContext::root(std::env::temp_dir());
+        ctx.session_id = parent_id.clone();
+        let input = || TaskInput {
+            description: "test".into(),
+            prompt: "hello".into(),
+            subagent_type: "explore".into(),
+            task_id: None,
+            background: Some(false),
+            workspace: None,
+            model: None,
+            reasoning: None,
+        };
+        let output = spawner.run_task(input(), &ctx).await;
+        assert!(
+            output.is_error && output.content.contains("not allowed"),
+            "{}",
+            output.content
+        );
+        if model == "zai/not-a-model" {
+            spawner.set_allowed_models(Some(vec![model.into()]));
+            let output = spawner.run_task(input(), &ctx).await;
+            assert!(
+                output.is_error && output.content.contains("unknown or unavailable"),
+                "{}",
+                output.content
+            );
+        }
+    }
+    assert!(provider.requests().is_empty());
+}
+
+#[tokio::test]
+async fn models_tool_filters_against_live_policy_and_parent_model() {
+    let (store, parent_id) = temp_store();
+    let spawner = spawner_for(&store);
+    let registry = parent_registry(spawner.clone())
+        .with_models(vec![
+            ilar::model::find("zai/glm-4.7").unwrap(),
+            ilar::model::find("zai/glm-4.7-flash").unwrap(),
+        ])
+        .unwrap();
+    let tool = registry.get("models").unwrap();
+    let mut ctx = ToolContext::root(std::env::temp_dir()).with_subagents(spawner.clone());
+    ctx.session_id = parent_id;
+    let output = tool.run(serde_json::json!({}), ctx.clone()).await;
+    assert!(output.content.contains("zai/glm-4.7"));
+    assert!(!output.content.contains("flash"));
+    spawner.set_allowed_models(Some(vec![]));
+    assert_eq!(
+        tool.run(serde_json::json!({}), ctx.clone()).await.content,
+        "no models available"
+    );
+    spawner.set_allowed_models(Some(vec!["zai/glm-4.7-flash".into()]));
+    let output = tool.run(serde_json::json!({}), ctx).await;
+    assert!(output.content.starts_with("zai/glm-4.7-flash"));
+    assert_eq!(output.content.lines().count(), 1);
 }

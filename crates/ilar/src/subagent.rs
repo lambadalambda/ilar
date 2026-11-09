@@ -196,6 +196,8 @@ pub struct SubagentSpawner {
     loop_config: LoopConfig,
     /// Root session's service manager, shared with mutable child agents.
     services: Option<std::sync::Arc<crate::tools::service::ServiceManager>>,
+    /// Live delegation policy, shared with all descendants.
+    allowed_models: Arc<Mutex<Option<Vec<String>>>>,
     /// Models available for per-task overrides and the models tool.
     available_models: Vec<&'static crate::model::ModelInfo>,
     /// The session's secrets, for the listing tool in child registries
@@ -693,6 +695,7 @@ impl SubagentSpawner {
             outbox_dir: None,
             loop_config: LoopConfig::default(),
             services: None,
+            allowed_models: Arc::new(Mutex::new(None)),
             available_models: Vec::new(),
             secrets: None,
             sudo: false,
@@ -744,6 +747,47 @@ impl SubagentSpawner {
         self.notify_tx = notify_tx;
         self.notify_rx = Arc::new(Mutex::new(Some(notify_rx)));
         self
+    }
+
+    /// Initialize the policy shared by this spawner and all descendants.
+    pub fn with_allowed_models(self, models: Option<Vec<String>>) -> Self {
+        self.set_allowed_models(models);
+        self
+    }
+
+    /// `None` allows only each immediate parent's persisted current model.
+    pub fn allowed_models(&self) -> Option<Vec<String>> {
+        lock_unpoisoned(&self.allowed_models).clone()
+    }
+
+    /// Change policy for future child turns. Running turns are not stopped.
+    pub fn set_allowed_models(&self, models: Option<Vec<String>>) {
+        *lock_unpoisoned(&self.allowed_models) = models;
+    }
+
+    pub(crate) fn delegation_models(&self, parent_id: &str) -> anyhow::Result<Vec<String>> {
+        match self.allowed_models() {
+            Some(models) => Ok(models),
+            None => Ok(vec![self.store.load(parent_id)?.effective_model()]),
+        }
+    }
+
+    fn check_model(&self, parent_id: &str, model: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.delegation_models(parent_id)?
+                .iter()
+                .any(|allowed| allowed == model),
+            "subagent model {model:?} is not allowed by the delegation policy"
+        );
+        Ok(())
+    }
+
+    fn check_session_model(&self, session_id: &str) -> anyhow::Result<()> {
+        let session = self.store.load(session_id)?;
+        if let Some(parent_id) = session.meta().and_then(|meta| meta.parent_id.as_deref()) {
+            self.check_model(parent_id, &session.effective_model())?;
+        }
+        Ok(())
     }
 
     pub fn with_available_models(mut self, models: Vec<&'static crate::model::ModelInfo>) -> Self {
@@ -923,6 +967,7 @@ impl SubagentSpawner {
             outbox_dir: self.outbox_dir.clone(),
             loop_config: self.loop_config.clone(),
             services: self.services.clone(),
+            allowed_models: self.allowed_models.clone(),
             available_models: self.available_models.clone(),
             secrets: self.secrets.clone(),
             sudo: self.sudo,
@@ -1259,6 +1304,11 @@ impl SubagentSpawner {
                         }
                         None => {}
                     }
+                    if let Err(error) =
+                        self.check_model(&ctx.session_id, &session.effective_model())
+                    {
+                        return ToolOutput::error(format!("{error:#}"));
+                    }
                     id.clone()
                 }
                 Err(error) => {
@@ -1288,7 +1338,10 @@ impl SubagentSpawner {
                         }
                     },
                 };
-                if input.model.is_some() {
+                if let Err(error) = self.check_model(&ctx.session_id, &model) {
+                    return ToolOutput::error(format!("{error:#}"));
+                }
+                if input.model.is_some() || agent.model.is_some() {
                     let known = self
                         .available_models
                         .iter()
@@ -1549,6 +1602,12 @@ impl SubagentSpawner {
                         failure.message()
                     ))),
                 };
+                let never_ran = never_ran.or_else(|| {
+                    spawner
+                        .check_session_model(&session_id)
+                        .err()
+                        .map(TaskOutcome::Failed)
+                });
                 if let Some(outcome) = never_ran {
                     // The hold hands back the messages its prompt took,
                     // so they are counted as the waiting ones they are.
@@ -1756,6 +1815,9 @@ your response with a one-line status, not an answer; the task keeps running eith
             LeaseOutcome::Failed(failure) => return ToolOutput::error(failure.message()),
         };
         child_ctx.workspace_lease = Some(lease);
+        if let Err(error) = self.check_session_model(&session_id) {
+            return ToolOutput::error(format!("{error:#}"));
+        }
         if let Some(on_start) = on_start.take() {
             on_start();
         }
@@ -2336,6 +2398,12 @@ your response with a one-line status, not an answer; the task keeps running eith
             // messages go in ahead of the completion that woke it. The
             // hold is per attempt: an attempt that never appended
             // anything puts them back when it drops.
+            if let Err(error) = self.check_session_model(&notification.parent_session_id) {
+                return self.recorded_propagate(
+                    &meta.session_id,
+                    context_route_failure(&meta, notification, error),
+                );
+            }
             let mut queued = self.child_steers.adopt(&notification.parent_session_id);
             let text = queued.prompt(&notification.text);
             let result = run_turn(
@@ -4418,6 +4486,55 @@ impl Tool for TasksTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_spawners_share_policy_but_use_the_immediate_parent_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().join("sessions"));
+        let root_id = new_id();
+        let child_id = new_id();
+        for (id, parent, model) in [
+            (root_id.as_str(), None, "zai/glm-4.7"),
+            (
+                child_id.as_str(),
+                Some(root_id.as_str()),
+                "zai/glm-4.7-flash",
+            ),
+        ] {
+            store
+                .create(SessionMeta {
+                    session_id: id.into(),
+                    parent_id: parent.map(str::to_string),
+                    agent: "test".into(),
+                    model: model.into(),
+                    workspace: None,
+                    cwd: None,
+                })
+                .unwrap();
+        }
+        let root = SubagentSpawner::new(
+            Arc::new(crate::provider::FixedProviderResolver::new(Arc::new(
+                crate::provider::MockProvider::new(vec![]),
+            ))),
+            store,
+            vec![],
+            dir.path().to_path_buf(),
+            0,
+            10,
+            3,
+            ProjectInstructions::Include,
+        )
+        .with_allowed_models(Some(vec!["zai/glm-4.7".into()]));
+        let nested = root.derived(root.workspace_location.clone(), root.workspace.clone(), 1);
+        assert_eq!(nested.allowed_models(), root.allowed_models());
+        root.set_allowed_models(Some(vec![]));
+        assert!(nested.check_model(&child_id, "zai/glm-4.7-flash").is_err());
+        nested.set_allowed_models(None);
+        assert_eq!(root.allowed_models(), None);
+        assert!(nested.check_model(&child_id, "zai/glm-4.7-flash").is_ok());
+        assert!(nested.check_model(&child_id, "zai/glm-4.7").is_err());
+        assert!(root.check_model(&root_id, "zai/glm-4.7").is_ok());
+    }
 
     #[test]
     fn a_wait_keeps_codexs_bounds() {

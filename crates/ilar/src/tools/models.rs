@@ -110,8 +110,24 @@ impl Tool for ModelsTool {
         serde_json::json!({"type": "object", "properties": {}})
     }
 
-    fn run(&self, _input: serde_json::Value, _ctx: ToolContext) -> ToolFuture {
-        let listing = listing(&self.models);
+    fn run(&self, _input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
+        let models = match &ctx.subagent {
+            Some(spawner) => match spawner.delegation_models(&ctx.session_id) {
+                Ok(allowed) => self
+                    .models
+                    .iter()
+                    .copied()
+                    .filter(|model| allowed.contains(&model.full_id()))
+                    .collect(),
+                Err(error) => {
+                    return Box::pin(async move {
+                        ToolOutput::error(format!("loading delegation policy: {error:#}"))
+                    });
+                }
+            },
+            None => self.models.clone(),
+        };
+        let listing = listing(&models);
         Box::pin(async move { ToolOutput::text(listing) })
     }
 }

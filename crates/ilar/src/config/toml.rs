@@ -276,6 +276,10 @@ fn default_threshold() -> f64 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubagentConfig {
+    /// Exact delegation allowlist. Omitted: only the immediate parent's current model.
+    /// An empty list denies all new child turns. User configuration only.
+    #[serde(default)]
+    pub allowed_models: Option<Vec<String>>,
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: usize,
     #[serde(default = "default_max_depth")]
@@ -287,6 +291,7 @@ pub struct SubagentConfig {
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
+            allowed_models: None,
             max_concurrent: default_max_concurrent(),
             max_depth: default_max_depth(),
             background_tool_timeout_ms: default_background_tool_timeout_ms(),
@@ -342,6 +347,7 @@ struct CompactionLayer {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct SubagentLayer {
+    allowed_models: Option<Vec<String>>,
     max_concurrent: Option<usize>,
     max_depth: Option<usize>,
     background_tool_timeout_ms: Option<u64>,
@@ -842,7 +848,10 @@ impl Config {
             project_dir.join(".ilar/ilar.toml"),
         ] {
             if let Some(text) = read_config_file(&path)? {
-                for key in user_scoped_general_keys(&text) {
+                for key in user_scoped_general_keys(&text)
+                    .into_iter()
+                    .chain(declared_subagent_models(&text).then_some("subagents.allowed_models"))
+                {
                     warnings.push(format!(
                         "{}: {key} is a user preference and is ignored in project config",
                         path.display()
@@ -986,6 +995,10 @@ impl Config {
                 }
             },
             subagents: SubagentConfig {
+                allowed_models: merged
+                    .subagents
+                    .as_ref()
+                    .and_then(|config| config.allowed_models.clone()),
                 max_concurrent: merged
                     .subagents
                     .as_ref()
@@ -1467,6 +1480,13 @@ fn user_scoped_general_keys(text: &str) -> Vec<&'static str> {
     .collect()
 }
 
+fn declared_subagent_models(text: &str) -> bool {
+    toml::from_str::<toml::Table>(text)
+        .ok()
+        .and_then(|table| table.get("subagents")?.as_table().cloned())
+        .is_some_and(|table| table.contains_key("allowed_models"))
+}
+
 /// The tables only the user's own file may set, in the order the
 /// warnings name them. `[models]`, `[endpoints]` and `[providers]` route
 /// the conversation; `[cache_compact]` fires unattended provider
@@ -1549,6 +1569,9 @@ fn merge_file(
                 .with_context(|| format!("parsing config {}", origin.display()))?;
             for name in USER_SCOPED_TABLES {
                 table.remove(*name);
+            }
+            if let Some(toml::Value::Table(subagents)) = table.get_mut("subagents") {
+                subagents.remove("allowed_models");
             }
             table
                 .try_into()
@@ -1649,6 +1672,7 @@ fn merge_file(
         overlay!(
             merged.subagents.get_or_insert_with(SubagentLayer::default),
             subagents,
+            allowed_models,
             max_concurrent,
             max_depth,
             background_tool_timeout_ms,
@@ -1711,6 +1735,78 @@ pub fn persist_general_theme(path: &Path, theme: &str) -> anyhow::Result<ThemePe
     }
 
     anyhow::bail!("config changed repeatedly while saving theme")
+}
+
+/// Persist the user-only delegation policy without changing unrelated config.
+/// `None` removes the key; an empty slice writes an explicit deny-all policy.
+pub fn persist_subagent_models(
+    path: &Path,
+    models: Option<&[String]>,
+) -> anyhow::Result<ThemePersistOutcome> {
+    use toml_edit::{DocumentMut, Item, Table, Value};
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("config path has no parent: {}", path.display()))?;
+    std::fs::create_dir_all(parent)?;
+    for _ in 0..3 {
+        let source = read_config_file(path)?.unwrap_or_default();
+        merge_file(FileConfig::default(), &source, path, Layer::User)?;
+        let mut document = source
+            .parse::<DocumentMut>()
+            .context("parsing config for subagent model update")?;
+        if models.is_some() && !document.contains_key("subagents") {
+            document.insert("subagents", Item::Table(Table::new()));
+        }
+        if let Some(item) = document.get_mut("subagents") {
+            let table = item
+                .as_table_like_mut()
+                .ok_or_else(|| anyhow::anyhow!("subagents config must be a table"))?;
+            match models {
+                Some(models) => {
+                    let array: toml_edit::Array = models.iter().map(String::as_str).collect();
+                    table.insert("allowed_models", Item::Value(Value::Array(array)));
+                }
+                None => {
+                    table.remove("allowed_models");
+                }
+            }
+        }
+        let mut updated = document.to_string();
+        if source.contains("\r\n") && !source.replace("\r\n", "").contains('\n') {
+            updated = updated.replace("\r\n", "\n").replace('\n', "\r\n");
+        }
+        let matches = |text: &str| -> bool {
+            merge_file(FileConfig::default(), text, path, Layer::User).is_ok_and(|parsed| {
+                parsed
+                    .subagents
+                    .and_then(|subagents| subagents.allowed_models)
+                    .as_deref()
+                    == models
+            })
+        };
+        anyhow::ensure!(
+            matches(&updated),
+            "subagent model update did not produce the requested value"
+        );
+        if read_config_file(path)?.unwrap_or_default() != source {
+            continue;
+        }
+        match crate::atomic_file::replace(
+            path,
+            updated.as_bytes(),
+            crate::atomic_file::Mode::Preserve,
+        ) {
+            Ok(()) => return Ok(ThemePersistOutcome::Saved),
+            Err(error) if read_config_file(path)?.is_some_and(|text| matches(&text)) => {
+                return Ok(ThemePersistOutcome::DurabilityUncertain(error.to_string()));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("persisting subagent models in {}", path.display()));
+            }
+        }
+    }
+    anyhow::bail!("config changed repeatedly while saving subagent models")
 }
 
 fn persisted_general_theme(path: &Path) -> Option<String> {
