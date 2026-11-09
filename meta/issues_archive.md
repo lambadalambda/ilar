@@ -1,5 +1,7 @@
 # Completed issues
 
+- [x] [Allowed subagent models](issues/allowed-subagent-models.md)
+
 ## Milestone 1 — Lean core
 
 - [x] [Session model + JSONL persistence + resume](issues/session-jsonl.md)

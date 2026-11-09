@@ -135,7 +135,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Review follow-ups
 
-- [ ] [Allowed subagent models](issues/allowed-subagent-models.md)
 
 - [ ] [Memory follow-ups from the component review](issues/memory-follow-ups-from-the-component-review.md)
 - [ ] [Serialize shared memory writes](issues/serialize-shared-memory-writes.md)

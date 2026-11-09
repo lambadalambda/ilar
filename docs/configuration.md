@@ -60,6 +60,7 @@ as a `{"type":"notice"}` event under `ilar exec --json`.
 | `cache_compact.ttl_secs.<provider>` | `openai` 1800, others 300 | The cache window assumed per provider prefix, in seconds. |
 | `subagents.max_concurrent` | `10` | Maximum concurrent subagents; must be at least 1. |
 | `subagents.max_depth` | `3` | Maximum nested subagent depth; must be at least 1. |
+| `subagents.allowed_models` | Same as parent | Exact list of permitted subagent model IDs. Omit to allow only the parent's current model; `[]` blocks all subagent starts. User-scoped. See [Allowed subagent models](#allowed-subagent-models). |
 | `subagents.background_tool_timeout_ms` | `600000` | Background tool timeout in milliseconds; must be at least 1. |
 | `gateway.*` | — | The assistant gateway's settings (`ilar-gateway`); parsed by that crate. User-scoped. |
 | `channels.<name>.*` | — | One messaging channel the gateway listens on. User-scoped. |
@@ -93,6 +94,33 @@ through every directory they were launched from.
 else — no `ilar.toml` is parsed and no endpoint is contacted — so a config
 file that fails to parse never stands between you and the credential you
 came to fix.
+
+### Allowed subagent models
+
+Open the model picker with `F2` or `Ctrl+X`, then `M`. Each row has
+`[S]` if that model is allowed for subagents. `Ctrl+A` toggles the selected
+row without changing the main agent's model. `Ctrl+R` restores the default:
+only the immediate parent's current model is allowed, even after a model switch.
+`Enter` still selects the main model and its reasoning level.
+
+The first toggle changes the default into an explicit list. Only listed
+models are then allowed; the parent's model is not automatically added.
+Changes are saved to the user `ilar.toml` and apply to new starts and resumes
+in the current session. Already-running subagents can finish. Other running
+ilar processes must restart to read the change. Project settings cannot
+change this restriction.
+
+For example:
+
+```toml
+[subagents]
+allowed_models = ["openai/gpt-4.1", "zai/glm-4.7"]
+```
+
+Use `allowed_models = []` to block all subagent starts. Remove the setting
+to restore the same-as-parent default. Agent definitions and explicit task
+model overrides cannot bypass the restriction. A resumed subagent keeps its
+saved model, so its resume is refused if that model is no longer allowed.
 
 ### The stall watchdog
 

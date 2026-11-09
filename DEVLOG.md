@@ -1,5 +1,22 @@
 # DEVLOG
 
+## 2026-11-08 — Subagent models need permission
+
+Subagents now default to the immediate parent's current model. An explicit
+user-only `subagents.allowed_models` list replaces that default; an empty
+list blocks starts. Project configuration cannot widen the restriction.
+The core checks the resolved model for starts and resumes, including agent
+model defaults and notification-driven work. Existing running agents can finish.
+
+The model picker marks allowed models with `[S]`. Ctrl+A toggles a row;
+Ctrl+R restores the dynamic default. Saving happens before the live policy
+changes. Session switches carry the saved policy into the next runtime;
+review caught that copying it only to the current spawner would lose it.
+
+Verification: picker regression tests first failed before implementation.
+The full workspace tests with all features, Clippy with warnings denied,
+and formatting checks pass on tenco. Independent core and UI reviews are complete.
+
 ## 2026-11-08 — Enter cannot outrun clipboard image processing
 
 Clipboard image workers now belong to the app's draft. Enter keeps the

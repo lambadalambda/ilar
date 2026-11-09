@@ -2958,6 +2958,7 @@ pub(crate) struct ModelPicker {
     /// header named the model and not the level, so a picker opened to
     /// change the level could not say which one it was changing from.
     active_variant: Option<String>,
+    pub(crate) allowed_subagent_models: Option<Vec<String>>,
     query: String,
     pub(crate) nav: ListNav,
     pub(crate) error: Option<String>,
@@ -2977,10 +2978,34 @@ impl ModelPicker {
             models,
             active_model: active_model.to_string(),
             active_variant: active_variant.map(str::to_string),
+            allowed_subagent_models: None,
             query: String::new(),
             nav: ListNav { selected },
             error: None,
         }
+    }
+
+    fn subagent_model_allowed(&self, model: &str) -> bool {
+        self.allowed_subagent_models.as_ref().map_or_else(
+            || model == self.active_model,
+            |allowed| allowed.iter().any(|id| id == model),
+        )
+    }
+
+    /// Toggle the selected filtered row. The first edit converts the
+    /// dynamic same-as-parent default into an explicit list.
+    pub(crate) fn toggled_subagent_models(&self) -> Option<Vec<String>> {
+        let selected = self.filtered_models().get(self.nav.selected)?.full_id();
+        let mut allowed = self
+            .allowed_subagent_models
+            .clone()
+            .unwrap_or_else(|| vec![self.active_model.clone()]);
+        if allowed.contains(&selected) {
+            allowed.retain(|id| id != &selected);
+        } else {
+            allowed.push(selected);
+        }
+        Some(allowed)
     }
 
     fn filtered_models(&self) -> Vec<&'static ilar::model::ModelInfo> {
@@ -3837,9 +3862,9 @@ pub(crate) fn render_theme_picker(frame: &mut Frame, picker: &ThemePicker) -> Mo
 pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> ModalHit {
     let area = centered_rect(frame.area(), 78, 20);
     let footer = if area.width < 44 {
-        " Enter select · Esc close "
+        " ^A allow · ^R reset · Enter · Esc "
     } else {
-        " ↑↓ move · Enter select · Esc close "
+        " ↑↓ · Enter select · Ctrl+A allow · Ctrl+R reset · Esc close "
     };
     let Some(inner) = modal_frame(frame, area, " models ", theme::PRIMARY, footer) else {
         return ModalHit::default();
@@ -3909,6 +3934,14 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
             );
         }
     }
+    if inner.height >= 7 {
+        let policy = if picker.allowed_subagent_models.is_none() {
+            "[S] allowed for subagents: same as parent"
+        } else {
+            "[S] allowed for subagents: explicit list"
+        };
+        body.push(muted_line(policy), None);
+    }
     let width = inner.width as usize;
     let row_count = inner.height.saturating_sub(body.line_count() as u16) as usize;
     if models.is_empty() && row_count > 0 {
@@ -3924,7 +3957,12 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
                 let model = models[index];
                 let full_id = model.full_id();
                 let active = full_id == picker.active_model;
-                let marker = choice_marker(is_selected, active);
+                let permission = if picker.subagent_model_allowed(&full_id) {
+                    "[S]"
+                } else {
+                    "[ ]"
+                };
+                let marker = format!("{} {permission}", choice_marker(is_selected, active));
                 // The fields a choice is actually made on, which the
                 // row named none of: what it costs, whether it takes
                 // pictures, and whether Enter opens a second picker
@@ -3959,7 +3997,7 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
                     // A column wider than `marked_row` reserves: the
                     // context number must not touch the border.
                     let name_width = width
-                        .saturating_sub(UnicodeWidthStr::width(marker))
+                        .saturating_sub(UnicodeWidthStr::width(marker.as_str()))
                         .saturating_sub(UnicodeWidthStr::width(suffix.as_str()))
                         .saturating_sub(2);
                     format!(
@@ -4419,6 +4457,44 @@ mod tests {
         assert_eq!(palette_window(6, 5, 0), (0, 3));
         assert_eq!(palette_window(6, 5, 5), (3, 3));
         assert_eq!(palette_window(6, 1, 3), (3, 1));
+    }
+
+    #[test]
+    fn model_picker_marks_and_toggles_allowed_subagent_models() {
+        let models = vec![
+            ilar::model::find("openai/gpt-4.1").unwrap(),
+            ilar::model::find("zai/glm-4.7").unwrap(),
+        ];
+        let mut picker = ModelPicker::new(models, "openai/gpt-4.1", None);
+        assert!(picker.subagent_model_allowed("openai/gpt-4.1"));
+        assert!(!picker.subagent_model_allowed("zai/glm-4.7"));
+
+        picker.set_query("glm-4.7");
+        let allowed = picker.toggled_subagent_models().unwrap();
+        assert_eq!(allowed, ["openai/gpt-4.1", "zai/glm-4.7"]);
+        picker.allowed_subagent_models = Some(allowed);
+        assert!(picker.subagent_model_allowed("zai/glm-4.7"));
+        assert_eq!(
+            picker.toggled_subagent_models().unwrap(),
+            ["openai/gpt-4.1"]
+        );
+        picker.allowed_subagent_models = Some(Vec::new());
+        assert!(!picker.subagent_model_allowed("openai/gpt-4.1"));
+        picker.set_query("no such model");
+        assert!(picker.toggled_subagent_models().is_none());
+    }
+
+    #[test]
+    fn model_picker_renders_subagent_permissions_and_controls() {
+        let picker = ModelPicker::new(
+            vec![ilar::model::find("openai/gpt-4.1").unwrap()],
+            "openai/gpt-4.1",
+            None,
+        );
+        let (screen, _) = draw_modal(160, 40, |frame| render_model_picker(frame, &picker));
+        assert!(screen.contains("[S]"), "{screen}");
+        assert!(screen.contains("Ctrl+A"), "{screen}");
+        assert!(screen.contains("Ctrl+R"), "{screen}");
     }
 
     #[test]

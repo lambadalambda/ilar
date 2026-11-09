@@ -1216,6 +1216,31 @@ fn stop_session_scan(
     *preview = None;
 }
 
+/// Do not change the live policy if saving failed. A successful rename
+/// with a failed directory sync still changed the file, so apply it too.
+fn save_subagent_model_selection(
+    picker: &mut ModelPicker,
+    allowed: Option<Vec<String>>,
+    persist: impl FnOnce(Option<&[String]>) -> Result<ilar::config::ThemePersistOutcome>,
+) -> bool {
+    match persist(allowed.as_deref()) {
+        Ok(outcome) => {
+            picker.allowed_subagent_models = allowed;
+            picker.error = match outcome {
+                ilar::config::ThemePersistOutcome::Saved => None,
+                ilar::config::ThemePersistOutcome::DurabilityUncertain(error) => Some(format!(
+                    "permissions saved, but durability is uncertain: {error}"
+                )),
+            };
+            true
+        }
+        Err(error) => {
+            picker.error = Some(format!("cannot save subagent models: {error}"));
+            false
+        }
+    }
+}
+
 /// Everything a session switch must let go of: the background spawner,
 /// and the turns that run beside the conversation — the aside and the
 /// topic naming. All three are about the session being left, all three
@@ -1655,7 +1680,7 @@ async fn main() -> Result<()> {
         .model
         .clone()
         .unwrap_or_else(|| config.general.model.clone());
-    let config = unlock_secrets(config, &opening_model)?;
+    let mut config = unlock_secrets(config, &opening_model)?;
     let mut active_theme = configured_theme;
     // Settings that parsed but were not honoured. Shown once, on the
     // first session: they are a property of the config, not the session.
@@ -1940,7 +1965,7 @@ async fn main() -> Result<()> {
             &system_prompt,
             &registry,
             tool_ctx,
-            spawner,
+            spawner.clone(),
             adoption_handle,
             notifications,
             subagent_activity,
@@ -1954,6 +1979,8 @@ async fn main() -> Result<()> {
             restore_handle,
         )
         .await?;
+        // The next session is rebuilt from this config, not from disk.
+        config.subagents.allowed_models = spawner.allowed_models();
         active_theme = app.theme;
         // What this run's keystrokes proved about the terminal belongs
         // to the terminal, so it outlives the session being left.
@@ -3807,6 +3834,9 @@ async fn run_app(
     apply_terminal_title(app.topic.as_deref());
 
     loop {
+        if let Some(picker) = app.model_picker.as_mut() {
+            picker.allowed_subagent_models = spawner.allowed_models();
+        }
         // A failed/cancelled resume may leave the persisted question pending.
         // Reopen it instead of stranding the session behind a rejected new turn.
         if std::mem::take(&mut recheck_pending_question) {
@@ -5232,6 +5262,28 @@ async fn run_app(
                         }
                         Modal::ModelPicker => {
                             let picker = app.model_picker.as_mut().unwrap();
+                            if control && matches!(code, KeyCode::Char('a' | 'r')) {
+                                let allowed = if code == KeyCode::Char('r') {
+                                    None
+                                } else if let Some(allowed) = picker.toggled_subagent_models() {
+                                    Some(allowed)
+                                } else {
+                                    continue;
+                                };
+                                if save_subagent_model_selection(
+                                    picker,
+                                    allowed.clone(),
+                                    |models| {
+                                        ilar::config::persist_subagent_models(
+                                            user_config_path,
+                                            models,
+                                        )
+                                    },
+                                ) {
+                                    spawner.set_allowed_models(allowed);
+                                }
+                                continue;
+                            }
                             match picker.handle_key(code, control) {
                                 PickerAction::Stay => {}
                                 PickerAction::Dismiss => {
@@ -5897,6 +5949,39 @@ async fn run_app(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn subagent_model_selection_changes_only_after_a_successful_save() {
+        use ilar::config::ThemePersistOutcome;
+        let mut picker = super::ModelPicker::new(Vec::new(), "openai/gpt-4.1", None);
+        let allowed = Some(vec!["zai/glm-4.7".to_string()]);
+        assert!(!super::save_subagent_model_selection(
+            &mut picker,
+            allowed.clone(),
+            |_| anyhow::bail!("read-only config"),
+        ));
+        assert_eq!(picker.allowed_subagent_models, None);
+        assert!(picker.error.as_ref().unwrap().contains("read-only config"));
+        assert!(super::save_subagent_model_selection(
+            &mut picker,
+            allowed.clone(),
+            |models| {
+                assert_eq!(models, allowed.as_deref());
+                Ok(ThemePersistOutcome::Saved)
+            },
+        ));
+        assert_eq!(picker.allowed_subagent_models, allowed);
+        assert!(picker.error.is_none());
+        assert!(super::save_subagent_model_selection(
+            &mut picker,
+            None,
+            |_| Ok(ThemePersistOutcome::DurabilityUncertain(
+                "sync failed".into()
+            )),
+        ));
+        assert_eq!(picker.allowed_subagent_models, None);
+        assert!(picker.error.as_ref().unwrap().contains("sync failed"));
+    }
 
     /// A run of resizes collapses to its last; whatever follows the run
     /// is handed back rather than swallowed, and a non-resize first
