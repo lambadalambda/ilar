@@ -135,6 +135,8 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Review follow-ups
 
+- [ ] [Fork session history and permissions from one snapshot](issues/fork-history-and-policy-snapshot.md)
+
 - [ ] [Memory follow-ups from the component review](issues/memory-follow-ups-from-the-component-review.md)
 - [ ] [Serialize shared memory writes](issues/serialize-shared-memory-writes.md)
 - [ ] [Memory off stops review writes](issues/memory-off-stops-review-writes.md)
