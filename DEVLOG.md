@@ -1,5 +1,24 @@
 # DEVLOG
 
+## Session permissions are not global preferences
+
+The allowed-subagent-model menu now saves session state instead of editing
+`ilar.toml`. Each root session owns its permissions. Resuming restores them;
+new sessions use the same-as-parent default. Children use their root session's
+policy, while the default still resolves against each immediate parent's model.
+This replaces the earlier global allowlist design, which could not express
+allowing a model in one session but denying it in another.
+
+Policy is replayed from session events and retained in checkpoints. Forks
+seed inherited permissions before retained turns, so a later rewind or fork
+cannot drop an earlier deny-all policy. Tests reproduced that bug before the fix.
+The full workspace tests, Clippy with warnings denied, and formatting checks
+pass on tenco. Core and picker changes received independent reviews.
+
+A review also noted a rare core-API race if one process forks a compacted
+session while another rewinds it between the two source reads. That concurrency
+case is not changed here; normal UI behavior was not confirmed to expose it.
+
 ## 2026-11-08 — Subagent models need permission
 
 Subagents now default to the immediate parent's current model. An explicit

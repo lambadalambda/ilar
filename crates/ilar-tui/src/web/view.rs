@@ -241,6 +241,14 @@ pub(crate) fn project_event_with(
             "id": id,
             "ts": ts,
         }),
+        SessionEvent::SubagentModelsChange {
+            id, allowed_models, ..
+        } => json!({
+            "type": "subagent_models_change",
+            "id": id,
+            "allowed_models": allowed_models,
+            "ts": ts,
+        }),
         SessionEvent::ModelChange {
             id, model, variant, ..
         } => json!({

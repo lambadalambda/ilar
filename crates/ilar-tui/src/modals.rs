@@ -2959,6 +2959,8 @@ pub(crate) struct ModelPicker {
     /// change the level could not say which one it was changing from.
     active_variant: Option<String>,
     pub(crate) allowed_subagent_models: Option<Vec<String>>,
+    pub(crate) subagent_models_loaded: bool,
+    subagent_models_error: Option<String>,
     query: String,
     pub(crate) nav: ListNav,
     pub(crate) error: Option<String>,
@@ -2979,9 +2981,25 @@ impl ModelPicker {
             active_model: active_model.to_string(),
             active_variant: active_variant.map(str::to_string),
             allowed_subagent_models: None,
+            subagent_models_loaded: false,
+            subagent_models_error: None,
             query: String::new(),
             nav: ListNav { selected },
             error: None,
+        }
+    }
+
+    pub(crate) fn load_subagent_models(&mut self, result: anyhow::Result<Option<Vec<String>>>) {
+        match result {
+            Ok(allowed) => {
+                self.allowed_subagent_models = allowed;
+                self.subagent_models_loaded = true;
+                self.subagent_models_error = None;
+            }
+            Err(error) => {
+                self.subagent_models_loaded = false;
+                self.subagent_models_error = Some(format!("cannot load subagent models: {error}"));
+            }
         }
     }
 
@@ -2995,6 +3013,9 @@ impl ModelPicker {
     /// Toggle the selected filtered row. The first edit converts the
     /// dynamic same-as-parent default into an explicit list.
     pub(crate) fn toggled_subagent_models(&self) -> Option<Vec<String>> {
+        if !self.subagent_models_loaded {
+            return None;
+        }
         let selected = self.filtered_models().get(self.nav.selected)?.full_id();
         let mut allowed = self
             .allowed_subagent_models
@@ -3904,7 +3925,11 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
         Span::styled(count, Style::default().fg(MUTED)),
     ]);
     let mut body = ModalRows::default();
-    if let Some(error) = &picker.error {
+    if let Some(error) = picker
+        .error
+        .as_ref()
+        .or(picker.subagent_models_error.as_ref())
+    {
         // On a squeezed terminal the error takes the search line's row.
         if inner.height >= 3 {
             body.push(search_line, None);
@@ -3935,10 +3960,12 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
         }
     }
     if inner.height >= 7 {
-        let policy = if picker.allowed_subagent_models.is_none() {
-            "[S] allowed for subagents: same as parent"
+        let policy = if picker.subagent_models_error.is_some() {
+            "subagent permissions unavailable; reopen or reset"
+        } else if picker.allowed_subagent_models.is_none() {
+            "[S] session subagents: same as parent"
         } else {
-            "[S] allowed for subagents: explicit list"
+            "[S] session subagents: explicit list"
         };
         body.push(muted_line(policy), None);
     }
@@ -3957,7 +3984,9 @@ pub(crate) fn render_model_picker(frame: &mut Frame, picker: &ModelPicker) -> Mo
                 let model = models[index];
                 let full_id = model.full_id();
                 let active = full_id == picker.active_model;
-                let permission = if picker.subagent_model_allowed(&full_id) {
+                let permission = if picker.subagent_models_error.is_some() {
+                    "[?]"
+                } else if picker.subagent_model_allowed(&full_id) {
                     "[S]"
                 } else {
                     "[ ]"
@@ -4460,12 +4489,35 @@ mod tests {
     }
 
     #[test]
+    fn model_picker_does_not_toggle_an_unloaded_policy() {
+        let mut picker = ModelPicker::new(
+            vec![ilar::model::find("openai/gpt-4.1").unwrap()],
+            "openai/gpt-4.1",
+            None,
+        );
+        assert!(picker.toggled_subagent_models().is_none());
+        picker.load_subagent_models(Err(anyhow::anyhow!("read failed")));
+        assert!(picker.toggled_subagent_models().is_none());
+        assert!(picker.subagent_models_error.is_some());
+        picker.error = Some("switch failed".into());
+        picker.load_subagent_models(Ok(Some(vec![])));
+        assert!(picker.subagent_models_loaded);
+        assert!(picker.subagent_models_error.is_none());
+        assert_eq!(picker.error.as_deref(), Some("switch failed"));
+        assert_eq!(
+            picker.toggled_subagent_models().unwrap(),
+            ["openai/gpt-4.1"]
+        );
+    }
+
+    #[test]
     fn model_picker_marks_and_toggles_allowed_subagent_models() {
         let models = vec![
             ilar::model::find("openai/gpt-4.1").unwrap(),
             ilar::model::find("zai/glm-4.7").unwrap(),
         ];
         let mut picker = ModelPicker::new(models, "openai/gpt-4.1", None);
+        picker.load_subagent_models(Ok(None));
         assert!(picker.subagent_model_allowed("openai/gpt-4.1"));
         assert!(!picker.subagent_model_allowed("zai/glm-4.7"));
 

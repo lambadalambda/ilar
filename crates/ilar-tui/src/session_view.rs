@@ -780,7 +780,8 @@ fn restored_session_invocation_view_in(
             ilar::session::SessionEvent::MemoryRecall { ids, .. } => {
                 lines.push(Line_::System(memory_recall_display(ids.len())));
             }
-            ilar::session::SessionEvent::Compaction { .. } => {}
+            ilar::session::SessionEvent::SubagentModelsChange { .. }
+            | ilar::session::SessionEvent::Compaction { .. } => {}
             // The root's footer, as the live view drew it — less what
             // was still running then, which the log does not keep. A
             // task's turns stay unmarked inside its row.
