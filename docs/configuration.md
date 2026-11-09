@@ -287,22 +287,32 @@ model = "opencode-go/glm-5.3"
 # api_key from ILAR_OPENCODE_API_KEY by default; can be set here.
 ```
 
-The gateway fronts each model on exactly one wire: the GPT, Grok and Muse Spark
-families on the OpenAI Responses API, everything else on chat-completions. The
-catalog records which and ilar routes accordingly, so a model id is all you
-choose. The Qwen and MiniMax rows the docs file under the Anthropic Messages
-wire answer on chat-completions too and are offered there; the Claude and
-Gemini families are not, since ilar speaks neither of their wires.
+The catalog records each model's wire and ilar routes accordingly, so a
+model id is all you choose. GPT, Grok, Muse, and Crouton use the OpenAI
+Responses API; the other catalog rows use chat-completions. The Qwen and
+MiniMax rows the docs file under the Anthropic Messages wire answer on
+chat-completions too and are offered there; the Claude and Gemini families
+are not, since ilar speaks neither of their wires.
 
 Reasoning levels are per model, as opencode publishes them (models.dev
 `reasoning_options`): the GPT rows keep their `openai/` windows and ladders,
 Muse Spark and Grok have their own, and on the chat wire GLM, DeepSeek, Kimi,
-Qwen and Hy each carry the rungs they accept. `general.reasoning = "high"`
-reaches the Responses wire as `reasoning.effort` and the chat wire as
-`reasoning_effort`; a level the model does not list is refused. Prices are the ones the docs
-publish (the lower tier where a model has two, off-peak for DeepSeek); on Go
-that figure is what the usage caps count, so the meter's dollars are the
-subscription's dollars.
+Qwen, Hy, and Mistral each carry the rungs they accept. Mistral Large 4 uses
+`low`, `medium`, and `high`: live requests and the AI SDK documentation override
+the stale `none/high` metadata. `general.reasoning = "high"` reaches the
+Responses wire as `reasoning.effort` and the chat wire as `reasoning_effort`;
+a level the model does not list is refused.
+
+Prices are the current published base text rates, including cache reads and
+writes. Cost estimates do not apply long-context tiers or scheduled discounts.
+For example, Grok 4.7 uses $2 input / $6 output per million tokens in the catalog;
+the provider charges $4 / $12 above 200K context. Go uses published list prices
+to count subscription usage, so local estimates can differ from its meter.
+
+A listed free model can still be blocked by account limits or regional rules.
+Zen Crouton Alpha Free and Nemotron 3.5 Super VL Free returned an account-level
+free-usage limit during the catalog check; Go Crouton completed a tool call.
+Zen Qwen3.8 Max returned an access-disabled error for the test key.
 
 ### Thinking on the wire
 

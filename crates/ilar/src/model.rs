@@ -37,7 +37,9 @@ pub struct ModelVariant {
     pub name: &'static str,
 }
 
-/// USD per million tokens, from the models.dev snapshot above.
+/// USD per million tokens. OpenCode rates use the live gateway catalog;
+/// other providers use the models.dev snapshot above. Base text rates only:
+/// context overrides and scheduled multipliers are not applied to aggregate usage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelPricing {
     pub input: f64,
@@ -78,6 +80,8 @@ macro_rules! pricing {
 /// are intentionally
 /// absent — their effective token price depends on the plan, so the UI
 /// shows tokens without dollars.
+// OpenCode base text rates refreshed 2026-11-09. Rows absent from the
+// live catalogs retain their previous rates; context/time tiers are not applied.
 static PRICING: &[(&str, &str, ModelPricing)] = &[
     // GPT-6.1 Terra (2026-10-26): half of 5.6 Terra's input. Base tier
     // only; not on Zen yet.
@@ -250,14 +254,18 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     (
         "opencode",
         "deepseek-v4-pro",
-        pricing!(0.66, 1.98, Some(0.022), None),
+        pricing!(1.74, 3.48, Some(0.145), None),
     ),
     (
         "opencode",
         "minimax-m3",
         pricing!(0.3, 1.2, Some(0.06), None),
     ),
-    ("opencode", "kimi-k3", pricing!(3.0, 15.0, Some(0.3), None)),
+    (
+        "opencode",
+        "kimi-k3",
+        pricing!(3.0, 15.0, Some(0.3), Some(3.0)),
+    ),
     (
         "opencode",
         "kimi-k2.7-code",
@@ -266,18 +274,18 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     (
         "opencode",
         "big-pickle",
-        pricing!(0.0, 0.0, Some(0.0), None),
+        pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
     ),
     (
         "opencode",
         "nemotron-3.5-lightning-free",
         pricing!(0.0, 0.0, Some(0.0), None),
     ),
-    // Zen's own price since 2026-07-10, not the openai twin's.
+    // Zen's live base price; keep provider rates separate from OpenAI's.
     (
         "opencode",
         "gpt-5.6-terra",
-        pricing!(2.5, 15.0, Some(0.25), Some(3.125)),
+        pricing!(2.0, 12.0, Some(0.2), Some(2.5)),
     ),
     ("opencode", "gpt-5.5", pricing!(5.0, 30.0, Some(0.5), None)),
     (
@@ -300,8 +308,8 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "gpt-5.3-codex",
         pricing!(1.75, 14.0, Some(0.175), None),
     ),
-    // The 2026-09-24 rows, at models.dev's base tier.
-    ("opencode", "grok-4.7", pricing!(1.4, 4.2, Some(0.35), None)),
+    // The 2026-09-24 rows, refreshed to the live gateway base rates.
+    ("opencode", "grok-4.7", pricing!(2.0, 6.0, Some(0.5), None)),
     (
         "opencode",
         "muse-spark-1.3",
@@ -346,7 +354,7 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
     (
         "opencode-go",
         "kimi-k3",
-        pricing!(3.0, 15.0, Some(0.3), None),
+        pricing!(3.0, 15.0, Some(0.3), Some(3.0)),
     ),
     (
         "opencode-go",
@@ -482,6 +490,66 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "opencode-go",
         "qwen3.7-plus",
         pricing!(0.4, 1.6, Some(0.04), Some(0.5)),
+    ),
+    (
+        "opencode",
+        "muse-wonder-1.0",
+        pricing!(4.0, 20.0, Some(0.2), None),
+    ),
+    (
+        "opencode",
+        "mistral-large-4",
+        pricing!(0.68, 2.09, Some(0.07), None),
+    ),
+    (
+        "opencode",
+        "qwen3.8-max",
+        pricing!(2.0, 6.0, Some(0.25), Some(2.5)),
+    ),
+    (
+        "opencode",
+        "crouton-alpha-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode",
+        "iceman-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode",
+        "inkling-2-small-free",
+        pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
+    ),
+    (
+        "opencode",
+        "nemotron-3.5-super-vl-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode-go",
+        "kimi-k3.1-pro",
+        pricing!(2.0, 10.0, Some(0.2), Some(2.0)),
+    ),
+    (
+        "opencode-go",
+        "minimax-m3.1-flash",
+        pricing!(0.15, 0.6, Some(0.015), None),
+    ),
+    (
+        "opencode-go",
+        "hy4",
+        pricing!(0.834, 2.501, Some(0.042), None),
+    ),
+    (
+        "opencode-go",
+        "crouton-alpha-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
+    (
+        "opencode-go",
+        "iceman-contributor-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
     ),
 ];
 
@@ -642,6 +710,84 @@ const EFFORT_LOW_TO_XHIGH: &[ModelVariant] = &[
     },
 ];
 const EFFORT_MINIMAL_TO_XHIGH: &[ModelVariant] = &[
+    ModelVariant {
+        id: "minimal",
+        name: "Minimal",
+    },
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "xhigh",
+        name: "Extra high",
+    },
+];
+const EFFORT_MINIMAL_TO_MAX: &[ModelVariant] = &[
+    ModelVariant {
+        id: "minimal",
+        name: "Minimal",
+    },
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "xhigh",
+        name: "Extra high",
+    },
+    ModelVariant {
+        id: "max",
+        name: "Max",
+    },
+];
+const EFFORT_NONE_MINIMAL_TO_MAX: &[ModelVariant] = &[
+    ModelVariant {
+        id: "none",
+        name: "None",
+    },
+    ModelVariant {
+        id: "minimal",
+        name: "Minimal",
+    },
+    ModelVariant {
+        id: "low",
+        name: "Low",
+    },
+    ModelVariant {
+        id: "medium",
+        name: "Medium",
+    },
+    ModelVariant {
+        id: "high",
+        name: "High",
+    },
+    ModelVariant {
+        id: "max",
+        name: "Max",
+    },
+];
+const EFFORT_NONE_MINIMAL_TO_XHIGH: &[ModelVariant] = &[
+    ModelVariant {
+        id: "none",
+        name: "None",
+    },
     ModelVariant {
         id: "minimal",
         name: "Minimal",
@@ -945,6 +1091,128 @@ macro_rules! model {
 // the docs file under the Messages wire answer on chat-completions and
 // are cataloged there; the Claude and Gemini families do not.
 static CATALOG: &[ModelInfo] = &[
+    // Live OpenCode additions, cross-checked with models.dev (2026-11-09).
+    // Wires come from each record, not model families. New rows retain
+    // published output caps; input defaults to context minus a full reply.
+    // Muse Wonder and Crouton emit commentary phases in live Go/Zen probes;
+    // Zen Crouton uses the same model (its probe hit the account free limit).
+    model!(
+        "opencode",
+        "muse-wonder-1.0",
+        "Muse Wonder",
+        1_048_576,
+        131_072,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(EFFORT_MINIMAL_TO_MAX)
+    .message_phase(),
+    // Live probes reject `none`; AI SDK docs specify low/medium/high and
+    // always-on reasoning, overriding the stale models.dev none/high ladder.
+    // https://ai-sdk.dev/providers/ai-sdk-providers/mistral
+    model!(
+        "opencode",
+        "mistral-large-4",
+        "Mistral Large 4",
+        524_288,
+        262_144,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(EFFORT_LOW_TO_HIGH),
+    model!(
+        "opencode",
+        "qwen3.8-max",
+        "Qwen3.8 Max",
+        262_144,
+        131_072,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(EFFORT_LOW_MEDIUM_XHIGH),
+    model!(
+        "opencode",
+        "crouton-alpha-free",
+        "Crouton Alpha Free",
+        1_048_576,
+        270_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(EFFORT_MINIMAL_TO_MAX)
+    .message_phase(),
+    model!(
+        "opencode",
+        "iceman-free",
+        "Iceman Free",
+        262_144,
+        131_072,
+        OpenCodeChat
+    ),
+    model!(
+        "opencode",
+        "inkling-2-small-free",
+        "Inkling 2 Small Free",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(EFFORT_NONE_MINIMAL_TO_MAX),
+    model!(
+        "opencode",
+        "nemotron-3.5-super-vl-free",
+        "Nemotron 3.5 Super VL Free",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .input(1_048_576)
+    .vision()
+    .effort(EFFORT_NONE_MINIMAL_TO_XHIGH),
+    model!(
+        "opencode-go",
+        "kimi-k3.1-pro",
+        "Kimi K3.1 Pro",
+        1_048_576,
+        131_072,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(ZAI_EFFORT_VARIANTS),
+    model!(
+        "opencode-go",
+        "minimax-m3.1-flash",
+        "MiniMax M3.1 Flash",
+        1_000_000,
+        512_000,
+        OpenCodeChat
+    )
+    .vision()
+    .effort(EFFORT_LOW_TO_MAX),
+    model!("opencode-go", "hy4", "Hy4", 1_048_576, 65_536, OpenCodeChat)
+        .input(983_010)
+        .vision()
+        .effort(EFFORT_NONE_HIGH),
+    model!(
+        "opencode-go",
+        "crouton-alpha-free",
+        "Crouton Alpha Free",
+        1_048_576,
+        270_000,
+        OpenCodeResponses
+    )
+    .vision()
+    .reasoning(EFFORT_MINIMAL_TO_MAX)
+    .message_phase(),
+    model!(
+        "opencode-go",
+        "iceman-contributor-free",
+        "Iceman Contributor Free",
+        262_144,
+        131_072,
+        OpenCodeChat
+    ),
     // GPT-6.1 Terra (2026-10-26). Codex's models.json gives it a 500k
     // window, but the API price doubles past 272k as for the other rows,
     // so the working window stays there. The ladder from none is
@@ -2135,6 +2403,449 @@ mod tests {
 
     use super::*;
 
+    /// Live gateway metadata, cross-checked against the full models.dev records.
+    #[test]
+    fn november_opencode_additions_match_the_published_records() {
+        use ModelAccess::{OpenCodeChat as Chat, OpenCodeResponses as Responses};
+        type ExpectedRow<'a> = (
+            &'a str,
+            &'a str,
+            u64,
+            u64,
+            u64,
+            bool,
+            ModelAccess,
+            &'a [&'a str],
+        );
+        let rows: &[ExpectedRow<'_>] = &[
+            (
+                "opencode/muse-wonder-1.0",
+                "Muse Wonder",
+                1_048_576,
+                917_504,
+                131_072,
+                true,
+                Responses,
+                &["minimal", "low", "medium", "high", "xhigh", "max"],
+            ),
+            (
+                "opencode/mistral-large-4",
+                "Mistral Large 4",
+                524_288,
+                262_144,
+                262_144,
+                true,
+                Chat,
+                &["low", "medium", "high"],
+            ),
+            (
+                "opencode/qwen3.8-max",
+                "Qwen3.8 Max",
+                262_144,
+                131_072,
+                131_072,
+                true,
+                Chat,
+                &["low", "medium", "xhigh"],
+            ),
+            (
+                "opencode/crouton-alpha-free",
+                "Crouton Alpha Free",
+                1_048_576,
+                778_576,
+                270_000,
+                true,
+                Responses,
+                &["minimal", "low", "medium", "high", "xhigh", "max"],
+            ),
+            (
+                "opencode/iceman-free",
+                "Iceman Free",
+                262_144,
+                131_072,
+                131_072,
+                false,
+                Chat,
+                &[],
+            ),
+            (
+                "opencode/inkling-2-small-free",
+                "Inkling 2 Small Free",
+                1_048_576,
+                917_504,
+                131_072,
+                true,
+                Chat,
+                &["none", "minimal", "low", "medium", "high", "max"],
+            ),
+            (
+                "opencode/nemotron-3.5-super-vl-free",
+                "Nemotron 3.5 Super VL Free",
+                1_048_576,
+                1_048_576,
+                131_072,
+                true,
+                Chat,
+                &["none", "minimal", "low", "medium", "high", "xhigh"],
+            ),
+            (
+                "opencode-go/kimi-k3.1-pro",
+                "Kimi K3.1 Pro",
+                1_048_576,
+                917_504,
+                131_072,
+                true,
+                Chat,
+                &["low", "high", "max"],
+            ),
+            (
+                "opencode-go/minimax-m3.1-flash",
+                "MiniMax M3.1 Flash",
+                1_000_000,
+                488_000,
+                512_000,
+                true,
+                Chat,
+                &["low", "medium", "high", "xhigh", "max"],
+            ),
+            (
+                "opencode-go/hy4",
+                "Hy4",
+                1_048_576,
+                983_010,
+                65_536,
+                true,
+                Chat,
+                &["none", "high"],
+            ),
+            (
+                "opencode-go/crouton-alpha-free",
+                "Crouton Alpha Free",
+                1_048_576,
+                778_576,
+                270_000,
+                true,
+                Responses,
+                &["minimal", "low", "medium", "high", "xhigh", "max"],
+            ),
+            (
+                "opencode-go/iceman-contributor-free",
+                "Iceman Contributor Free",
+                262_144,
+                131_072,
+                131_072,
+                false,
+                Chat,
+                &[],
+            ),
+        ];
+        assert_eq!(rows.len(), 12);
+        for &(id, name, context, input, output, vision, wire, efforts) in rows {
+            let row = find(id).unwrap_or_else(|| panic!("{id} is cataloged"));
+            assert_eq!(
+                CATALOG.iter().filter(|r| r.full_id() == id).count(),
+                1,
+                "{id}"
+            );
+            assert_eq!(row.name, name, "{id}");
+            assert_eq!(
+                (row.context_limit, row.input_limit, row.output_limit),
+                (context, input, output),
+                "{id}"
+            );
+            assert_eq!(compaction_limit(row), input, "{id}");
+            assert_eq!(row.vision, vision, "{id}");
+            assert_eq!(row.access, wire, "{id}");
+            assert_eq!(
+                row.variants().iter().map(|v| v.id).collect::<Vec<_>>(),
+                efforts,
+                "{id}"
+            );
+            assert_eq!(row.replays_thinking(), wire == Chat, "{id}");
+            // Responses phase support was checked separately with live probes.
+            assert_eq!(row.message_phase, wire == Responses, "{id}");
+            let cap_key = if wire == Responses {
+                "max_output_tokens"
+            } else {
+                "max_tokens"
+            };
+            assert_eq!(
+                with_output_cap(serde_json::Value::Null, id, Some(u64::MAX)),
+                serde_json::json!({cap_key: output}),
+                "{id}"
+            );
+            for effort in efforts {
+                let expected = if wire == Responses {
+                    serde_json::json!({"reasoning": {"effort": effort}})
+                } else {
+                    serde_json::json!({"reasoning_effort": effort})
+                };
+                assert_eq!(
+                    variant_options(id, Some(effort)).unwrap(),
+                    expected,
+                    "{id}/{effort}"
+                );
+            }
+            for effort in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+                assert_eq!(
+                    variant_options(id, Some(effort)).is_ok(),
+                    efforts.contains(&effort),
+                    "{id}/{effort}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn november_opencode_base_prices_include_all_cache_rates() {
+        let rows = [
+            (
+                "opencode/gpt-6.1-sol",
+                pricing!(2.0, 10.0, Some(0.1), Some(2.5)),
+            ),
+            (
+                "opencode/gpt-6-sol",
+                pricing!(2.0, 10.0, Some(0.2), Some(2.5)),
+            ),
+            (
+                "opencode/gpt-6-luna",
+                pricing!(0.1, 0.5, Some(0.01), Some(0.125)),
+            ),
+            (
+                "opencode/gpt-6-astra",
+                pricing!(10.0, 50.0, Some(1.0), Some(12.5)),
+            ),
+            (
+                "opencode/deepseek-v4-pro",
+                pricing!(1.74, 3.48, Some(0.145), None),
+            ),
+            ("opencode/minimax-m3", pricing!(0.3, 1.2, Some(0.06), None)),
+            (
+                "opencode/kimi-k3",
+                pricing!(3.0, 15.0, Some(0.3), Some(3.0)),
+            ),
+            (
+                "opencode/kimi-k2.7-code",
+                pricing!(0.95, 4.0, Some(0.19), None),
+            ),
+            (
+                "opencode/big-pickle",
+                pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
+            ),
+            (
+                "opencode/nemotron-3.5-lightning-free",
+                pricing!(0.0, 0.0, Some(0.0), None),
+            ),
+            (
+                "opencode/gpt-5.6-terra",
+                pricing!(2.0, 12.0, Some(0.2), Some(2.5)),
+            ),
+            ("opencode/gpt-5.5", pricing!(5.0, 30.0, Some(0.5), None)),
+            (
+                "opencode/gpt-5.5-pro",
+                pricing!(30.0, 180.0, Some(30.0), None),
+            ),
+            (
+                "opencode/gpt-5.4-mini",
+                pricing!(0.75, 4.5, Some(0.075), None),
+            ),
+            (
+                "opencode/gpt-5.4-nano",
+                pricing!(0.2, 1.25, Some(0.02), None),
+            ),
+            (
+                "opencode/gpt-5.3-codex",
+                pricing!(1.75, 14.0, Some(0.175), None),
+            ),
+            ("opencode/grok-4.7", pricing!(2.0, 6.0, Some(0.5), None)),
+            (
+                "opencode/muse-spark-1.3",
+                pricing!(1.25, 4.25, Some(0.15), None),
+            ),
+            (
+                "opencode/qwen3.8-flash",
+                pricing!(0.15, 0.47, Some(0.016), Some(0.2)),
+            ),
+            (
+                "opencode/deepseek-v4.1-flash",
+                pricing!(0.3, 1.2, Some(0.006), None),
+            ),
+            ("opencode/glm-5.3", pricing!(1.4, 4.4, Some(0.26), None)),
+            (
+                "opencode/glm-5.3-flash",
+                pricing!(0.15, 0.5, Some(0.03), None),
+            ),
+            (
+                "opencode/grok-build-0.1",
+                pricing!(1.0, 2.0, Some(0.2), None),
+            ),
+            (
+                "opencode-go/glm-5.3-flash",
+                pricing!(0.15, 0.5, Some(0.03), None),
+            ),
+            ("opencode-go/glm-5.3", pricing!(1.4, 4.4, Some(0.26), None)),
+            ("opencode-go/glm-5.2", pricing!(1.4, 4.4, Some(0.26), None)),
+            (
+                "opencode-go/kimi-k3",
+                pricing!(3.0, 15.0, Some(0.3), Some(3.0)),
+            ),
+            (
+                "opencode-go/kimi-k2.7-code",
+                pricing!(0.95, 4.0, Some(0.19), None),
+            ),
+            (
+                "opencode-go/longcat-2.0",
+                pricing!(0.3, 1.2, Some(0.006), None),
+            ),
+            (
+                "opencode-go/deepseek-v4-pro",
+                pricing!(0.66, 1.98, Some(0.022), None),
+            ),
+            (
+                "opencode-go/deepseek-v4-flash",
+                pricing!(0.22, 0.66, Some(0.007), None),
+            ),
+            (
+                "opencode-go/deepseek-v4-flash-vision-exp",
+                pricing!(0.22, 0.66, Some(0.007), None),
+            ),
+            (
+                "opencode-go/mimo-v2.5",
+                pricing!(0.14, 0.28, Some(0.0028), None),
+            ),
+            (
+                "opencode-go/mimo-v2.5-pro",
+                pricing!(0.435, 0.87, Some(0.003625), None),
+            ),
+            (
+                "opencode-go/hy4-preview",
+                pricing!(0.834, 2.501, Some(0.042), None),
+            ),
+            ("opencode-go/hy3", pricing!(0.14, 0.58, Some(0.035), None)),
+            (
+                "opencode-go/gpt-5.6-luna",
+                pricing!(0.2, 1.2, Some(0.02), Some(0.25)),
+            ),
+            ("opencode-go/grok-4.6", pricing!(2.0, 6.0, Some(0.5), None)),
+            (
+                "opencode-go/gpt-6-luna",
+                pricing!(0.1, 0.5, Some(0.01), Some(0.125)),
+            ),
+            ("opencode-go/grok-4.7", pricing!(2.0, 6.0, Some(0.5), None)),
+            (
+                "opencode-go/deepseek-v4.1-flash",
+                pricing!(0.15, 0.6, Some(0.003), None),
+            ),
+            (
+                "opencode-go/mimo-v2.6-flash",
+                pricing!(0.14, 0.28, Some(0.0028), None),
+            ),
+            (
+                "opencode-go/mimo-v2.6-pro",
+                pricing!(0.435, 0.87, Some(0.003625), None),
+            ),
+            (
+                "opencode-go/longcat-2.5-preview-free",
+                pricing!(0.0, 0.0, Some(0.0), None),
+            ),
+            ("opencode-go/beam-free", pricing!(0.0, 0.0, Some(0.0), None)),
+            (
+                "opencode-go/minimax-m3.1-flash-free",
+                pricing!(0.0, 0.0, Some(0.0), None),
+            ),
+            (
+                "opencode-go/step-5-preview",
+                pricing!(1.0, 2.7, Some(0.1), None),
+            ),
+            (
+                "opencode-go/muse-spark-1.3-contributor",
+                pricing!(0.1, 0.2, Some(0.002), None),
+            ),
+            (
+                "opencode-go/muse-spark-1.2-contributor",
+                pricing!(0.1, 0.2, Some(0.002), None),
+            ),
+            (
+                "opencode/qwen3.6-plus",
+                pricing!(0.5, 3.0, Some(0.05), Some(0.625)),
+            ),
+            (
+                "opencode-go/minimax-m3",
+                pricing!(0.3, 1.2, Some(0.06), None),
+            ),
+            (
+                "opencode-go/qwen3.8-max",
+                pricing!(2.0, 6.0, Some(0.25), Some(2.5)),
+            ),
+            (
+                "opencode-go/qwen3.8-flash",
+                pricing!(0.15, 0.47, Some(0.016), Some(0.2)),
+            ),
+            (
+                "opencode-go/qwen3.7-plus",
+                pricing!(0.4, 1.6, Some(0.04), Some(0.5)),
+            ),
+            (
+                "opencode/muse-wonder-1.0",
+                pricing!(4.0, 20.0, Some(0.2), None),
+            ),
+            (
+                "opencode/mistral-large-4",
+                pricing!(0.68, 2.09, Some(0.07), None),
+            ),
+            (
+                "opencode/qwen3.8-max",
+                pricing!(2.0, 6.0, Some(0.25), Some(2.5)),
+            ),
+            (
+                "opencode/crouton-alpha-free",
+                pricing!(0.0, 0.0, Some(0.0), None),
+            ),
+            ("opencode/iceman-free", pricing!(0.0, 0.0, Some(0.0), None)),
+            (
+                "opencode/inkling-2-small-free",
+                pricing!(0.0, 0.0, Some(0.0), Some(0.0)),
+            ),
+            (
+                "opencode/nemotron-3.5-super-vl-free",
+                pricing!(0.0, 0.0, Some(0.0), None),
+            ),
+            (
+                "opencode-go/kimi-k3.1-pro",
+                pricing!(2.0, 10.0, Some(0.2), Some(2.0)),
+            ),
+            (
+                "opencode-go/minimax-m3.1-flash",
+                pricing!(0.15, 0.6, Some(0.015), None),
+            ),
+            ("opencode-go/hy4", pricing!(0.834, 2.501, Some(0.042), None)),
+            (
+                "opencode-go/crouton-alpha-free",
+                pricing!(0.0, 0.0, Some(0.0), None),
+            ),
+            (
+                "opencode-go/iceman-contributor-free",
+                pricing!(0.0, 0.0, Some(0.0), None),
+            ),
+        ];
+        for (id, expected) in rows {
+            let actual = pricing_for(id).unwrap_or_else(|| panic!("{id} is priced"));
+            assert_eq!(actual, expected, "{id}");
+            let usage = crate::session::Usage {
+                input_tokens: 1_000_000,
+                output_tokens: 1_000_000,
+                cache_read_input_tokens: 1_000_000,
+                cache_creation_input_tokens: 1_000_000,
+                ..Default::default()
+            };
+            let cost = expected.input
+                + expected.output
+                + expected.cache_read.unwrap_or(expected.input)
+                + expected.cache_write.unwrap_or(expected.input);
+            assert!((actual.cost(&usage) - cost).abs() < 1e-9, "{id}");
+        }
+    }
+
     /// The OpenCode rows added 2026-09-24, each on the wire that
     /// answered a live probe, with models.dev's vision and ladder.
     #[test]
@@ -2166,8 +2877,7 @@ mod tests {
     }
 
     /// 2026-10-20: three new Go rows on the wire that answered them,
-    /// and the deprecated free rows gone. Free Zen rows and Mistral
-    /// Large 4, whose stream sends typed content parts, stay out.
+    /// and the deprecated free rows gone. Later additions have separate tests.
     #[test]
     fn the_october_20_opencode_changes() {
         use ModelAccess::OpenCodeChat as Chat;
@@ -2188,7 +2898,6 @@ mod tests {
             "opencode/mimo-v2.5-free",
             "opencode/muse-spark-1.3-contributor-free",
             "opencode/nemotron-3-ultra-free",
-            "opencode/mistral-large-4",
             "opencode/minimax-m3.1-flash-free",
         ] {
             assert!(find(id).is_none(), "{id}");
@@ -2447,7 +3156,7 @@ mod tests {
         assert_eq!(price("openai/gpt-5.6"), cut);
         assert_eq!(
             price("opencode/gpt-5.6-terra"),
-            (2.5, 15.0, Some(0.25), Some(3.125))
+            (2.0, 12.0, Some(0.2), Some(2.5))
         );
     }
 
@@ -2598,11 +3307,11 @@ mod tests {
             (luna.input, luna.output, luna.cache_read, luna.cache_write),
             (0.2, 1.2, Some(0.02), Some(0.25))
         );
-        // Off-peak tier for DeepSeek, on both gateways.
+        // Zen base price; Go retains a separate off-peak base price.
         let pro = pricing_for("opencode/deepseek-v4-pro").unwrap();
         assert_eq!(
             (pro.input, pro.output, pro.cache_read),
-            (0.66, 1.98, Some(0.022))
+            (1.74, 3.48, Some(0.145))
         );
         // Free rows are priced at zero rather than unpriced, so the
         // meter shows $0.00 instead of hiding the figure.

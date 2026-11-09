@@ -10,6 +10,8 @@ Add the missing Zen and Go models identified in the catalog audit and refresh Op
 - Add Zen: muse-wonder-1.0, mistral-large-4, qwen3.8-max, crouton-alpha-free, iceman-free, inkling-2-small-free, nemotron-3.5-super-vl-free.
 - Map full model metadata: wire, reasoning levels, reasoning field, modalities, limits, costs, and deprecation status.
 - Refresh prices of existing OpenCode entries, including Grok 4.7.
+- Support Mistral's native typed text/thinking stream and tool-result replay.
+- Keep price estimates at published base rates, consistent with the existing flat-price API; document context-tier limits.
 - Keep the deferred fork snapshot issue untouched.
 
 ## Acceptance criteria

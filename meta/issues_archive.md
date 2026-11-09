@@ -1,5 +1,7 @@
 # Completed issues
 
+- [x] [Refresh OpenCode model catalog and prices](issues/refresh-opencode-catalog-prices.md)
+
 - [x] [Session-scoped subagent model permissions](issues/session-subagent-model-permissions.md)
 
 - [x] [Allowed subagent models](issues/allowed-subagent-models.md)

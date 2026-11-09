@@ -1,8 +1,8 @@
 //! OpenCode Zen and Go: one gateway, two wires.
 //!
 //! The gateway fronts every model on exactly one of the OpenAI wires —
-//! the GPT, Grok and Muse Spark families on `/responses`, everything
-//! else on `/chat/completions` — and answers a bare 500 on the other
+//! the GPT, Grok, Muse and Crouton rows on `/responses`, everything
+//! else on `/chat/completions`. The wrong wire can return a bare 500
 //! (probed live on 2026-09-03 across both catalogs). The catalog row
 //! records which ([`ModelAccess::OpenCodeResponses`] or
 //! [`ModelAccess::OpenCodeChat`]), and this provider holds one client

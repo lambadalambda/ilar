@@ -1,5 +1,28 @@
 # DEVLOG
 
+## OpenCode catalog refresh and native Mistral thinking
+
+Added seven Zen rows and five Go rows from full live and models.dev records,
+including effort ladders, wire, image support, input/output limits, and cache
+prices. Refreshed every existing OpenCode row present in the live listing;
+six price rows changed. Estimates remain base text rates, not context tiers
+or scheduled discounts. Existing absent rows were not removed.
+
+Mistral Large 4 sends typed content arrays, not string deltas. The chat parser
+now reads their text/thinking parts, records native thinking provenance, and
+replays it as typed content. A live tool-result followup with reasoning_content
+failed with 422; the native content array worked. Mistral's none/high metadata
+is stale: live probes and current AI SDK docs confirm low/medium/high.
+
+Live checks also confirmed commentary phase for Muse Wonder and Go Crouton,
+and tool-call cycles for Go Kimi K3.1 Pro, MiniMax M3.1 Flash, and Hy4. Zen
+Crouton and Nemotron returned account-level free-usage limits; Qwen Max returned
+access-disabled. Listings do not guarantee access for a particular key.
+
+Catalog and provider regressions failed before implementation, then passed.
+The all-feature workspace tests, Clippy with warnings denied, and formatting
+checks pass on tenco. Independent catalog and provider reviews found no blockers.
+
 ## Session permissions are not global preferences
 
 The allowed-subagent-model menu now saves session state instead of editing

@@ -135,8 +135,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 ## Review follow-ups
 
-- [ ] [Refresh OpenCode model catalog and prices](issues/refresh-opencode-catalog-prices.md)
-
 - [ ] [Fork session history and permissions from one snapshot](issues/fork-history-and-policy-snapshot.md)
 
 - [ ] [Memory follow-ups from the component review](issues/memory-follow-ups-from-the-component-review.md)
