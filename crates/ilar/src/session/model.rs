@@ -49,21 +49,26 @@ impl ImageContent {
 /// The chat-completions field a model streams its thinking under, and
 /// wants it back under. `reasoning_content` is the DeepSeek/z.ai/Qwen
 /// spelling and the default; the OpenRouter-style servers behind
-/// OpenCode Zen (Kimi, Nemotron, Ling) say `reasoning`.
+/// OpenCode Zen (Kimi, Nemotron, Ling) say `reasoning`. Mistral uses
+/// typed thinking parts inside `content` instead of a string field.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningField {
     #[default]
     ReasoningContent,
     Reasoning,
+    /// Thinking parts in a typed `content` array, not a string field.
+    TypedContent,
 }
 
 impl ReasoningField {
-    /// The field's name on the wire.
+    /// The field's name on the wire. `TypedContent` needs a parts-array
+    /// encoder; inserting a string under this name would lose the answer.
     pub fn name(self) -> &'static str {
         match self {
             Self::ReasoningContent => "reasoning_content",
             Self::Reasoning => "reasoning",
+            Self::TypedContent => "content",
         }
     }
 }

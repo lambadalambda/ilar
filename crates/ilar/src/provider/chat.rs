@@ -502,7 +502,22 @@ fn openai_message(
         if let Some(field) = replay_thinking
             && (!thinking.is_empty() || (thinking_mode && value.contains_key("tool_calls")))
         {
-            value.insert(field.name().into(), serde_json::json!(thinking));
+            if field == crate::session::ReasoningField::TypedContent {
+                let mut parts = vec![serde_json::json!({
+                    "type": "thinking",
+                    "thinking": [{"type": "text", "text": thinking}],
+                })];
+                match value.remove("content") {
+                    Some(serde_json::Value::String(text)) if !text.is_empty() => {
+                        parts.push(serde_json::json!({"type": "text", "text": text}));
+                    }
+                    Some(serde_json::Value::Array(content)) => parts.extend(content),
+                    _ => {}
+                }
+                value.insert("content".into(), serde_json::json!(parts));
+            } else {
+                value.insert(field.name().into(), serde_json::json!(thinking));
+            }
         }
         serde_json::Value::Object(value)
     };
@@ -560,9 +575,52 @@ fn carries_payload(delta: &serde_json::Value) -> bool {
     non_empty("reasoning_content")
         || non_empty("reasoning")
         || non_empty("content")
+        || delta["content"]
+            .as_array()
+            .is_some_and(|parts| !parts.is_empty())
         || delta
             .get("tool_calls")
             .is_some_and(|calls| !calls.is_null())
+}
+
+/// Mistral's typed content has one supported nesting level: thinking
+/// contains text parts, not arbitrary content. Unknown or malformed parts
+/// are errors rather than silently lost output. `closed` is metadata on
+/// individual fragments, not an end to the streamed reasoning run.
+fn typed_content(parts: &[serde_json::Value]) -> Result<Vec<Think>, String> {
+    fn text(part: &serde_json::Value) -> Result<&str, String> {
+        if part["type"].as_str() != Some("text") {
+            return Err("unsupported OpenAI-compatible content part: expected text".into());
+        }
+        part["text"]
+            .as_str()
+            .ok_or_else(|| "OpenAI-compatible content text must be a string".into())
+    }
+
+    let mut pieces = Vec::new();
+    for part in parts {
+        match part["type"].as_str() {
+            Some("text") => {
+                let text = text(part)?;
+                if !text.is_empty() {
+                    pieces.push(Think::Text(text.into()));
+                }
+            }
+            Some("thinking") => {
+                let nested = part["thinking"].as_array().ok_or_else(|| {
+                    "OpenAI-compatible content thinking must be an array".to_string()
+                })?;
+                for part in nested {
+                    let text = text(part)?;
+                    if !text.is_empty() {
+                        pieces.push(Think::Thinking(text.into()));
+                    }
+                }
+            }
+            _ => return Err("unsupported OpenAI-compatible content part type".into()),
+        }
+    }
+    Ok(pieces)
 }
 
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1024 * 1024;
@@ -887,6 +945,24 @@ impl TransportEventMapper for OpenAiMapper {
                 let pieces = self.leading_think.push(text);
                 self.push_content(pieces, &mut events);
             }
+            if let Some(parts) = delta["content"].as_array() {
+                let pieces = typed_content(parts)?;
+                if !pieces.is_empty() {
+                    if !self.spelling_reported
+                        && pieces
+                            .iter()
+                            .any(|piece| matches!(piece, Think::Thinking(_)))
+                    {
+                        self.spelling_reported = true;
+                        events.push(ProviderEvent::ThinkingField(
+                            crate::session::ReasoningField::TypedContent,
+                        ));
+                    }
+                    let pending = self.leading_think.flush();
+                    self.push_content(pending, &mut events);
+                    self.push_content(pieces, &mut events);
+                }
+            }
             // DeepSeek spells an absent field as `null` on every delta
             // (`"reasoning_content":null,"tool_calls":null` around a
             // content fragment); null is absence, not a malformed list.
@@ -1177,6 +1253,171 @@ mod tests {
         }
         events.extend(mapper.finish());
         Ok(events)
+    }
+
+    #[test]
+    fn mistral_typed_content_captures_emit_thinking_then_text() {
+        for (fixture, expected_thinking) in [
+            (
+                include_str!("../../tests/fixtures/chat_mistral_none.json"),
+                "The user said \"Say ok.\" This is a simple instruction. I should respond with \"Ok.\" or \"OK.\" as requested. It's a straightforward command with no ambiguity or safety concerns. I'll just say \"Ok.\"",
+            ),
+            (
+                include_str!("../../tests/fixtures/chat_mistral_high.json"),
+                "The user said \"Say ok.\" This is a very simple request. I should just respond with \"ok\" or \"Ok\" as requested. There's no need for anything elaborate.",
+            ),
+        ] {
+            let chunks: Vec<serde_json::Value> = serde_json::from_str(fixture).unwrap();
+            let chunks: Vec<String> = chunks.iter().map(ToString::to_string).collect();
+            let events = openai_stream(&chunks.iter().map(String::as_str).collect::<Vec<_>>())
+                .expect("live Mistral stream");
+            let thinking: String = events
+                .iter()
+                .filter_map(|event| match event {
+                    ProviderEvent::ThinkingDelta(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(thinking, expected_thinking);
+            let tail = &events[events.len() - 3..];
+            assert!(
+                matches!(tail, [ProviderEvent::ThinkingCompleted, ProviderEvent::TextDelta(text), ProviderEvent::TurnComplete { stop_reason: StopReason::EndTurn, .. }] if text == "Ok."),
+                "{events:?}"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event, ProviderEvent::ThinkingCompleted))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                events[0],
+                ProviderEvent::ThinkingField(crate::session::ReasoningField::TypedContent)
+            );
+        }
+    }
+
+    #[test]
+    fn mistral_tool_capture_records_native_thinking_for_typed_replay() {
+        let field: crate::session::ReasoningField =
+            serde_json::from_str(r#""typed_content""#).expect("native typed source");
+        let chunks: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../tests/fixtures/chat_mistral_tool.json"))
+                .unwrap();
+        let chunks: Vec<String> = chunks.iter().map(ToString::to_string).collect();
+        let events = openai_stream(&chunks.iter().map(String::as_str).collect::<Vec<_>>()).unwrap();
+        assert_eq!(events[0], ProviderEvent::ThinkingField(field));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProviderEvent::ThinkingField(_)))
+                .count(),
+            1
+        );
+        let thought: String = events
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ThinkingDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let ended = events
+            .iter()
+            .position(|event| matches!(event, ProviderEvent::ThinkingCompleted))
+            .unwrap();
+        let started = events
+            .iter()
+            .position(|event| matches!(event, ProviderEvent::ToolCallStarted { .. }))
+            .unwrap();
+        assert!(ended < started);
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                ..
+            })
+        ));
+        // Use an existing replay-enabled catalog entry to test the shared
+        // encoder without adding Mistral to the catalog in this change.
+        let mut request = Request::with_model("zai/glm-4.7");
+        request.messages = vec![ChatMessage {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: thought.clone(),
+                    field: Some(field),
+                },
+                ContentBlock::ToolCall {
+                    id: "PWz4dbkJ0".into(),
+                    name: "report".into(),
+                    input: serde_json::json!({"value": "ok"}),
+                    item_id: None,
+                },
+            ],
+        }];
+        let dialect = || ChatDialect::zai("k".into(), "http://local.test".into());
+        let provider = ChatProvider::new(dialect());
+        let body = provider.wire_body_for_test(&request);
+        let assistant = &body["messages"][0];
+        assert_eq!(
+            assistant["content"],
+            serde_json::json!([{"type": "thinking", "thinking": [{"type": "text", "text": thought}]}])
+        );
+        assert_eq!(assistant["tool_calls"][0]["id"], "PWz4dbkJ0");
+        assert!(assistant.get("reasoning_content").is_none());
+        assert!(assistant.get("reasoning").is_none());
+        request.messages[0]
+            .content
+            .push(ContentBlock::text("answer"));
+        let body = provider.wire_body_for_test(&request);
+        assert_eq!(
+            body["messages"][0]["content"][1],
+            serde_json::json!({"type": "text", "text": "answer"})
+        );
+        let off = ChatProvider::new(dialect().with_replay_thinking(Some(ThinkingReplay::Off)));
+        let body = off.wire_body_for_test(&request);
+        assert_eq!(body["messages"][0]["content"], "answer");
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+        request.messages[0].content.push(ContentBlock::Image {
+            image: crate::session::ImageContent::png(b"image"),
+        });
+        let wire = openai_message(&request.messages[0], true, Some(field), true);
+        assert_eq!(wire[0]["content"][2]["type"], "image_url");
+        assert_eq!(wire[0]["content"][1]["text"], "answer");
+        assert_eq!(serde_json::to_value(field).unwrap(), "typed_content");
+    }
+
+    #[test]
+    fn typed_content_rejects_malformed_or_unknown_parts() {
+        for content in [
+            serde_json::json!([null]),
+            serde_json::json!([{"type": "image", "url": "x"}]),
+            serde_json::json!([{"type": "text", "text": 1}]),
+            serde_json::json!([{"type": "thinking", "thinking": "plan"}]),
+            serde_json::json!([{"type": "thinking", "thinking": [{"type": "text"}]}]),
+            serde_json::json!([{"type": "thinking", "thinking": [{"type": "thinking", "thinking": []}]}]),
+        ] {
+            let chunk =
+                serde_json::json!({"choices": [{"delta": {"content": content}}]}).to_string();
+            let error = openai_stream(&[&chunk]).expect_err("unsupported typed content");
+            assert!(error.contains("content"), "{error}");
+        }
+    }
+
+    #[test]
+    fn typed_content_after_finish_is_payload_but_empty_arrays_are_not() {
+        let done = r#"{"choices":[{"finish_reason":"stop","delta":{}}]}"#;
+        for content in [
+            serde_json::json!([{"type": "text", "text": "late"}]),
+            serde_json::json!([{"type": "thinking", "thinking": []}]),
+        ] {
+            let chunk =
+                serde_json::json!({"choices": [{"delta": {"content": content}}]}).to_string();
+            let error = openai_stream(&[done, &chunk]).expect_err("payload after finish");
+            assert!(error.contains("after finish_reason"), "{error}");
+        }
+        openai_stream(&[done, r#"{"choices":[{"delta":{"content":[]}}]}"#]).unwrap();
     }
 
     /// A tool-call index opened by an arguments-only chunk — no id, no

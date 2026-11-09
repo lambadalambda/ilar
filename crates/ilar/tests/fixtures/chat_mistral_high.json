@@ -1,0 +1,386 @@
+[
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "role": "assistant",
+          "content": ""
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": ""
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": "The user said \""
+                }
+              ],
+              "closed": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": "Say ok.\" This"
+                }
+              ],
+              "closed": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": " is a very simple"
+                }
+              ],
+              "closed": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": " request. I should"
+                }
+              ],
+              "closed": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": " just respond"
+                }
+              ],
+              "closed": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": " with \"ok\""
+                }
+              ],
+              "closed": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": " or \"Ok\""
+                }
+              ],
+              "closed": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": " as requested. There"
+                }
+              ],
+              "closed": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": "'s no need for"
+                }
+              ],
+              "closed": true
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": " anything"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": " elaborate"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": null,
+        "delta": {
+          "content": [
+            {
+              "type": "thinking",
+              "thinking": [
+                {
+                  "type": "text",
+                  "text": "."
+                }
+              ],
+              "closed": true
+            },
+            {
+              "type": "text",
+              "text": "Ok."
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "id": "0b9e247e810740e3a3a1951e04fa3532",
+    "object": "chat.completion.chunk",
+    "created": 1794207193,
+    "model": "mistral-large-4",
+    "choices": [
+      {
+        "index": 0,
+        "finish_reason": "stop",
+        "delta": {
+          "content": ""
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 18,
+      "completion_tokens": 42,
+      "total_tokens": 60,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 37
+      },
+      "cost": 0.00010002,
+      "opencode": {
+        "billing_source": "balance",
+        "list_cost": 0.00010002,
+        "tokens": {
+          "input": 18,
+          "output": 42,
+          "reasoning": 37,
+          "cache_read": 0,
+          "cache_write_5m": 0,
+          "cache_write_1h": 0
+        }
+      }
+    }
+  }
+]
