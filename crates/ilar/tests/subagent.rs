@@ -2487,7 +2487,12 @@ async fn subagent_model_override_resolves_its_own_provider() {
         3,
         ProjectInstructions::Include,
     ));
-    spawner.set_allowed_models(Some(vec!["openai/gpt-5.2".into()]));
+    ilar::runtime::persist_subagent_models(
+        &store,
+        &session_id,
+        Some(vec!["openai/gpt-5.2".into()]),
+    )
+    .unwrap();
     let task = parent_registry(spawner).get("task").unwrap();
     let mut ctx = ToolContext::root(std::env::temp_dir());
     ctx.session_id = session_id;
@@ -2544,7 +2549,7 @@ async fn resumed_subagent_uses_its_persisted_model() {
     });
     let spawner = Arc::new(SubagentSpawner::new(
         resolver.clone(),
-        store,
+        store.clone(),
         vec![AgentDefinition {
             name: "explore".into(),
             description: "explores".into(),
@@ -2559,7 +2564,8 @@ async fn resumed_subagent_uses_its_persisted_model() {
         3,
         ProjectInstructions::Include,
     ));
-    spawner.set_allowed_models(Some(vec!["openai/gpt-5.2".into()]));
+    ilar::runtime::persist_subagent_models(&store, &parent_id, Some(vec!["openai/gpt-5.2".into()]))
+        .unwrap();
     let task = parent_registry(spawner).get("task").unwrap();
     let mut ctx = ToolContext::root(std::env::temp_dir());
     ctx.session_id = parent_id;
@@ -2619,10 +2625,12 @@ async fn task_model_override_pins_child_model_and_rejects_unknown() {
         delay_ms: 10,
     });
     let spawner = spawner(child, &store, 10, 3);
-    spawner.set_allowed_models(Some(vec![
-        "zai/glm-4.7-flash".into(),
-        "zai/not-a-model".into(),
-    ]));
+    ilar::runtime::persist_subagent_models(
+        &store,
+        &session_id,
+        Some(vec!["zai/glm-4.7-flash".into(), "zai/not-a-model".into()]),
+    )
+    .unwrap();
     let registry = parent_registry(spawner);
 
     let override_call = |id: &str, model: serde_json::Value| ProviderEvent::ToolCallCompleted {
@@ -2797,7 +2805,8 @@ async fn literal_null_strings_in_optional_task_fields_spawn_as_if_omitted() {
 async fn an_explicit_bad_reasoning_variant_names_the_reasoning_input() {
     let (store, parent_id) = temp_store();
     let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
-    spawner.set_allowed_models(Some(vec!["openai/gpt-5.2".into()]));
+    ilar::runtime::persist_subagent_models(&store, &parent_id, Some(vec!["openai/gpt-5.2".into()]))
+        .unwrap();
     let task = parent_registry(spawner).get("task").unwrap();
 
     let output = task
@@ -3785,7 +3794,7 @@ async fn subagent_model_policy_is_live_and_defaults_to_parent() {
         model: model.map(str::to_string),
         reasoning: None,
     };
-    assert_eq!(spawner.allowed_models(), None);
+    assert_eq!(spawner.allowed_models(&parent_id).unwrap(), None);
     let denied = spawner
         .run_task(input(Some("zai/glm-4.7-flash")), &ctx)
         .await;
@@ -3795,11 +3804,16 @@ async fn subagent_model_policy_is_live_and_defaults_to_parent() {
         denied.content
     );
     assert!(!spawner.run_task(input(None), &ctx).await.is_error);
-    spawner.set_allowed_models(Some(vec![]));
+    ilar::runtime::persist_subagent_models(&store, &parent_id, Some(vec![])).unwrap();
     assert!(spawner.run_task(input(None), &ctx).await.is_error);
-    spawner.set_allowed_models(Some(vec!["zai/glm-4.7-flash".into()]));
+    ilar::runtime::persist_subagent_models(
+        &store,
+        &parent_id,
+        Some(vec!["zai/glm-4.7-flash".into()]),
+    )
+    .unwrap();
     assert_eq!(
-        spawner.allowed_models(),
+        spawner.allowed_models(&parent_id).unwrap(),
         Some(vec!["zai/glm-4.7-flash".into()])
     );
     assert!(
@@ -3809,7 +3823,7 @@ async fn subagent_model_policy_is_live_and_defaults_to_parent() {
             .is_error
     );
     assert!(spawner.run_task(input(None), &ctx).await.is_error);
-    spawner.set_allowed_models(None);
+    ilar::runtime::persist_subagent_models(&store, &parent_id, None).unwrap();
     let mut parent = store.acquire_writer(&parent_id).unwrap().load().unwrap();
     parent
         .append(SessionEvent::ModelChange {
@@ -3865,7 +3879,7 @@ async fn policy_checks_resumed_effective_model_and_preserves_parked_messages() {
     let spawner = spawner(provider.clone(), &store, 10, 3);
     let registry = parent_registry(spawner.clone());
     let mut ctx = ToolContext::root(std::env::temp_dir());
-    ctx.session_id = parent_id;
+    ctx.session_id = parent_id.clone();
     let task = registry.get("task").unwrap();
     let denied = task
         .run(
@@ -3898,7 +3912,12 @@ async fn policy_checks_resumed_effective_model_and_preserves_parked_messages() {
         denied.content
     );
     assert!(provider.requests().is_empty());
-    spawner.set_allowed_models(Some(vec!["zai/glm-4.7-flash".into()]));
+    ilar::runtime::persist_subagent_models(
+        &store,
+        &parent_id,
+        Some(vec!["zai/glm-4.7-flash".into()]),
+    )
+    .unwrap();
     let output = message
         .run(
             serde_json::json!({
@@ -3955,7 +3974,8 @@ async fn agent_default_model_requires_policy_and_availability() {
             output.content
         );
         if model == "zai/not-a-model" {
-            spawner.set_allowed_models(Some(vec![model.into()]));
+            ilar::runtime::persist_subagent_models(&store, &parent_id, Some(vec![model.into()]))
+                .unwrap();
             let output = spawner.run_task(input(), &ctx).await;
             assert!(
                 output.is_error && output.content.contains("unknown or unavailable"),
@@ -3979,17 +3999,304 @@ async fn models_tool_filters_against_live_policy_and_parent_model() {
         .unwrap();
     let tool = registry.get("models").unwrap();
     let mut ctx = ToolContext::root(std::env::temp_dir()).with_subagents(spawner.clone());
-    ctx.session_id = parent_id;
+    ctx.session_id = parent_id.clone();
     let output = tool.run(serde_json::json!({}), ctx.clone()).await;
     assert!(output.content.contains("zai/glm-4.7"));
     assert!(!output.content.contains("flash"));
-    spawner.set_allowed_models(Some(vec![]));
+    ilar::runtime::persist_subagent_models(&store, &parent_id, Some(vec![])).unwrap();
     assert_eq!(
         tool.run(serde_json::json!({}), ctx.clone()).await.content,
         "no models available"
     );
-    spawner.set_allowed_models(Some(vec!["zai/glm-4.7-flash".into()]));
+    ilar::runtime::persist_subagent_models(
+        &store,
+        &parent_id,
+        Some(vec!["zai/glm-4.7-flash".into()]),
+    )
+    .unwrap();
     let output = tool.run(serde_json::json!({}), ctx).await;
     assert!(output.content.starts_with("zai/glm-4.7-flash"));
     assert_eq!(output.content.lines().count(), 1);
+}
+
+#[test]
+fn persisted_policy_is_root_scoped_and_forks_copy_it() {
+    let (store, root) = temp_store();
+    let other = store.fork(&root).unwrap();
+    let provider = Arc::new(ScriptedDelayProvider {
+        text: "done",
+        delay_ms: 0,
+    });
+    let spawner = spawner(provider, &store, 10, 3);
+    assert_eq!(spawner.allowed_models(&root).unwrap(), None);
+    ilar::runtime::persist_subagent_models(&store, &root, Some(vec![])).unwrap();
+    assert_eq!(spawner.allowed_models(&root).unwrap(), Some(vec![]));
+    assert_eq!(spawner.allowed_models(&other).unwrap(), None);
+    let fork = store.fork(&root).unwrap();
+    ilar::runtime::persist_subagent_models(&store, &root, None).unwrap();
+    assert_eq!(spawner.allowed_models(&root).unwrap(), None);
+    assert_eq!(spawner.allowed_models(&fork).unwrap(), Some(vec![]));
+    let writer = store.acquire_writer(&root).unwrap();
+    assert!(ilar::runtime::persist_subagent_models(&store, &root, Some(vec![])).is_err());
+    drop(writer);
+}
+
+#[test]
+fn persisted_policy_survives_compaction_and_forks_at_the_cut() {
+    let (store, root) = temp_store();
+    let policy = Some(vec!["zai/glm-4.7-flash".to_string()]);
+    ilar::runtime::persist_subagent_models(&store, &root, policy.clone()).unwrap();
+    let mut session = store.acquire_writer(&root).unwrap().load().unwrap();
+    for text in ["old", "retained", "fork here"] {
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: text.into(),
+                images: vec![],
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "summary".into(),
+            kept_from: 3,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+    let initial = self::spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
+    assert_eq!(initial.allowed_models(&root).unwrap(), policy);
+    ilar::runtime::persist_subagent_models(&store, &root, Some(vec![])).unwrap();
+    let view = store.load(&root).unwrap();
+    assert!(view.event_base() > 0);
+    let cut = view
+        .events()
+        .iter()
+        .position(|event| {
+            matches!(event,
+                SessionEvent::UserMessage { text, .. } if text == "fork here"
+            )
+        })
+        .unwrap();
+    let fork = store.fork_at(&root, cut).unwrap();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
+    assert_eq!(spawner.allowed_models(&root).unwrap(), Some(vec![]));
+    assert_eq!(spawner.allowed_models(&fork).unwrap(), policy);
+    // Force canonical replay rather than the checkpoint fast path.
+    std::fs::remove_file(store.replay_index_path(&root).unwrap()).unwrap();
+    assert_eq!(spawner.allowed_models(&root).unwrap(), Some(vec![]));
+    let transcript = store.load(&fork).unwrap().transcript();
+    assert!(!format!("{transcript:?}").contains("SubagentModelsChange"));
+    // A fresh runtime/spawner must restore policy without an in-memory setter.
+    let restored = self::spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
+    assert_eq!(restored.allowed_models(&fork).unwrap(), policy);
+}
+
+#[test]
+fn policy_lookup_rejects_broken_ancestry() {
+    let (store, root) = temp_store();
+    let a = new_id();
+    let b = new_id();
+    let orphan = new_id();
+    for (id, parent) in [(&a, &b), (&b, &a), (&orphan, &new_id())] {
+        drop(
+            store
+                .create(SessionMeta {
+                    session_id: id.clone(),
+                    parent_id: Some(parent.clone()),
+                    agent: "explore".into(),
+                    model: "zai/glm-4.7".into(),
+                    workspace: None,
+                    cwd: None,
+                })
+                .unwrap(),
+        );
+    }
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
+    for id in [&a, &b, &orphan] {
+        assert!(spawner.allowed_models(id).is_err());
+        assert!(ilar::runtime::persist_subagent_models(&store, id, Some(vec![])).is_err());
+    }
+    assert_eq!(spawner.allowed_models(&root).unwrap(), None);
+}
+
+#[tokio::test]
+async fn rewind_restores_policy_before_and_after_compaction() {
+    let (store, root) = temp_store();
+    let policy = Some(vec!["zai/glm-4.7-flash".to_string()]);
+    ilar::runtime::persist_subagent_models(&store, &root, policy.clone()).unwrap();
+    let mut session = store.acquire_writer(&root).unwrap().load().unwrap();
+    for text in ["old", "retained"] {
+        session
+            .append(SessionEvent::UserMessage {
+                id: new_id(),
+                text: text.into(),
+                images: vec![],
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "summary".into(),
+            kept_from: 3,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    let target = new_id();
+    session
+        .append(SessionEvent::UserMessage {
+            id: target.clone(),
+            text: "undo this turn".into(),
+            images: vec![],
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+    ilar::runtime::persist_subagent_models(&store, &root, Some(vec![])).unwrap();
+    let view = store.load(&root).unwrap();
+    let cut = view
+        .events()
+        .iter()
+        .position(|event| {
+            matches!(event,
+                SessionEvent::UserMessage { id, .. } if id == &target
+            )
+        })
+        .unwrap();
+    ilar::rewind::rewind_session(&store, &root, cut, &target, &std::env::temp_dir())
+        .await
+        .unwrap();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
+    assert_eq!(spawner.allowed_models(&root).unwrap(), policy);
+    // A rewind to before the first policy edit restores the default.
+    let first = new_id();
+    let (other_store, other_root) = temp_store();
+    let mut session = other_store
+        .acquire_writer(&other_root)
+        .unwrap()
+        .load()
+        .unwrap();
+    session
+        .append(SessionEvent::UserMessage {
+            id: first.clone(),
+            text: "first turn".into(),
+            images: vec![],
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+    ilar::runtime::persist_subagent_models(&other_store, &other_root, policy).unwrap();
+    ilar::rewind::rewind_session(&other_store, &other_root, 1, &first, &std::env::temp_dir())
+        .await
+        .unwrap();
+    let fresh = self::spawner(Arc::new(MockProvider::new(vec![])), &other_store, 10, 3);
+    assert_eq!(fresh.allowed_models(&other_root).unwrap(), None);
+}
+
+fn compacted_deny_all_session() -> (SessionStore, String, String) {
+    let (store, root) = temp_store();
+    ilar::runtime::persist_subagent_models(&store, &root, Some(vec![])).unwrap();
+    let mut session = store.acquire_writer(&root).unwrap().load().unwrap();
+    let target = new_id();
+    for (id, text) in [(new_id(), "old"), (target.clone(), "retained")] {
+        session
+            .append(SessionEvent::UserMessage {
+                id,
+                text: text.into(),
+                images: vec![],
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+    }
+    session
+        .append(SessionEvent::ImageCutoff {
+            id: new_id(),
+            before: 3,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::Compaction {
+            id: new_id(),
+            summary: "summary".into(),
+            kept_from: 3,
+            ts: chrono::Utc::now(),
+        })
+        .unwrap();
+    drop(session);
+    (store, root, target)
+}
+
+fn user_event_index(store: &SessionStore, session_id: &str, target: &str) -> usize {
+    store
+        .load(session_id)
+        .unwrap()
+        .events()
+        .iter()
+        .position(|event| matches!(event, SessionEvent::UserMessage { id, .. } if id == target))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn compacted_fork_keeps_deny_all_when_rewound_to_a_copied_turn() {
+    let (store, root, target) = compacted_deny_all_session();
+    let fork = store.fork(&root).unwrap();
+    let cut = user_event_index(&store, &fork, &target);
+    ilar::rewind::rewind_session(&store, &fork, cut, &target, &std::env::temp_dir())
+        .await
+        .unwrap();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
+    assert_eq!(spawner.allowed_models(&fork).unwrap(), Some(vec![]));
+}
+
+#[test]
+fn compacted_fork_keeps_deny_all_when_forked_again_at_a_copied_turn() {
+    let (store, root, target) = compacted_deny_all_session();
+    let fork = store.fork(&root).unwrap();
+    let cut = user_event_index(&store, &fork, &target);
+    let second = store.fork_at(&fork, cut).unwrap();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
+    assert_eq!(spawner.allowed_models(&second).unwrap(), Some(vec![]));
+}
+
+#[tokio::test]
+async fn compacted_fork_keeps_policy_changes_in_order_and_remaps_boundaries() {
+    let (store, root, target) = compacted_deny_all_session();
+    ilar::runtime::persist_subagent_models(&store, &root, None).unwrap();
+    let fork = store.fork(&root).unwrap();
+    let spawner = spawner(Arc::new(MockProvider::new(vec![])), &store, 10, 3);
+    assert_eq!(spawner.allowed_models(&fork).unwrap(), None);
+    assert_eq!(
+        store.load(&fork).unwrap().transcript(),
+        store.load(&root).unwrap().transcript()
+    );
+    let history = store.whole_events(&fork).unwrap();
+    assert!(
+        matches!(&history[1], SessionEvent::SubagentModelsChange { allowed_models: Some(models), .. } if models.is_empty())
+    );
+    let retained = history
+        .iter()
+        .position(|event| {
+            matches!(event,
+                SessionEvent::UserMessage { id, .. } if id == &target
+            )
+        })
+        .unwrap();
+    assert!(history.iter().any(|event| matches!(event,
+        SessionEvent::Compaction { kept_from, .. } if *kept_from == retained
+    )));
+    assert!(history.iter().any(|event| matches!(event,
+        SessionEvent::ImageCutoff { before, .. } if *before == retained
+    )));
+    let cut = user_event_index(&store, &fork, &target);
+    let second = store.fork_at(&fork, cut).unwrap();
+    assert_eq!(spawner.allowed_models(&second).unwrap(), Some(vec![]));
+    ilar::rewind::rewind_session(&store, &fork, cut, &target, &std::env::temp_dir())
+        .await
+        .unwrap();
+    assert_eq!(spawner.allowed_models(&fork).unwrap(), Some(vec![]));
 }

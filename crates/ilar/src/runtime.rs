@@ -388,6 +388,22 @@ pub fn create_root_session(
     Ok(())
 }
 
+/// Persist the owning root's delegation policy under its writer lease.
+pub fn persist_subagent_models(
+    store: &SessionStore,
+    session_id: &str,
+    models: Option<Vec<String>>,
+) -> anyhow::Result<()> {
+    let root = store.policy_root(session_id)?;
+    let mut session = store.acquire_writer(&root)?.load()?;
+    session.append(crate::session::SessionEvent::SubagentModelsChange {
+        id: new_id(),
+        allowed_models: models,
+        ts: chrono::Utc::now(),
+    })?;
+    Ok(())
+}
+
 /// Returns the loaded session so a caller that wants to measure the
 /// context under the new model can do it on this replay rather than
 /// paying a second one.
@@ -829,7 +845,6 @@ impl RuntimePlan {
             ))
             .with_loop_config(loop_config.clone())
             .with_services(services.clone())
-            .with_allowed_models(config.subagents.allowed_models.clone())
             .with_available_models(config.available_models())
             .with_secrets(secrets.clone())
             .with_sudo(config.agent.sudo)

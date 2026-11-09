@@ -98,6 +98,7 @@ pub struct Session {
     physical_line_count: usize,
     effective_model: String,
     effective_variant: Option<String>,
+    subagent_models: Option<Vec<String>>,
     todo_list: Option<crate::todo::TodoList>,
     topic: Option<String>,
     checkpoint: Option<ReplayCheckpoint>,
@@ -126,6 +127,7 @@ struct ReplayData {
     physical_line_count: usize,
     effective_model: String,
     effective_variant: Option<String>,
+    subagent_models: Option<Vec<String>>,
     todo_list: Option<crate::todo::TodoList>,
     topic: Option<String>,
     checkpoint: Option<ReplayCheckpoint>,
@@ -403,8 +405,30 @@ impl SessionStore {
         Self { root }
     }
 
-    /// The directory the store lives in, for an error that has to name
-    /// the place it could not write to.
+    /// Resolve the owning root, rejecting broken ancestry.
+    pub(crate) fn policy_root(&self, id: &str) -> std::io::Result<String> {
+        let mut current = id.to_string();
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current.clone()) {
+                return Err(invalid_data("session parent cycle"));
+            }
+            let session = self.load(&current)?;
+            let meta = session
+                .meta()
+                .ok_or_else(|| invalid_data("session has no metadata"))?;
+            match &meta.parent_id {
+                Some(parent) => current = parent.clone(),
+                None => return Ok(current),
+            }
+        }
+    }
+
+    pub(crate) fn subagent_models(&self, id: &str) -> std::io::Result<Option<Vec<String>>> {
+        Ok(self.load(&self.policy_root(id)?)?.subagent_models)
+    }
+
+    /// The directory that holds the session logs.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -599,6 +623,7 @@ impl SessionStore {
             physical_line_count: 0,
             effective_model: meta.model.clone(),
             effective_variant: None,
+            subagent_models: None,
             todo_list: None,
             topic: None,
             checkpoint: None,
@@ -1014,11 +1039,43 @@ impl SessionStore {
         // no topic yet, so a copied Topic left the fork and its source
         // wearing one name for ever. Without it the fork names itself
         // after its next completed turn.
-        let mut events: Vec<SessionEvent> = source.events()[..cut]
-            .iter()
-            .filter(|event| !matches!(event, SessionEvent::Topic { .. }))
-            .cloned()
-            .collect();
+        // Seed the policy at the start of the retained window. Later policy
+        // changes must stay after their original turns, including on rewind.
+        let seed = if source.event_base() == 0 {
+            None
+        } else {
+            let history = self.whole_events(id)?;
+            let prefix = history
+                .get(..source.event_base())
+                .ok_or_else(|| invalid_data("session changed while forking"))?;
+            replay_models(prefix, None).map(|models| SessionEvent::SubagentModelsChange {
+                id: crate::session::new_id(),
+                allowed_models: Some(models),
+                ts: chrono::Utc::now(),
+            })
+        };
+        let mut events = Vec::new();
+        let mut boundaries = vec![0];
+        for (index, event) in source.events()[..cut].iter().enumerate() {
+            if !matches!(event, SessionEvent::Topic { .. }) {
+                events.push(event.clone());
+            }
+            if index == 0 {
+                events.extend(seed.clone());
+            }
+            boundaries.push(events.len());
+        }
+        // Inserting the seed and dropping topics both move event boundaries.
+        for event in &mut events {
+            let boundary = match event {
+                SessionEvent::Compaction { kept_from, .. } => kept_from,
+                SessionEvent::ImageCutoff { before, .. } => before,
+                _ => continue,
+            };
+            *boundary = *boundaries
+                .get(*boundary)
+                .ok_or_else(|| invalid_data("invalid event boundary while forking"))?;
+        }
         let new_id = crate::session::new_id();
         match events.first_mut() {
             Some(SessionEvent::Meta { meta, .. }) => {
@@ -1088,6 +1145,7 @@ impl SessionStore {
             event_base: replay.event_base,
             effective_model: replay.effective_model,
             effective_variant: replay.effective_variant,
+            subagent_models: replay.subagent_models,
             todo_list: replay.todo_list,
             topic: replay.topic,
             pending_question,
@@ -1125,6 +1183,7 @@ impl SessionWriter {
             physical_line_count: replay.physical_line_count,
             effective_model: replay.effective_model,
             effective_variant: replay.effective_variant,
+            subagent_models: replay.subagent_models,
             todo_list: replay.todo_list,
             topic: replay.topic,
             checkpoint: replay.checkpoint,
@@ -1177,6 +1236,7 @@ fn read_replay(
     let canonical = read_events(file, path, id, repair_tail, cancelled)?;
     let canonical_event_count = canonical.events.len();
     let (effective_model, effective_variant, todo_list, topic) = replay_state(&canonical.events);
+    let subagent_models = replay_models(&canonical.events, None);
     let (events, event_base) = if repair_tail {
         (canonical.events, 0)
     } else {
@@ -1190,6 +1250,7 @@ fn read_replay(
         event_base,
         effective_model,
         effective_variant,
+        subagent_models,
         todo_list,
         topic,
         checkpoint: None,
@@ -1265,6 +1326,7 @@ fn read_indexed_replay(
     let unanswered_calls = validate_replay(&events, id)?;
     let mut effective_model = checkpoint.effective_model.clone();
     let mut effective_variant = checkpoint.effective_variant.clone();
+    let subagent_models = replay_models(&tail_events, checkpoint.subagent_models.clone());
     let mut todo_list = checkpoint.todo_list.clone();
     let mut topic = checkpoint.topic.clone();
     let checkpoint_tail_start = checkpoint.events.len();
@@ -1294,6 +1356,7 @@ fn read_indexed_replay(
             .ok_or_else(|| invalid_data("physical line count overflow"))?,
         effective_model,
         effective_variant,
+        subagent_models,
         todo_list,
         topic,
         checkpoint: Some(checkpoint),
@@ -1461,6 +1524,13 @@ fn read_events(
     })
 }
 
+fn replay_models(events: &[SessionEvent], initial: Option<Vec<String>>) -> Option<Vec<String>> {
+    events.iter().fold(initial, |policy, event| match event {
+        SessionEvent::SubagentModelsChange { allowed_models, .. } => allowed_models.clone(),
+        _ => policy,
+    })
+}
+
 fn replay_state(
     events: &[SessionEvent],
 ) -> (
@@ -1620,6 +1690,7 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             | SessionEvent::ToolResult { id, .. }
             | SessionEvent::Checkpoint { id, .. }
             | SessionEvent::ModelChange { id, .. }
+            | SessionEvent::SubagentModelsChange { id, .. }
             | SessionEvent::Compaction { id, .. }
             | SessionEvent::Topic { id, .. }
             | SessionEvent::ImageCutoff { id, .. }
@@ -1945,6 +2016,9 @@ impl Session {
                 self.effective_model = meta.model.clone();
                 self.effective_variant = None;
             }
+            SessionEvent::SubagentModelsChange { allowed_models, .. } => {
+                self.subagent_models = allowed_models.clone();
+            }
             SessionEvent::ModelChange { model, variant, .. } => {
                 self.effective_model = model.clone();
                 self.effective_variant = variant.clone();
@@ -2150,6 +2224,7 @@ impl Session {
             events,
             effective_model: self.effective_model.clone(),
             effective_variant: self.effective_variant.clone(),
+            subagent_models: self.subagent_models.clone(),
             todo_list: self.todo_list.clone(),
             topic: self.topic.clone(),
             id_root,
@@ -2207,6 +2282,7 @@ impl Session {
     pub fn from_events_for_compaction(events: &[SessionEvent], cut: usize) -> SessionReader {
         let events = events[..cut.min(events.len())].to_vec();
         let (effective_model, effective_variant, todo_list, topic) = replay_state(&events);
+        let subagent_models = replay_models(&events, None);
         SessionReader {
             events,
             // A synthetic prefix view, not a window a compaction cut:
@@ -2214,6 +2290,7 @@ impl Session {
             event_base: 0,
             effective_model,
             effective_variant,
+            subagent_models,
             todo_list,
             topic,
             pending_question: None,
@@ -2229,6 +2306,7 @@ pub struct SessionReader {
     event_base: usize,
     effective_model: String,
     effective_variant: Option<String>,
+    subagent_models: Option<Vec<String>>,
     todo_list: Option<crate::todo::TodoList>,
     topic: Option<String>,
     pending_question: Option<PendingQuestion>,
@@ -2443,7 +2521,9 @@ fn render_transcript(events: &[SessionEvent], model: Option<&str>) -> Vec<ChatMe
                     images,
                 });
             }
-            SessionEvent::ModelChange { .. } | SessionEvent::Compaction { .. } => {}
+            SessionEvent::ModelChange { .. }
+            | SessionEvent::SubagentModelsChange { .. }
+            | SessionEvent::Compaction { .. } => {}
         }
     }
     if !pending_results.is_empty() {

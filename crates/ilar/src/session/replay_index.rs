@@ -33,11 +33,8 @@ use sha2::{Digest, Sha256};
 use super::event::SessionEvent;
 use super::model::ContentBlock;
 
-/// Bumped to 3 when `physical_line_count` stopped being the folded
-/// event count: a version-2 file written after a rewind carries a wrong
-/// value that still checksums, and the cache is disposable, so the
-/// cheapest repair is to refuse to read the old shape at all.
-pub(super) const REPLAY_INDEX_VERSION: u32 = 3;
+/// Version 4 adds persisted delegation policy to derived replay state.
+pub(super) const REPLAY_INDEX_VERSION: u32 = 4;
 const REPLAY_IDS_MAGIC: &[u8; 8] = b"ILARIDS1";
 const REPLAY_IDS_HEADER_LEN: u64 = 32;
 const REPLAY_ID_RECORD_LEN: u64 = 33;
@@ -73,6 +70,7 @@ pub(super) struct ReplayCheckpoint {
     pub(super) effective_model: String,
     #[serde(default)]
     pub(super) effective_variant: Option<String>,
+    pub(super) subagent_models: Option<Vec<String>>,
     pub(super) todo_list: Option<crate::todo::TodoList>,
     #[serde(default)]
     pub(super) topic: Option<String>,
@@ -125,6 +123,7 @@ pub(super) fn checkpoint_checksum(checkpoint: &ReplayCheckpoint) -> std::io::Res
         &checkpoint.events,
         &checkpoint.effective_model,
         &checkpoint.effective_variant,
+        &checkpoint.subagent_models,
         &checkpoint.todo_list,
         &checkpoint.topic,
         &checkpoint.id_root,
@@ -153,6 +152,7 @@ pub(super) fn id_records(events: &[SessionEvent]) -> Vec<IdRecord> {
             | SessionEvent::ToolResult { id, .. }
             | SessionEvent::Checkpoint { id, .. }
             | SessionEvent::ModelChange { id, .. }
+            | SessionEvent::SubagentModelsChange { id, .. }
             | SessionEvent::Compaction { id, .. }
             | SessionEvent::Topic { id, .. }
             | SessionEvent::ImageCutoff { id, .. }

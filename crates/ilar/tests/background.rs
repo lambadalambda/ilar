@@ -5078,7 +5078,7 @@ async fn recovered_notification_cannot_resume_a_disallowed_child() {
     let provider = Arc::new(MockProvider::new(vec![]));
     let spawner = spawner(provider.clone(), &store);
     for policy in [None, Some(vec![])] {
-        spawner.set_allowed_models(policy);
+        ilar::runtime::persist_subagent_models(&store, &root_id, policy).unwrap();
         let outcome = spawner
             .route_notification(
                 Notification {

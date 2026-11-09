@@ -113,6 +113,12 @@ pub enum SessionEvent {
         variant: Option<String>,
         ts: DateTime<Utc>,
     },
+    /// Delegation policy for future child starts and resumes. None means same-parent model.
+    SubagentModelsChange {
+        id: String,
+        allowed_models: Option<Vec<String>>,
+        ts: DateTime<Utc>,
+    },
     /// Compaction boundary: everything before `kept_from` (exclusive) is
     /// replaced by `summary` in the rendered transcript.
     ///
@@ -266,6 +272,7 @@ impl SessionEvent {
             | SessionEvent::ToolResult { ts, .. }
             | SessionEvent::Checkpoint { ts, .. }
             | SessionEvent::ModelChange { ts, .. }
+            | SessionEvent::SubagentModelsChange { ts, .. }
             | SessionEvent::Compaction { ts, .. }
             | SessionEvent::Topic { ts, .. }
             | SessionEvent::ImageCutoff { ts, .. }

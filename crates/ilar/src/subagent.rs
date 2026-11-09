@@ -196,8 +196,6 @@ pub struct SubagentSpawner {
     loop_config: LoopConfig,
     /// Root session's service manager, shared with mutable child agents.
     services: Option<std::sync::Arc<crate::tools::service::ServiceManager>>,
-    /// Live delegation policy, shared with all descendants.
-    allowed_models: Arc<Mutex<Option<Vec<String>>>>,
     /// Models available for per-task overrides and the models tool.
     available_models: Vec<&'static crate::model::ModelInfo>,
     /// The session's secrets, for the listing tool in child registries
@@ -695,7 +693,6 @@ impl SubagentSpawner {
             outbox_dir: None,
             loop_config: LoopConfig::default(),
             services: None,
-            allowed_models: Arc::new(Mutex::new(None)),
             available_models: Vec::new(),
             secrets: None,
             sudo: false,
@@ -749,24 +746,13 @@ impl SubagentSpawner {
         self
     }
 
-    /// Initialize the policy shared by this spawner and all descendants.
-    pub fn with_allowed_models(self, models: Option<Vec<String>>) -> Self {
-        self.set_allowed_models(models);
-        self
-    }
-
-    /// `None` allows only each immediate parent's persisted current model.
-    pub fn allowed_models(&self) -> Option<Vec<String>> {
-        lock_unpoisoned(&self.allowed_models).clone()
-    }
-
-    /// Change policy for future child turns. Running turns are not stopped.
-    pub fn set_allowed_models(&self, models: Option<Vec<String>>) {
-        *lock_unpoisoned(&self.allowed_models) = models;
+    /// Read the owning root's current persisted policy. None means same-parent model.
+    pub fn allowed_models(&self, session_id: &str) -> anyhow::Result<Option<Vec<String>>> {
+        Ok(self.store.subagent_models(session_id)?)
     }
 
     pub(crate) fn delegation_models(&self, parent_id: &str) -> anyhow::Result<Vec<String>> {
-        match self.allowed_models() {
+        match self.allowed_models(parent_id)? {
             Some(models) => Ok(models),
             None => Ok(vec![self.store.load(parent_id)?.effective_model()]),
         }
@@ -967,7 +953,6 @@ impl SubagentSpawner {
             outbox_dir: self.outbox_dir.clone(),
             loop_config: self.loop_config.clone(),
             services: self.services.clone(),
-            allowed_models: self.allowed_models.clone(),
             available_models: self.available_models.clone(),
             secrets: self.secrets.clone(),
             sudo: self.sudo,
@@ -4516,21 +4501,25 @@ mod tests {
             Arc::new(crate::provider::FixedProviderResolver::new(Arc::new(
                 crate::provider::MockProvider::new(vec![]),
             ))),
-            store,
+            store.clone(),
             vec![],
             dir.path().to_path_buf(),
             0,
             10,
             3,
             ProjectInstructions::Include,
-        )
-        .with_allowed_models(Some(vec!["zai/glm-4.7".into()]));
+        );
+        crate::runtime::persist_subagent_models(&store, &root_id, Some(vec!["zai/glm-4.7".into()]))
+            .unwrap();
         let nested = root.derived(root.workspace_location.clone(), root.workspace.clone(), 1);
-        assert_eq!(nested.allowed_models(), root.allowed_models());
-        root.set_allowed_models(Some(vec![]));
+        assert_eq!(
+            nested.allowed_models(&child_id).unwrap(),
+            root.allowed_models(&root_id).unwrap()
+        );
+        crate::runtime::persist_subagent_models(&store, &root_id, Some(vec![])).unwrap();
         assert!(nested.check_model(&child_id, "zai/glm-4.7-flash").is_err());
-        nested.set_allowed_models(None);
-        assert_eq!(root.allowed_models(), None);
+        crate::runtime::persist_subagent_models(&store, &child_id, None).unwrap();
+        assert_eq!(root.allowed_models(&root_id).unwrap(), None);
         assert!(nested.check_model(&child_id, "zai/glm-4.7-flash").is_ok());
         assert!(nested.check_model(&child_id, "zai/glm-4.7").is_err());
         assert!(root.check_model(&root_id, "zai/glm-4.7").is_ok());
