@@ -2267,7 +2267,11 @@ pub fn replays_thinking(full_id: &str) -> bool {
 
 /// How GPT's two channels work, said the way Codex and OpenCode say it
 /// to the same models; without it, long runs drift and stop on a plan.
-const GPT_CHANNELS: &str = "# Commentary and final answer\n\n\
+/// Then how far to take a rule: GPT runs every rule at full strength on
+/// every change and adds gates of its own, so a port of a few hundred
+/// lines grows as much process text again (audit 2026-11-14). Codex
+/// tells the same models much of this.
+const GPT_PATCH: &str = "# Commentary and final answer\n\n\
 While you work, short updates go to the commentary channel: what you \
 found, what you assume, or what changed the plan, in a sentence or two, \
 and only when they add something; never narrate routine reads, searches \
@@ -2281,9 +2285,38 @@ blocks you goes in the final channel, never in commentary.\n\n\
 # Subagents\n\n\
 A subagent starts with nothing but the prompt you give it. Write that \
 prompt in normal, concise, full sentences, the way you would brief a \
-colleague: the goal, what you already know, and what to report back. \
-Do not compress it into keywords, fragments or abbreviations to save \
-tokens; a clipped brief costs more in wrong work than it saves.";
+colleague: the goal, why it matters, what you already know, and what \
+to report back. Name only the constraints this task can actually break; \
+do not copy every rule you know into every brief. Do not compress it \
+into keywords, fragments or abbreviations to save tokens; a clipped \
+brief costs more in wrong work than it saves.\n\n\
+# Proportion\n\n\
+The user's and the project's rules serve one goal: working software \
+the user can see. An explicit instruction for this task, or a rule that \
+names this exact case, applies as written. General workflow rules \
+(test-first, reviews, issues, notes, commits) leave the amount to you: \
+scale them to the change. A fix of a few lines does not need its own \
+issue, review agent and evidence report. When a general rule would cost \
+more than it protects here, skip it and say so in one line.\n\n\
+# Tests\n\n\
+Tests check behavior that a caller or user sees. Do not write tests \
+that restate the implementation or copied constants. A change's tests \
+are normally no larger than its code; where test-first is the rule, one \
+focused failing test per behavior satisfies it. Run the focused tests \
+while you work and the broad suite once before you hand back.\n\n\
+# No invented process\n\n\
+Do not add hashes, provenance records, evidence tiers, authorization \
+files, qualification gates, disclaimers or approval steps that nobody \
+asked for. Do not write new process rules into AGENTS.md, issues or \
+notes unless the user asks.\n\n\
+# Missing facts\n\n\
+When a fact is missing and a reasonable approximation exists, implement \
+it, mark it at the code site (`APPROXIMATION:` and the open question) \
+and continue. Return a blocker only when every option is a guess that \
+could damage data, security or a public interface the user cares \
+about. When the task asks for a change and about twenty tool calls of \
+reading have not led to an edit, make the smallest change the evidence \
+supports.";
 
 /// Text appended to the system prompt for this model's family, where
 /// its own client tells it something ilar's base prompt does not.
@@ -2291,7 +2324,7 @@ pub fn prompt_patch(full_id: &str) -> Option<&'static str> {
     // The GPT rows that speak in phases: on the API, ChatGPT, Zen or Go.
     find(full_id)
         .filter(|model| model.message_phase && model.id.starts_with("gpt-"))
-        .map(|_| GPT_CHANNELS)
+        .map(|_| GPT_PATCH)
 }
 
 /// `options` with the wire's output cap added, spelled the way the
@@ -2371,6 +2404,25 @@ mod tests {
         assert_eq!(model.access, ModelAccess::OpenAiBoth);
         // What Codex now suggests a 5.6 user upgrade to.
         assert_eq!(CHATGPT_SUGGESTED_MODEL, "openai/gpt-6.1-sol");
+    }
+
+    /// GPT runs every rule at full strength and invents gates of its
+    /// own (audit 2026-11-14): the patch says how to scale them.
+    #[test]
+    fn the_gpt_patch_scales_rules_to_the_change() {
+        let patch = super::prompt_patch("openai/gpt-6.1-sol").expect("gpt is patched");
+        for section in [
+            "# Proportion",
+            "# Tests",
+            "# No invented process",
+            "# Missing facts",
+        ] {
+            assert!(patch.contains(section), "missing {section}");
+        }
+        // Briefs carried every rule the parent knew, as prohibitions.
+        assert!(patch.contains("only the constraints"));
+        // Scaling is for general rules; an explicit one still binds.
+        assert!(patch.contains("applies as written"));
     }
 
     #[test]
