@@ -32,7 +32,7 @@
 
 - [ ] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
 - [ ] [A channel prompt patch for GPT](issues/a-channel-prompt-patch-for-gpt.md) — *built; awaiting a live long run*
-- [ ] [Proportion prompts for GPT](issues/proportion-prompts-for-gpt.md) — *built; first comparison in DEVLOG, needs a run in an accumulated-rules repo*
+- [ ] [Proportion prompts for GPT](issues/proportion-prompts-for-gpt.md) — *built; two comparisons in DEVLOG; stopping depends on the project definition of done*
 - [ ] [Server-side compaction for OpenAI](issues/server-side-compaction-for-openai.md)
 - [ ] [Replay message item ids](issues/replay-message-item-ids.md)
 - [ ] [Recall that picks by meaning](issues/recall-that-picks-by-meaning.md) — index

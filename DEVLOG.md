@@ -29,6 +29,29 @@ shows a direction, not proof. Only old-1 compacted, so the compaction change
 is untested. The fixture is a fresh repo; the audited repos had months of
 accumulated rules.
 
+Follow-up with heavy rules: the same task in a fixture that carries millenia's
+AGENTS.md and CADENCE.md adapted to trek (244 lines of process rules), 3 runs
+per arm, 2.5 h cap.
+
+| run | parity | goal claimed | worked min | out tok | src | test | docs | tools |
+|---|---|---|---|---|---|---|---|---|
+| hold-1 | 38/40 | never (cap) | 198 | 300k | 3198 | 2374 | 640 | 265 |
+| hold-2 | 38/40 | 100 min | 176 | 277k | 3467 | 3139 | 470 | 7 |
+| hold-3 | 38/40 | never (cap) | 226 | 371k | 3322 | 3181 | 519 | 944 |
+| hnew-1 | 40/40 | never (cap) | 213 | 289k | 2311 | 1499 | 353 | 400 |
+| hnew-2 | 38/40 | 54 min | 101 | 166k | 1631 | 2747 | 153 | 0 |
+| hnew-3 | 38/40 | never (cap) | 217 | 299k | 4202 | 2105 | 453 | 56 |
+
+Every port worked within about an hour. Heavy rules roughly tripled test
+lines in both arms. The new patch cut docs (mean 320 vs 543), tests (2117 vs
+2898) and output tokens (251k vs 316k), but not the failure to stop: 2 of 3
+runs in each arm spent their last 90 min on C undefined-behavior parity. Their
+stated blockers come from the project rules ("only the user's playtest closes
+a milestone", "fidelity verification must report incomplete"), which the
+patch deliberately leaves binding. New summaries mark constraint origins (6
+and 14 marks vs 0), but the prohibition count is unchanged: most constraints
+are project rules. The lever for stopping is the project's definition of done.
+
 ## OpenCode catalog refresh and native Mistral thinking
 
 Added seven Zen rows and five Go rows from full live and models.dev records,
