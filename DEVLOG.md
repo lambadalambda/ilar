@@ -1,5 +1,34 @@
 # DEVLOG
 
+## Proportion prompts for GPT: first comparison
+
+An audit of gpt-6.1-sol sessions in four game-port repos found as many
+docs/process lines as source lines, tests larger than code, invented gates,
+and rule lists that only grow. The GPT patch now adds Proportion, Tests,
+No invented process and Missing facts sections. Goal mode no longer makes a
+verifier part of every goal, and compaction drops constraints the agent set
+for itself once they no longer apply.
+
+Comparison: old (691ec574) vs new (56cea62c) prompts, 2 runs each in Podman
+on secunda. Task: port NetBSD trek (7.9k lines of C) to Rust with stdout
+parity, in goal mode with up to 4 subagents and a 2 h cap. Hidden scorer:
+40 seeded sessions against the C reference.
+
+| run | parity | goal claimed | worked min | out tok | src | test | docs | tools | issues |
+|---|---|---|---|---|---|---|---|---|---|
+| old-1 | 40/40 | never (cap) | 168 | 196k | 3340 | 1546 | 675 | 263 | 14 |
+| old-2 | 38/40 | 35 min | 69 | 119k | 2843 | 372 | 190 | 189 | 3 |
+| new-1 | 38/40 | 47 min | 72 | 110k | 4213 | 777 | 120 | 0 | 3 |
+| new-2 | 40/40 | 50 min | 76 | 113k | 2756 | 173 | 113 | 0 | 1 |
+
+Every run ported the game; the base model is capable on a clean repo. old-1
+finished the port at 48 min, then spent 70 min on NaN/overflow and C
+memory-fault parity in 13 new issues and never claimed the goal. Both old
+runs built Python replay harnesses; neither new run did. n=2 per arm: this
+shows a direction, not proof. Only old-1 compacted, so the compaction change
+is untested. The fixture is a fresh repo; the audited repos had months of
+accumulated rules.
+
 ## OpenCode catalog refresh and native Mistral thinking
 
 Added seven Zen rows and five Go rows from full live and models.dev records,
