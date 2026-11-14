@@ -52,6 +52,21 @@ patch deliberately leaves binding. New summaries mark constraint origins (6
 and 14 marks vs 0), but the prohibition count is unchanged: most constraints
 are project rules. The lever for stopping is the project's definition of done.
 
+Third batch: heavy rules plus a nine-line "Definition of done" in AGENTS.md
+(parity on defined behavior; undefined or crashing behavior is a listed known
+difference; agents may declare a goal done, the playtest closes milestones).
+
+| arm | stopped | claimed at (min) | worked min | out tok | test | docs | tools |
+|---|---|---|---|---|---|---|---|
+| old | 3/3 | 99, 103, 115 | 177 | 280k | 2874 | 445 | 185 |
+| new | 3/3 | 54, 61, 72 | 126 | 212k | 2133 | 169 | 0 |
+
+(means except stops and claim times; all six score 38/40 on the same two
+seeds.) The definition of done fixed stopping in both arms (6/6 vs 2/6). On
+top of it the new patch finished about 40% sooner with 30% less work, 60%
+fewer doc lines and no extra harness tooling, the same direction as the
+first two batches.
+
 ## OpenCode catalog refresh and native Mistral thinking
 
 Added seven Zen rows and five Go rows from full live and models.dev records,
