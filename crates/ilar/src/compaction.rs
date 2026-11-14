@@ -74,6 +74,9 @@ Rules:
 error strings verbatim. Never paraphrase an identifier.
 - Record what was ruled out and why, not only what succeeded: a summary of successes \
 invites repeating a rejected approach.
+- Mark each constraint with where it came from: the user's own words, verbatim; a project \
+rule or an outside fact; or a rule you chose for yourself, which the next summary may drop \
+once it no longer applies.
 - The summary is a handover, not a sign-off: its reader picks the task straight back up. \
 Never tell them to stop, wait, or seek confirmation the conversation did not ask for — if \
 work remains, Next Move is what they do first.
@@ -94,10 +97,12 @@ const SUMMARY_CARRY_FORWARD: &str = "
 The conversation opens with a <compaction-summary> covering everything before it. That \
 summary is replaced by yours: anything you do not carry forward drops out of sight, where only \
 a history search finds it. Keep its \
-objectives, constraints, user directives, decisions and parallel workstreams even where the \
-later conversation never mentions them, dropping only what is finished and no longer needed. \
-Where the two disagree the later conversation wins: state the corrected fact and drop the \
-old claim.";
+objectives, the user's directives, decisions and parallel workstreams even where the later \
+conversation never mentions them, dropping only what is finished and no longer needed. A \
+constraint the agent set for itself carries forward only while it still applies to the work \
+ahead; one with no origin mark counts as the user's. Merge duplicates into one line. Where \
+the two disagree the later \
+conversation wins: state the corrected fact and drop the old claim.";
 
 /// Openings that mean the model answered the conversation instead of
 /// summarizing it.
@@ -935,6 +940,15 @@ mod tests {
         let instruction = text_of(summarizer_messages(&transcript, &[]).last().unwrap());
 
         assert!(instruction.contains("replaced by yours"), "{instruction}");
+        // Kept "even where never mentioned", every rule the agent set
+        // itself rode along forever: 2 prohibitions grew to 28.
+        assert!(instruction.contains("set for itself"), "{instruction}");
+        assert!(instruction.contains("user's directives"), "{instruction}");
+        // An unmarked constraint, say from an older summary, is kept.
+        assert!(
+            instruction.contains("no origin mark counts as the user's"),
+            "{instruction}"
+        );
         // The same promise as the template's: out of sight, not gone.
         assert!(
             !instruction.contains("carry forward is lost"),
