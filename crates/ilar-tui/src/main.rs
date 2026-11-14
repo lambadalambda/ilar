@@ -1034,10 +1034,10 @@ fn goal_kickoff_prompt(goal: &str) -> String {
         "Work toward this goal: {goal}
 
 This is a goal-mode session: after each of your turns you will be \
-         asked to verify progress with concrete evidence. If no automatic \
-         verification exists yet (tests, a replay harness, a checker \
-         script), building one is part of the goal. Do not claim success \
-         without evidence."
+         asked to verify progress with concrete evidence. Use the checks \
+         the project already has (tests, a harness, running the program). \
+         Build a new check only when the goal cannot be verified any \
+         other way, and keep it small. Do not claim success without evidence."
     )
 }
 
@@ -6903,6 +6903,13 @@ mod tests {
         let kickoff = goal_kickoff_prompt("replay 5 turns at 90%");
         assert!(kickoff.contains("replay 5 turns at 90%"));
         assert!(kickoff.contains("evidence"), "{kickoff}");
+        // Told that a verifier was part of every goal, GPT built
+        // observer and replay tooling instead of the goal itself.
+        assert!(
+            kickoff.contains("checks the project already has"),
+            "{kickoff}"
+        );
+        assert!(!kickoff.contains("part of the goal"), "{kickoff}");
         let cont = goal_continuation_prompt("replay 5 turns at 90%", 3);
         assert!(cont.contains("round 3/25"), "{cont}");
         assert!(cont.contains("GOAL_ACHIEVED"), "{cont}");
