@@ -69,23 +69,24 @@ text cannot cause a second execution under the same sandbox exception.
 ## Results, 2026-11-15
 
 On the development Mac, the real Seatbelt compiler accepted generated policies,
-including escaped paths. Unit/config/approval tests passed. The installed-toolchain
-baseline passed all four workloads:
+including escaped paths. The initial runner blocked activation with EPERM. After
+the user removed that outer sandbox, all four backend checks and all seven
+integration tests passed, including the explicit host tests. No code change was
+needed for the rerun.
 
 | Workload | Without ilar sandbox | With ilar sandbox |
 | --- | --- | --- |
-| Cargo offline build and run, no dependencies | Pass | Activation blocked |
-| Python byte compilation and run | Pass | Activation blocked |
-| npm offline local dependency install, explicit cache path | Pass | Activation blocked |
-| Git init, add, staged diff | Pass | Activation blocked |
+| Cargo offline build and run, no dependencies | Pass | Pass |
+| Python byte compilation and run | Pass | Pass |
+| npm offline local dependency install, explicit cache path | Pass | Pass |
+| Git init, add, staged diff | Pass | Pass |
 
-All four sandboxed attempts exited 71 with
-`sandbox-exec: sandbox_apply: Operation not permitted`. The requested commands
-did not start. This runner cannot activate Seatbelt; removing ilar's added
-sandbox cannot remove inherited external restrictions. These results establish
-failure without fallback, not working write/network enforcement or useful
-cache defaults. Enforcement tests remain explicit host tests, not silently
-skipped successes.
+The host tests confirmed allowed workspace/explicit-path writes, denied sibling
+writes, denied writes through outward symlinks, preserved partial work before a
+denial, and localhost TCP denied by default but permitted with a network grant.
+These are focused checks, not proof of complete isolation. The npm project used
+an explicit cache grant; these workloads do not validate all named cache profiles
+or network-dependent package installation.
 
 ## Checks
 
@@ -97,7 +98,7 @@ completed for the cross-module prototype; regression tests were added and run.
 
 ## Not implemented
 
-- Reliable observe/training mode. Local unified-log access is blocked;
+- Reliable observe/training mode. The initial runner blocked unified-log access;
   `eslogger` needs elevated privileges. No access trace was collected, and no
   policy was learned from command errors. Future observations must propose
   grants, never approve them automatically.

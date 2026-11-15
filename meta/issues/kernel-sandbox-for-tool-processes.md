@@ -146,10 +146,13 @@ scrollable. Experimental sudo does not retry launched commands based on their
 output. No saved grants, observe mode, Linux backend, or child/gateway approval
 route is implemented yet.
 
-Four installed-toolchain baselines passed. All sandboxed attempts failed at
-activation with EPERM and did not execute the target. Syntax compilation and
-configuration/approval tests pass; actual enforcement needs an unrestricted
-host. See [experiment commands and results](../../experiments/sandbox/README.md).
+Four installed-toolchain projects passed both without and with the sandbox.
+The initial runner blocked activation with EPERM; after the user removed the
+outer sandbox, all four backend checks and all seven integration tests passed.
+Host checks confirmed narrow write grants, denied sibling/symlink writes,
+preserved partial work, and network denied unless granted. Named cache profiles
+and network-dependent package installation still need workload tests.
+See [experiment commands and results](../../experiments/sandbox/README.md).
 
 ## Milestone
 

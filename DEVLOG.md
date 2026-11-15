@@ -9,12 +9,14 @@ stay broad; writes are confined to workspace and explicit cache/path grants;
 network is denied unless granted. Root TUI calls can request a once-only
 extension or bypass. No automatic fallback or retry follows a denial.
 
-Cargo, Python, npm/local-dependency, and Git baseline projects all passed.
-All sandboxed attempts stopped at activation with EPERM, before commands
-ran. Policy syntax and approval tests pass, but enforcement and cache defaults
-remain unverified on this restricted host. Observe-mode logging was not
-available; no training mode or learned policy is claimed. Direct file tools,
-Linux, saved project grants, and child/gateway approvals remain open work.
+Cargo, Python, npm/local-dependency, and Git projects passed both without and
+with the sandbox. The initial runner blocked activation with EPERM. After the
+user removed the outer sandbox, all four backend checks and all seven
+integration tests passed, including write and network enforcement. Named cache
+profiles still need broader workload tests. Observe-mode logging was not
+available in the initial runner; no training mode or learned policy is claimed.
+Direct file tools, Linux, saved project grants, and child/gateway approvals
+remain open work.
 See `experiments/sandbox/README.md` for commands and results. The sandbox issue
 stays open.
 
