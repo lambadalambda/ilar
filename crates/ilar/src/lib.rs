@@ -23,6 +23,7 @@ pub mod recall;
 pub(crate) mod redact;
 pub mod rewind;
 pub mod runtime;
+pub mod sandbox;
 pub mod secrets;
 pub mod selector;
 pub mod session;
