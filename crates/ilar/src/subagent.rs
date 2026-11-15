@@ -1478,6 +1478,7 @@ impl SubagentSpawner {
                 .map(|secrets| secrets.for_agent(&agent.name)),
             sandbox: ctx.sandbox.clone(),
             sandbox_questions: None,
+            sandbox_grants: Default::default(),
             // Inherited: a child of a seat in a room is in the same
             // room, and delegating the read is still the read.
             withheld: ctx.withheld.clone(),
@@ -2443,6 +2444,7 @@ your response with a one-line status, not an answer; the task keeps running eith
                     secrets: self.secrets.clone(),
                     sandbox: self.sandbox.clone(),
                     sandbox_questions: None,
+                    sandbox_grants: Default::default(),
                     // The notified session is the seat that delegated
                     // the work; a result arriving does not move it to
                     // another room.

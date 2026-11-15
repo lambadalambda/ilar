@@ -2633,6 +2633,7 @@ async fn stall_watchdog_fires_on_silent_child() {
                 secrets: None,
                 sandbox: Default::default(),
                 sandbox_questions: None,
+                sandbox_grants: Default::default(),
                 withheld: std::sync::Arc::from(Vec::new()),
                 steers: None,
                 detached_owner: None,

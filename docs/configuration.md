@@ -77,12 +77,25 @@ workspace; there is no shared `/tmp` write grant. Network is denied unless
 In the interactive root TUI, bash, service start, and sudo can request a
 `sandbox` exception with `read_paths`, `write_paths`, `network`, or `unsandboxed`, plus a
 `reason`. The user sees the command and access request before launch. Use
-PageUp/PageDown to read long approval details. Approval applies only to that
-call; it does not persist. Cancellation or missing approval support refuses
-the call. Child sessions, `ilar exec`, and the gateway cannot approve these
-exceptions yet. Configure their required grants before launch. A denied read
-returns an error, not an automatic prompt. The agent must request an extension;
-ilar does not infer a needed path or rerun partial work.
+PageUp/PageDown to read long approval details. Choose "Allow this call only"
+or "Allow for this session" for read paths, write paths, and network. Session
+grants apply to later bash, service start, and sudo calls without asking again,
+including calls that omit the `sandbox` argument. Read grants do not add writes.
+They are kept in memory for this live session only: closing/restarting its
+runtime, or resuming it later, does not restore them. Other sessions and child
+agents do not inherit them. Project-persistent approvals are not implemented.
+
+Requested paths are resolved before approval, and the prompt shows the target
+paths. Retained paths that later redirect through a symlink or cannot be resolved
+are dropped; a new target needs approval. This does not remove the documented
+filesystem race between checking a path and starting a command.
+
+`unsandboxed` requests offer only once/deny, even when mixed with path/network
+requests. Cancellation or missing approval support refuses new access. Child
+sessions, `ilar exec`, and the gateway cannot approve these exceptions yet.
+Configure their required grants before launch. A denied read returns an error,
+not an automatic prompt. The agent must request an extension; ilar does not
+infer a needed path or rerun partial work.
 
 `unsandboxed` removes only ilar's sandbox for one approved call. Secret/root
 checks and inherited external restrictions still apply. Failed commands are

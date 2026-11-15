@@ -678,6 +678,9 @@ impl Heartbeat {
 pub struct ToolContext {
     pub cwd: std::path::PathBuf,
     pub sandbox: crate::sandbox::SandboxConfig,
+    /// Clone-shared grants for this live session. New roots and children
+    /// start with an empty store; nothing is restored from disk.
+    pub sandbox_grants: crate::sandbox::SessionGrants,
     /// Host approval prompts are available only in the root interactive
     /// session. Child and notification contexts must leave this unset:
     /// the UI routes questions by the root session's exact id.
@@ -920,6 +923,7 @@ impl ToolContext {
             secrets: None,
             sandbox: crate::sandbox::SandboxConfig::default(),
             sandbox_questions: None,
+            sandbox_grants: Default::default(),
             withheld: Arc::from(Vec::new()),
             steers: None,
             detached_owner: None,

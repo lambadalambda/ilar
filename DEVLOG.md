@@ -1,5 +1,20 @@
 # DEVLOG
 
+## Live-session process sandbox approvals
+
+Root TUI sandbox prompts now offer once-only or live-session approval for read
+paths, write paths, and network. Later process calls reuse session grants without
+another prompt. Grants stay in memory, are separate for reads and writes, and
+are not inherited by children or restored after restart/resume. Execution
+without ilar's sandbox remains once-only, including mixed requests.
+
+Prompts show canonical path targets. Retained targets are checked on reuse and
+discarded if they resolve elsewhere or cannot be resolved. This prevents later
+symlink replacement from silently widening a grant; filesystem races between
+validation and process start remain outside this experiment's guarantees.
+Focused regression tests started with failures for session retention and target
+replacement. A host test checks once/session behavior through actual bash calls.
+
 ## Narrow read defaults for the process sandbox
 
 The opt-in macOS sandbox now denies content reads outside workspace, selected

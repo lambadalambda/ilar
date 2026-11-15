@@ -1,4 +1,4 @@
-//! Host-generated, once-only approval for experimental process sandbox extensions.
+//! Host-generated approval for experimental process sandbox extensions.
 
 use serde::Deserialize;
 
@@ -9,7 +9,7 @@ use crate::question::{
 };
 use crate::sandbox::SandboxConfig;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
     #[serde(default)]
@@ -26,7 +26,7 @@ pub(crate) struct Request {
 pub(crate) fn schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Experimental sandbox extension for this call only. Requires user approval before execution; unavailable in unattended or child sessions. Never retry partial work automatically. Omit for normal execution.",
+        "description": "Experimental sandbox extension. Requires user approval before execution; read/write paths and network can be allowed once or for this live session. Unsandboxed execution is once-only. Unavailable in unattended or child sessions. Omit to use existing grants. Never retry partial work automatically.",
         "properties": {
             "read_paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute paths that need read access; each grants its subtree, without writes."},
             "write_paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute paths that need write access; each grants its subtree, without extra reads."},
@@ -45,6 +45,9 @@ pub(crate) async fn resolve(
     command: &str,
 ) -> Result<SandboxConfig, String> {
     let mut config = ctx.sandbox.clone();
+    if config.enabled {
+        ctx.sandbox_grants.apply(&ctx.session_id, &mut config);
+    }
     let Some(request) = request else {
         return Ok(config);
     };
@@ -69,6 +72,27 @@ pub(crate) async fn resolve(
     {
         return Err("sandbox extension requests no additional access".into());
     }
+    let mut request = request.clone();
+    for path in request
+        .read_paths
+        .iter_mut()
+        .chain(&mut request.write_paths)
+    {
+        *path =
+            crate::sandbox::resolve_path(path).map_err(|error| format!("sandbox path: {error}"))?;
+    }
+    let covered = |paths: &[std::path::PathBuf], roots: &[std::path::PathBuf]| {
+        paths
+            .iter()
+            .all(|path| roots.iter().any(|root| path.starts_with(root)))
+    };
+    if !request.unsandboxed
+        && (!request.network || config.network)
+        && covered(&request.read_paths, &config.read_paths)
+        && covered(&request.write_paths, &config.write_paths)
+    {
+        return Ok(config);
+    }
     let sender = ctx.sandbox_questions.as_ref().ok_or(
         "sandbox extension refused: nobody can approve this call; configure required paths before launch",
     )?;
@@ -85,7 +109,7 @@ pub(crate) async fn resolve(
         .collect::<Vec<_>>()
         .join("\n");
     let description = format!(
-        "Tool: {tool}\nCommand: {command}\nReason: {}\nRead paths (including descendants):\n{read_paths}\nWrite paths (including descendants):\n{paths}\nAll network access: {}\nRun without ilar's sandbox: {}\nThis approval is for one call. It does not remove an external sandbox or secret/root checks.",
+        "Tool: {tool}\nCommand: {command}\nReason: {}\nRead paths (including descendants):\n{read_paths}\nWrite paths (including descendants):\n{paths}\nAll network access: {}\nRun without ilar's sandbox: {}\nGrants can apply to this call or this live session across bash, service, and sudo. Unsandboxed execution is once-only. Nothing is saved across restarts or shared with child sessions. External restrictions and secret/root checks still apply.",
         request.reason, request.network, request.unsandboxed
     );
     let stored = ctx
@@ -94,6 +118,27 @@ pub(crate) async fn resolve(
         .map(|secrets| secrets.all())
         .unwrap_or_default();
     let description = crate::secrets::redact(&description, &stored);
+    let mut options = vec![
+        QuestionOption {
+            id: "deny".into(),
+            label: "Deny".into(),
+            description: None,
+        },
+        QuestionOption {
+            id: "once".into(),
+            label: "Allow this call only".into(),
+            description: None,
+        },
+    ];
+    if !request.unsandboxed {
+        options.push(QuestionOption {
+            id: "session".into(),
+            label: "Allow for this session".into(),
+            description: Some(
+                "Reuse these read/write paths and network access in this live session only.".into(),
+            ),
+        });
+    }
     let prompt_request = QuestionRequest {
         questions: vec![Question {
             id: "sandbox_approval".into(),
@@ -102,18 +147,7 @@ pub(crate) async fn resolve(
             required: true,
             kind: QuestionKind::SingleChoice {
                 allow_other: false,
-                options: vec![
-                    QuestionOption {
-                        id: "deny".into(),
-                        label: "Deny".into(),
-                        description: None,
-                    },
-                    QuestionOption {
-                        id: "once".into(),
-                        label: "Allow this call only".into(),
-                        description: None,
-                    },
-                ],
+                options,
             },
         }],
     };
@@ -135,11 +169,28 @@ pub(crate) async fn resolve(
     response
         .validate(&prompt_request)
         .map_err(|error| format!("invalid sandbox approval: {error}"))?;
-    let approved = matches!(response, QuestionResponse::Answered { ref answers }
-        if matches!(answers.as_slice(), [QuestionAnswer::SingleChoice { question_id, option_id: Some(option), other: None }]
-            if question_id == "sandbox_approval" && option == "once"));
-    if !approved {
+    let scope = match &response {
+        QuestionResponse::Answered { answers } => match answers.as_slice() {
+            [
+                QuestionAnswer::SingleChoice {
+                    option_id: Some(option),
+                    ..
+                },
+            ] => option.as_str(),
+            _ => "deny",
+        },
+        QuestionResponse::Cancelled => "deny",
+    };
+    if !matches!(scope, "once" | "session") {
         return Err("sandbox exception denied; command was not started".into());
+    }
+    if scope == "session" {
+        ctx.sandbox_grants.remember(
+            &ctx.session_id,
+            &request.read_paths,
+            &request.write_paths,
+            request.network,
+        );
     }
     config.read_paths.extend(request.read_paths.iter().cloned());
     config
@@ -215,6 +266,181 @@ mod tests {
         );
         assert!(ctx.sandbox.read_paths.is_empty());
         assert!(ctx.sandbox.write_paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_approval_is_reused_but_not_by_another_session() {
+        let mut ctx = ToolContext::root(std::env::temp_dir());
+        ctx.session_id = "first".into();
+        ctx.sandbox.enabled = true;
+        let (sender, mut receiver) = crate::question::question_channel(1);
+        ctx.sandbox_questions = Some(sender);
+        let approve = async {
+            receiver
+                .recv()
+                .await
+                .unwrap()
+                .reply
+                .send(QuestionResponse::Answered {
+                    answers: vec![QuestionAnswer::SingleChoice {
+                        question_id: "sandbox_approval".into(),
+                        option_id: Some("session".into()),
+                        other: None,
+                    }],
+                })
+                .unwrap();
+        };
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "read_paths": ["/session-reference"], "write_paths": ["/session-cache"],
+            "network": true, "reason": "Build dependencies"
+        }))
+        .unwrap();
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(resolve(&ctx, Some(&request), "bash", "build"), approve)
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        ctx.sandbox_questions = None;
+        let repeated = resolve(&ctx, Some(&request), "bash", "build again")
+            .await
+            .unwrap();
+        assert!(repeated.network);
+        assert_eq!(
+            repeated.read_paths,
+            [std::path::PathBuf::from("/session-reference")]
+        );
+        assert_eq!(
+            repeated.write_paths,
+            [std::path::PathBuf::from("/session-cache")]
+        );
+        let mut narrower = request.clone();
+        narrower.read_paths[0].push("child");
+        assert!(
+            resolve(&ctx, Some(&narrower), "bash", "read child")
+                .await
+                .is_ok()
+        );
+        narrower.write_paths = narrower.read_paths.clone();
+        assert!(
+            resolve(&ctx, Some(&narrower), "bash", "write reference")
+                .await
+                .is_err()
+        );
+        let later = resolve(&ctx.clone(), None, "service", "watch")
+            .await
+            .unwrap();
+        assert_eq!(later.read_paths, repeated.read_paths);
+        assert_eq!(later.write_paths, repeated.write_paths);
+        assert!(later.network);
+        ctx.session_id = "other".into();
+        let other = resolve(&ctx, None, "bash", "build").await.unwrap();
+        assert!(other.read_paths.is_empty());
+        assert!(other.write_paths.is_empty());
+        assert!(!other.network);
+        let mut restarted = ToolContext::root(std::env::temp_dir());
+        restarted.session_id = "first".into();
+        restarted.sandbox.enabled = true;
+        assert!(
+            resolve(&restarted, None, "bash", "build")
+                .await
+                .unwrap()
+                .read_paths
+                .is_empty()
+        );
+        assert!(
+            resolve(&ctx, Some(&request), "bash", "build")
+                .await
+                .is_err()
+        );
+    }
+
+    fn answer(prompt: QuestionPrompt, scope: &str) {
+        prompt
+            .reply
+            .send(QuestionResponse::Answered {
+                answers: vec![QuestionAnswer::SingleChoice {
+                    question_id: "sandbox_approval".into(),
+                    option_id: Some(scope.into()),
+                    other: None,
+                }],
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn bypass_cannot_be_approved_for_the_session() {
+        let mut ctx = ToolContext::root(std::env::temp_dir());
+        ctx.sandbox.enabled = true;
+        let (sender, mut receiver) = crate::question::question_channel(1);
+        ctx.sandbox_questions = Some(sender);
+        let approve = async {
+            let prompt = receiver.recv().await.unwrap();
+            let QuestionKind::SingleChoice { options, .. } = &prompt.request.questions[0].kind
+            else {
+                panic!("expected approval choices")
+            };
+            assert!(!options.iter().any(|option| option.id == "session"));
+            answer(prompt, "session"); // A malformed reply must also fail closed.
+        };
+        let request = serde_json::from_value(serde_json::json!({
+            "unsandboxed": true, "network": true, "reason": "Nested sandbox"
+        }))
+        .unwrap();
+        let (result, ()) = tokio::join!(resolve(&ctx, Some(&request), "bash", "nested"), approve);
+        assert!(result.is_err());
+        let later = resolve(&ctx, None, "bash", "build").await.unwrap();
+        assert!(later.enabled);
+        assert!(!later.network);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_grants_do_not_follow_a_retargeted_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+        let mut ctx = ToolContext::root(root.path().to_path_buf());
+        ctx.sandbox.enabled = true;
+        let (sender, mut receiver) = crate::question::question_channel(1);
+        ctx.sandbox_questions = Some(sender);
+        let approve = async {
+            answer(receiver.recv().await.unwrap(), "session");
+        };
+        let request = serde_json::from_value(serde_json::json!({
+            "read_paths": [alias], "reason": "Read reference data"
+        }))
+        .unwrap();
+        let (result, ()) = tokio::join!(resolve(&ctx, Some(&request), "bash", "read"), approve);
+        assert_eq!(result.unwrap().read_paths, [first.canonicalize().unwrap()]);
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&second, &alias).unwrap();
+        ctx.sandbox_questions = None;
+        assert!(
+            resolve(&ctx, Some(&request), "bash", "read again")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            resolve(&ctx, None, "bash", "build")
+                .await
+                .unwrap()
+                .read_paths,
+            [first.canonicalize().unwrap()]
+        );
+        std::fs::rename(&first, root.path().join("old-first")).unwrap();
+        std::os::unix::fs::symlink(&second, &first).unwrap();
+        assert!(
+            resolve(&ctx, None, "bash", "build")
+                .await
+                .unwrap()
+                .read_paths
+                .is_empty()
+        );
     }
 
     #[tokio::test]

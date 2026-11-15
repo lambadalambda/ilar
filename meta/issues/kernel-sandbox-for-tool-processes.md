@@ -182,6 +182,30 @@ system linker instead of a host mise shim. `xcrun` cache and optional Git-ignore
 warnings remain. No whole-home or whole-config grant was added. See the
 experiment notes for details and remaining limits.
 
+## Session approvals (requested 2026-11-15)
+
+Add an explicit "Allow for this session" choice for read paths, write paths,
+and network. Reuse approved scopes in later process-tool calls of that live
+session, without a new question. Keep read and write grants separate. Do not
+share grants with another session, child agent, or restarted runtime. Store
+nothing on disk. Execution without ilar's sandbox remains a once-only choice,
+including requests that mix a bypass with path/network access.
+
+Canonicalize requested paths before approval and retain those target paths,
+not symlink aliases that could later redirect a saved grant. Keep explicit
+once/deny choices and existing unsupported-client refusal. Check repeated
+requests, calls without an extension argument, session isolation, and bypass
+refusal for the session scope.
+
+Implemented the three approval choices for root TUI process calls. Session
+read/write/network grants use a clone-shared, session-keyed in-memory store;
+children and fresh runtimes start empty. Calls without extension arguments and
+repeated covered requests reuse grants. Bypass requests never offer session
+approval. Retained canonical paths are discarded if resolution changes or fails.
+Focused tests cover reuse, isolation, separate read/write scopes, bypass refusal,
+and canonical-target replacement. A host test confirms later bash reads are
+denied after once-only approval and allowed after session approval.
+
 ## Milestone
 
 13 — Guard rails

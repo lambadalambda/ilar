@@ -34,9 +34,10 @@
 //! The helper may print errors and exit nonzero if activation is unavailable;
 //! it must not fall back to an unsandboxed shell.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-#[cfg(any(target_os = "macos", test))]
 use anyhow::{Context, bail, ensure};
 
 /// Explicit child-process grants. Disabled by default on every platform.
@@ -48,6 +49,47 @@ pub struct SandboxConfig {
     pub write_paths: Vec<PathBuf>,
     pub network: bool,
     pub profiles: Vec<String>,
+}
+
+/// In-memory grants shared by calls of one live session, keyed by session id.
+/// This store never disables confinement and is not serialized.
+#[derive(Clone, Debug, Default)]
+pub struct SessionGrants(Arc<Mutex<HashMap<String, SandboxConfig>>>);
+
+impl SessionGrants {
+    pub(crate) fn apply(&self, session_id: &str, config: &mut SandboxConfig) {
+        let mut grants = self.0.lock().unwrap();
+        if let Some(granted) = grants.get_mut(session_id) {
+            // Do not let a retained pathname silently redirect after approval.
+            // Drop changed/unresolvable roots; a new target needs approval again.
+            let unchanged = |path: &PathBuf| resolve_path(path).is_ok_and(|now| now == *path);
+            granted.read_paths.retain(unchanged);
+            granted.write_paths.retain(unchanged);
+            config.read_paths.extend(granted.read_paths.iter().cloned());
+            config
+                .write_paths
+                .extend(granted.write_paths.iter().cloned());
+            config.network |= granted.network;
+        }
+    }
+
+    pub(crate) fn remember(
+        &self,
+        session_id: &str,
+        reads: &[PathBuf],
+        writes: &[PathBuf],
+        network: bool,
+    ) {
+        let mut grants = self.0.lock().unwrap();
+        let granted = grants.entry(session_id.to_owned()).or_default();
+        granted.read_paths.extend_from_slice(reads);
+        granted.read_paths.sort();
+        granted.read_paths.dedup();
+        granted.write_paths.extend_from_slice(writes);
+        granted.write_paths.sort();
+        granted.write_paths.dedup();
+        granted.network |= network;
+    }
 }
 
 /// Build a shell command prefix. The caller appends `-c` and the script, then
@@ -88,8 +130,7 @@ pub fn command(cwd: &Path, config: &SandboxConfig) -> anyhow::Result<tokio::proc
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn resolve_path(path: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolve_path(path: &Path) -> anyhow::Result<PathBuf> {
     ensure!(
         path.is_absolute(),
         "sandbox path must be absolute: {}",

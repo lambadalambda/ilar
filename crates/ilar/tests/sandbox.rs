@@ -192,56 +192,61 @@ mod macos {
 
     #[tokio::test]
     #[ignore = "requires a host that permits Seatbelt activation"]
-    async fn an_approved_read_is_limited_to_one_call() {
+    async fn read_approval_scope_is_enforced_on_later_calls() {
         use ilar::question::{QuestionAnswer, QuestionResponse};
         let root = fixture();
         let project = root.path().join("project");
         std::fs::create_dir(&project).unwrap();
         let reference = root.path().join("reference");
         std::fs::write(&reference, "approved reference").unwrap();
-        let mut ctx = ToolContext::root(project);
-        ctx.sandbox.enabled = true;
-        let (sender, mut receiver) = ilar::question::question_channel(1);
-        ctx.sandbox_questions = Some(sender);
-        let approve = async {
-            let prompt = receiver.recv().await.unwrap();
-            assert!(
-                prompt.request.questions[0]
-                    .description
-                    .as_ref()
-                    .unwrap()
-                    .contains("Read paths")
+        for scope in ["once", "session"] {
+            let mut ctx = ToolContext::root(project.clone());
+            ctx.sandbox.enabled = true;
+            let (sender, mut receiver) = ilar::question::question_channel(1);
+            ctx.sandbox_questions = Some(sender);
+            let approve = async {
+                let prompt = receiver.recv().await.unwrap();
+                assert!(
+                    prompt.request.questions[0]
+                        .description
+                        .as_ref()
+                        .unwrap()
+                        .contains("Read paths")
+                );
+                prompt
+                    .reply
+                    .send(QuestionResponse::Answered {
+                        answers: vec![QuestionAnswer::SingleChoice {
+                            question_id: "sandbox_approval".into(),
+                            option_id: Some(scope.into()),
+                            other: None,
+                        }],
+                    })
+                    .unwrap();
+            };
+            let command = format!("cat {}", quote(&reference));
+            let (output, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    BashTool.run(
+                        json!({"command": command, "sandbox": {
+                            "read_paths": [reference], "reason": "Read the reference file"
+                        }}),
+                        ctx.clone()
+                    ),
+                    approve
+                )
+            })
+            .await
+            .expect("read approval should complete");
+            assert!(!output.is_error, "{}", output.content);
+            assert!(output.content.contains("approved reference"));
+            let output = BashTool.run(json!({"command": command}), ctx).await;
+            assert_eq!(output.is_error, scope == "once", "{}", output.content);
+            assert_eq!(
+                output.content.contains("approved reference"),
+                scope == "session"
             );
-            prompt
-                .reply
-                .send(QuestionResponse::Answered {
-                    answers: vec![QuestionAnswer::SingleChoice {
-                        question_id: "sandbox_approval".into(),
-                        option_id: Some("once".into()),
-                        other: None,
-                    }],
-                })
-                .unwrap();
-        };
-        let command = format!("cat {}", quote(&reference));
-        let (output, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            tokio::join!(
-                BashTool.run(
-                    json!({"command": command, "sandbox": {
-                        "read_paths": [reference], "reason": "Read the reference file"
-                    }}),
-                    ctx.clone()
-                ),
-                approve
-            )
-        })
-        .await
-        .expect("read approval should complete");
-        assert!(!output.is_error, "{}", output.content);
-        assert!(output.content.contains("approved reference"));
-        let output = BashTool.run(json!({"command": command}), ctx).await;
-        assert!(output.is_error);
-        assert!(!output.content.contains("approved reference"));
+        }
     }
 
     #[tokio::test]
