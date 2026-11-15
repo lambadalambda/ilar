@@ -63,6 +63,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 13 — Guard rails
 
 - [ ] [Kernel sandbox for tool processes](issues/kernel-sandbox-for-tool-processes.md)
+- [ ] [Context-aware automatic tool-call review](issues/context-aware-tool-call-review.md)
 - [ ] [The replay sweep](issues/the-replay-sweep.md)
 
 ## Milestone 14 — Agents are places
