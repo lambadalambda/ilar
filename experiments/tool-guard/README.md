@@ -77,6 +77,10 @@ right model template and return the final answer in `message.content`.
   This mapping is our experiment policy, not the paper's combined decision.
   The published combined rating is retained separately: it can be zero even
   when current-action harmfulness is one, if both other fields are `no`.
+  `0.5` means potential downstream risk or controversy in the model's prompt,
+  not a calibrated request for user authorization. Parsing ignores a completed
+  Think block, but tolerates its absent closing tag as the published parser does;
+  raw responses remain necessary to check ambiguous or quoted verdict fields.
 - **ShieldAgent:** `thu-coai/ShieldAgent`, MIT listed on its model card. Uses the
   model-card safety-evaluation prompt structure and tokenizer chat template,
   with corrected prose. Only an initial `[Answer] safe|unsafe` is accepted.

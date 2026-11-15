@@ -1,5 +1,7 @@
 # Completed issues
 
+- [x] [Local tool-call security experiment](issues/local-tool-call-security-experiment.md)
+
 - [x] [Refresh OpenCode model catalog and prices](issues/refresh-opencode-catalog-prices.md)
 
 - [x] [Session-scoped subagent model permissions](issues/session-subagent-model-permissions.md)

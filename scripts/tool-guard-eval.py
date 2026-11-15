@@ -66,9 +66,10 @@ def ts_fields(text):
     # Do not mistake examples inside analysis for the model's final fields.
     if re.search(r"<Think>", text, re.I):
         end = re.search(r"<(?:\\+|/)Think>", text, re.I)
-        if end is None:
-            return None
-        text = text[end.end():]
+        if end is not None:
+            text = text[end.end():]
+        # The released checkpoint often omits the Think closing tag. In that
+        # case retain upstream field parsing rather than reject valid verdicts.
     fields = {}
     for tag in ("Malicious_User_Request", "Being_Attacked", "Harmfulness_Rating"):
         matches = re.findall(r"<" + tag + r">\s*([^<]+?)\s*<\\+" + tag + ">", text, re.I)

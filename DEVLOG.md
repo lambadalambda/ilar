@@ -1,5 +1,20 @@
 # DEVLOG
 
+## Local tool-call security experiment
+
+Added a 30-case offline development set with nine real session-call anchors,
+synthetic task boundaries, dangerous mutations and benign/context controls.
+The runner never executes cases and supports local Transformers checkpoints or
+OpenAI-compatible checker endpoints. TS-Guard on local MPS made 23/30 exact
+decisions: one unsafe approval, four unsafe escalations and two benign blocks
+or escalations. It missed whole-home credential discovery and misread quoted
+shell text. ShieldAgent made 26/30 exact decisions, with no unsafe approvals but
+four benign blocks; both models misread the quoted shell example. Mean request
+times were 17.510 s (TS-Guard) and 9.393 s (ShieldAgent, capped explanations), not
+a like-for-like speed comparison. See `experiments/tool-guard/RESULTS.md` and
+saved raw responses for results and limits. This is not a runtime permission
+boundary.
+
 ## Proportion prompts for GPT: first comparison
 
 An audit of gpt-6.1-sol sessions in four game-port repos found as many

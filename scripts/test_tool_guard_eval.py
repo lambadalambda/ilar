@@ -36,6 +36,7 @@ class GuardEvalTests(unittest.TestCase):
         self.assertIsNone(eval.parse_verdict(response.split("<Being_Attacked>")[0], "ts-guard"))
         self.assertIsNone(eval.parse_verdict("<Think>quoted example " + response + "<\\Think>", "ts-guard"))
         self.assertEqual(eval.parse_verdict("<Think>reasoning<\\Think>" + response, "ts-guard"), "deny")
+        self.assertEqual(eval.parse_verdict("<Think>unclosed analysis\n" + response, "ts-guard"), "deny")
 
     def test_dataset_has_both_labels_and_prompts_never_include_label_reasons(self):
         import json

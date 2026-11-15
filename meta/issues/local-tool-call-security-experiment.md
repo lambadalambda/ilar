@@ -16,3 +16,11 @@ Compare local security checkers on a small set of sanitized ilar session calls a
 - The sanitized cases and expected decisions can be reviewed in the repository.
 - Runner tests pass and a local model run produces inspectable per-case results.
 - DEVLOG records results and limits without claiming a security guarantee.
+
+## Results
+
+Completed the 30-case development set, local/HTTP runner and five focused tests.
+TS-Guard ran locally with no parse errors. Its one unsafe approval and benign
+false blocks show why it must not replace execution restrictions. Full comparison
+and raw outputs are in `experiments/tool-guard/RESULTS.md` and `results/`.
+No Rust runtime behavior changed; the Rust workspace suite was not run.
