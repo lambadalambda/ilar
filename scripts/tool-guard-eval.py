@@ -148,6 +148,50 @@ def local_generator(args):
     return generate
 
 
+def collect_stream(chunks, style, stop_on_verdict):
+    text, last, stopped = "", None, False
+    for last in chunks:
+        text += last.text
+        # Require a following whitespace token, not just a partial answer word.
+        complete = style != "shieldagent" or re.match(r"\s*\[Answer\]\s*(?:safe|unsafe)\s", text, re.I)
+        if style == "ts-guard" and re.search(r"<Think>", text, re.I):
+            # During streaming, an unclosed Think block is still reasoning.
+            # Only the final parser may tolerate a missing boundary at EOS.
+            complete = re.search(r"<(?:\\+|/)Think>", text, re.I)
+        if stop_on_verdict and complete and parse_verdict(text, style) is not None:
+            stopped = True
+            break
+    return text, last, stopped
+
+
+def mlx_generator(args):
+    import mlx.core as mx
+    from mlx_lm import load, stream_generate
+    from mlx_lm.sample_utils import make_sampler
+    model, tokenizer, config = load(args.model, return_config=True, trust_remote_code=False)
+    print(f"Loaded {args.model} on {mx.default_device()}; quantization={config.get('quantization')}", flush=True)
+
+    def generate(messages):
+        prompt = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+        started = time.monotonic()
+        stream = stream_generate(model, tokenizer, prompt, max_tokens=args.max_tokens,
+                                 sampler=make_sampler(temp=0))
+        try:
+            text, last, stopped = collect_stream(stream, args.style, args.stop_on_verdict)
+        finally:
+            stream.close()
+            mx.synchronize()
+        if last is None:
+            raise RuntimeError("MLX returned no output")
+        return text, {
+            "input_tokens": last.prompt_tokens, "output_tokens": last.generation_tokens,
+            "generation_seconds": round(time.monotonic() - started, 3),
+            "hit_token_limit": last.finish_reason == "length",
+            "stopped_on_verdict": stopped, "quantization": config.get("quantization"),
+        }
+    return generate
+
+
 def http_generator(args):
     def generate(messages):
         body = {"model": args.model, "messages": messages, "temperature": 0,
@@ -168,13 +212,14 @@ def http_generator(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", type=Path, default=ROOT / "cases.json")
-    parser.add_argument("--backend", choices=("transformers", "http"), default="transformers")
+    parser.add_argument("--backend", choices=("transformers", "mlx", "http"), default="transformers")
     parser.add_argument("--style", choices=("ts-guard", "shieldagent", "policy"), required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--device")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api-key-env", help="Optional API-key environment variable; never logged")
     parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--stop-on-verdict", action="store_true", help="MLX: stop after a complete verdict")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -184,7 +229,9 @@ def main():
     ids = [c["id"] for c in cases]
     if len(ids) != len(set(ids)) or any(c["expected"] not in ("allow", "deny", "ask_user") for c in cases):
         parser.error("Case IDs must be unique and expected decisions valid")
-    generate = local_generator(args) if args.backend == "transformers" else http_generator(args)
+    if args.stop_on_verdict and args.backend != "mlx":
+        parser.error("--stop-on-verdict currently requires --backend mlx")
+    generate = {"transformers": local_generator, "mlx": mlx_generator, "http": http_generator}[args.backend](args)
     rows = []
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive create prevents an accidental rerun from deleting earlier results.

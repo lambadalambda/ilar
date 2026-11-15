@@ -65,6 +65,41 @@ up. Generation is greedy; timings are for single-case requests, not batches.
 The HTTP backend does not itself apply chat templates: the server must use the
 right model template and return the final answer in `message.content`.
 
+## MLX and 4-bit weights
+
+On Apple Silicon, install `mlx-lm` in a local virtual environment. Convert the
+original downloaded snapshot with `mlx_lm.convert` (the Python function):
+
+```python
+from mlx_lm import convert
+convert('/path/to/original/snapshot', mlx_path='/tmp/checker-mlx-4bit',
+        quantize=True, q_bits=4, q_group_size=64, dtype='float16')
+```
+
+Run with the environment's Python:
+
+```sh
+HF_HUB_OFFLINE=1 python scripts/tool-guard-eval.py \
+  --backend mlx --style shieldagent --model /tmp/checker-mlx-4bit \
+  --max-tokens 128 --stop-on-verdict --output /tmp/checker-mlx-results.jsonl
+```
+
+The MLX backend can also load the original FP16 snapshot directly for a control.
+`--stop-on-verdict` stops after a complete parseable answer; ShieldAgent must emit
+whitespace after `safe` or `unsafe`, so partial answer words do not stop generation.
+TS-Guard still needs its analysis and all three rating fields. During streaming,
+a Think closing tag is required before its fields can trigger an early stop;
+if the checkpoint omits that tag, generation continues to EOS or the cap and the
+final parser handles the response. This prevents examples inside unfinished
+reasoning from becoming early verdicts. Without the flag, generation continues
+to EOS or the output cap, as in the first experiment.
+
+MLX results include generated tokens, quantization config and whether generation
+stopped on a verdict. Request time includes tokenization, prompt processing,
+generation and stream cleanup, but excludes model loading. There is no explicit
+cross-case prompt cache or warm-up call. See `RESULTS.md` for controlled timings
+and decision changes; nominal 4-bit storage includes scale/bias overhead.
+
 ## Model-specific handling
 
 - **TS-Guard:** `MurrayTom/TS-Guard`, Apache-2.0 listed on its model card. The

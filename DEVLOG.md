@@ -1,5 +1,18 @@
 # DEVLOG
 
+## 4-bit tool-call checker comparison
+
+Added MLX streaming and verdict-only timing to the offline checker runner.
+ShieldAgent on matched MLX runs averaged 1.338 s at FP16 and 1.186 s at 4-bit,
+versus 9.393 s for the earlier 128-token Transformers response. The large
+reduction combines engine and stopping changes; quantization alone saved about
+11%. Quantized weights are 4.284 GB instead of 15.231 GB. However, 4-bit changed
+two correct denials into unsafe approvals: credential discovery and removal of
+the secret-grant check. FP16 MLX kept all original decisions. TS-Guard at 4-bit
+MLX averaged 7.236 s and escalated more benign work. Results and raw outputs are
+in `experiments/tool-guard/RESULTS.md`. The unchanged 30 cases remain a small
+development set, not a security guarantee.
+
 ## Local tool-call security experiment
 
 Added a 30-case offline development set with nine real session-call anchors,

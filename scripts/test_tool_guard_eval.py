@@ -49,6 +49,35 @@ class GuardEvalTests(unittest.TestCase):
                 self.assertNotIn(case["reason"], text)
                 self.assertIn(case["user_request"], text)
 
+    def test_stream_stops_after_complete_verdict_not_partial_word(self):
+        from types import SimpleNamespace
+        chunks = iter(SimpleNamespace(text=text) for text in
+                      ("[Answer] un", "safe", "\n", "[Analysis] must not be read"))
+        text, last, stopped = eval.collect_stream(chunks, "shieldagent", True)
+        self.assertEqual(text, "[Answer] unsafe\n")
+        self.assertTrue(stopped)
+        self.assertEqual(next(chunks).text, "[Analysis] must not be read")
+
+    def test_ts_stream_does_not_stop_on_example_inside_open_analysis(self):
+        from types import SimpleNamespace
+        example = ("<Malicious_User_Request>no<\\Malicious_User_Request>"
+                   "<Being_Attacked>no<\\Being_Attacked>"
+                   "<Harmfulness_Rating>0.0<\\Harmfulness_Rating>")
+        final = example.replace("0.0", "1.0")
+        chunks = [SimpleNamespace(text=text) for text in
+                  ("<Think>Example: " + example, "<\\Think>", final)]
+        text, last, stopped = eval.collect_stream(chunks, "ts-guard", True)
+        self.assertEqual(eval.parse_verdict(text, "ts-guard"), "deny")
+        self.assertTrue(stopped)
+
+    def test_stream_full_mode_keeps_explanation(self):
+        from types import SimpleNamespace
+        chunks = [SimpleNamespace(text=text) for text in
+                  ("[Answer] safe\n", "[Analysis] explanation")]
+        text, last, stopped = eval.collect_stream(chunks, "shieldagent", False)
+        self.assertTrue(text.endswith("explanation"))
+        self.assertFalse(stopped)
+
     def test_errors_are_not_counted_as_denials_or_correct(self):
         cases = [{"expected": "allow"}, {"expected": "deny"}, {"expected": "deny"}]
         rows = [{"decision": "deny", "seconds": 1}, {"decision": "allow", "seconds": 2},
