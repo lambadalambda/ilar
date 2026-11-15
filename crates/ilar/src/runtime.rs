@@ -37,6 +37,8 @@ pub struct RuntimeOptions {
     pub agent: Option<String>,
     /// Session to resume; a new one is created when absent.
     pub resume: Option<String>,
+    /// Experimental sandbox enable override; `None` uses user config.
+    pub sandbox: Option<bool>,
     pub cwd: PathBuf,
     /// Attach the `question` tool. A driver with nobody to answer
     /// leaves it off, and the tool call fails instead of hanging.
@@ -99,6 +101,7 @@ pub struct MemoryOptions {
 
 /// The session a driver is about to run, before anything is written.
 pub struct RuntimePlan {
+    pub sandbox: crate::sandbox::SandboxConfig,
     pub session_id: Option<String>,
     pub agent: AgentDefinition,
     pub agents: Vec<AgentDefinition>,
@@ -592,7 +595,12 @@ impl RuntimePlan {
         }
         let system_prompt = with_agent_prompt(system_prompt, &agent);
 
+        let mut sandbox = config.sandbox.clone();
+        if let Some(enabled) = options.sandbox {
+            sandbox.enabled = enabled;
+        }
         Ok(Self {
+            sandbox,
             session_id: options.resume.clone(),
             agent,
             agents,
@@ -848,10 +856,12 @@ impl RuntimePlan {
             .with_available_models(config.available_models())
             .with_secrets(secrets.clone())
             .with_sudo(config.agent.sudo)
+            .with_sandbox(self.sandbox.clone())
             .with_withheld(withheld.clone()),
         );
         let todos = Arc::new(Mutex::new(restored_todos(self.resumed.as_ref())));
         let registry = ToolRegistry::builtin()
+            .with_sandbox_extensions(self.sandbox.enabled && self.questions)
             .with_subagents(spawner.clone())?
             .with_services(services.clone())?
             .with_models(config.available_models())?
@@ -905,11 +915,13 @@ impl RuntimePlan {
         // A resumed session's cwd comes off disk and may be gone —
         // deleted worktree, unmounted volume. That is an error to
         // report, not a reason to abort the process.
-        let tool_ctx = ToolContext::try_root(self.cwd.clone())?
+        let mut tool_ctx = ToolContext::try_root(self.cwd.clone())?
             .with_subagents(spawner.clone())
             .with_spill_dir(crate::tools::bash::spill_dir(config.state_dir()))
             .with_secrets(secrets)
+            .with_sandbox(self.sandbox.clone())
             .with_withheld(withheld);
+        tool_ctx.sandbox_questions = registry.question_sender().cloned();
         Ok(Tooling {
             registry,
             spawner,

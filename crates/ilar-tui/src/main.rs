@@ -305,6 +305,10 @@ struct ExecArgs {
     #[arg(long)]
     json: bool,
 
+    /// Enable the experimental process sandbox
+    #[arg(long)]
+    experimental_sandbox: bool,
+
     /// Ignore the working directory's AGENTS.md/CLAUDE.md
     #[arg(long)]
     no_project_instructions: bool,
@@ -390,6 +394,7 @@ struct Args {
         // the flag not existing rather than as a rule about this one.
         "project_instructions",
         "no_project_instructions",
+        "experimental_sandbox",
     ])]
     view: Option<String>,
 
@@ -405,6 +410,10 @@ struct Args {
     /// every tool with its schema — and exit
     #[arg(long)]
     print_prompt: bool,
+
+    /// Enable the experimental process sandbox
+    #[arg(long)]
+    experimental_sandbox: bool,
 
     /// Ignore the working directory's AGENTS.md/CLAUDE.md
     #[arg(long)]
@@ -1367,6 +1376,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
             // model is told so on the spot instead of blocking.
             questions: false,
             grants: false,
+            sandbox: args.experimental_sandbox.then_some(true),
             project_instructions: cli_project_instructions(
                 args.project_instructions,
                 args.no_project_instructions,
@@ -1748,6 +1758,7 @@ async fn main() -> Result<()> {
                 cwd: cwd.clone(),
                 questions: true,
                 grants: true,
+                sandbox: args.experimental_sandbox.then_some(true),
                 // Not first-run-only like the model and agent
                 // overrides: what this launch does with the project
                 // file is a property of the launch, so every session
@@ -4067,6 +4078,24 @@ async fn run_app(
             app.question_modal = Some(questions::QuestionModal::new(prompt.request));
             app.status = "waiting for your answer".into();
             app.set_activity(Activity::Paused);
+        }
+        if question_reply
+            .as_ref()
+            .is_some_and(|reply| reply.is_closed())
+        {
+            question_reply = None;
+            pending_question_id = None;
+            app.question_modal = None;
+            app.push_transcript_line(Line_::System(
+                "Question withdrawn; the request is no longer active.".into(),
+            ));
+            if turn_handle.is_some() {
+                app.status = "thinking".into();
+                app.set_activity(Activity::Thinking);
+            } else {
+                app.status = "ready".into();
+                app.set_activity(Activity::Ready);
+            }
         }
         // A grant whose asker stopped listening — the turn ended or
         // was aborted under the modal — closes without an answer; the

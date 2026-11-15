@@ -203,6 +203,7 @@ pub struct SubagentSpawner {
     secrets: Option<crate::secrets::Secrets>,
     /// Whether child registries get the sudo tool (`agent.sudo`).
     sudo: bool,
+    sandbox: crate::sandbox::SandboxConfig,
     /// Paths withheld from every context this spawner builds — the
     /// children's, and the notification turns it runs on the parent
     /// session. See [`crate::tools::ToolContext::withheld`].
@@ -696,6 +697,7 @@ impl SubagentSpawner {
             available_models: Vec::new(),
             secrets: None,
             sudo: false,
+            sandbox: crate::sandbox::SandboxConfig::default(),
             withheld: Arc::from(Vec::new()),
         })
     }
@@ -783,6 +785,11 @@ impl SubagentSpawner {
 
     pub fn with_secrets(mut self, secrets: crate::secrets::Secrets) -> Self {
         self.secrets = Some(secrets);
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: crate::sandbox::SandboxConfig) -> Self {
+        self.sandbox = sandbox;
         self
     }
 
@@ -956,6 +963,7 @@ impl SubagentSpawner {
             available_models: self.available_models.clone(),
             secrets: self.secrets.clone(),
             sudo: self.sudo,
+            sandbox: self.sandbox.clone(),
             withheld: self.withheld.clone(),
         })
     }
@@ -1468,6 +1476,8 @@ impl SubagentSpawner {
                 .secrets
                 .clone()
                 .map(|secrets| secrets.for_agent(&agent.name)),
+            sandbox: ctx.sandbox.clone(),
+            sandbox_questions: None,
             // Inherited: a child of a seat in a room is in the same
             // room, and delegating the read is still the read.
             withheld: ctx.withheld.clone(),
@@ -2431,6 +2441,8 @@ your response with a one-line status, not an answer; the task keeps running eith
                     // watchdog.
                     heartbeat: None,
                     secrets: self.secrets.clone(),
+                    sandbox: self.sandbox.clone(),
+                    sandbox_questions: None,
                     // The notified session is the seat that delegated
                     // the work; a result arriving does not move it to
                     // another room.

@@ -78,6 +78,8 @@ pub(crate) struct ChildEnv {
     /// `/dev/null`. The sudo tool's password goes this way, never in
     /// the arguments.
     pub stdin: Option<Vec<u8>>,
+    /// Confinement prepared for this one approved launch.
+    pub sandbox: crate::sandbox::SandboxConfig,
 }
 
 impl ChildEnv {
@@ -106,6 +108,7 @@ impl ChildEnv {
                 .map(|secret| (secret.name.clone(), secret.value().to_string()))
                 .collect(),
             stdin: None,
+            sandbox: Default::default(),
         }
     }
 }
@@ -124,9 +127,12 @@ pub(crate) fn shell_command(
     command_text: &str,
     cwd: &std::path::Path,
     env: &ChildEnv,
-) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new("sh");
-    command.arg("-c").arg(command_text).current_dir(cwd);
+) -> anyhow::Result<tokio::process::Command> {
+    let mut command = crate::sandbox::command(cwd, &env.sandbox)?;
+    command.arg("-c").arg(command_text);
+    if !env.sandbox.enabled {
+        command.current_dir(cwd);
+    }
     // Removals first: `env_remove` also clears a name set explicitly,
     // and a granted secret is often the very variable being hidden —
     // the person's own exported token, stored under the same name.
@@ -163,7 +169,7 @@ pub(crate) fn shell_command(
             Ok(())
         });
     }
-    command
+    Ok(command)
 }
 
 /// Is this process group still ours to signal? Signal 0 asks the kernel
@@ -237,6 +243,23 @@ impl Drop for ProcessGroup {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandbox_keeps_the_canonical_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+        let mut env = ChildEnv::default();
+        env.sandbox.enabled = true;
+        let command = shell_command("true", &alias, &env).unwrap();
+        assert_eq!(
+            command.as_std().get_current_dir(),
+            Some(workspace.canonicalize().unwrap().as_path())
+        );
+    }
+
     fn captured(chunks: &[&[u8]], cap: usize) -> Captured {
         let mut captured = Captured::default();
         for chunk in chunks {
@@ -267,6 +290,7 @@ mod tests {
     #[tokio::test]
     async fn a_shell_child_leads_its_own_process_group() {
         let mut child = shell_command("sleep 30", std::path::Path::new("."), &ChildEnv::default())
+            .unwrap()
             .spawn()
             .expect("pre_exec must not fail on a healthy fork");
         let pid = i32::try_from(child.id().unwrap()).unwrap();
@@ -288,6 +312,7 @@ mod tests {
     #[tokio::test]
     async fn a_group_that_has_exited_is_not_signalable() {
         let mut child = shell_command("exit 0", std::path::Path::new("."), &ChildEnv::default())
+            .unwrap()
             .spawn()
             .expect("pre_exec must not fail on a healthy fork");
         let pid = child.id().unwrap();
@@ -317,12 +342,14 @@ mod tests {
                 ("PROCESS_TEST_BOTH".into(), "both-value".into()),
             ],
             stdin: None,
+            sandbox: Default::default(),
         };
         let output = shell_command(
             "echo \"h=[$PROCESS_TEST_HIDDEN] g=$PROCESS_TEST_GRANTED b=$PROCESS_TEST_BOTH p=${PATH:+set}\"",
             std::path::Path::new("."),
             &env,
         )
+        .unwrap()
         .output()
         .await
         .unwrap();

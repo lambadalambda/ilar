@@ -917,6 +917,7 @@ pub fn plan(
             // the chat and /grant or /deny answers it. Unless nobody
             // is there — a scheduled turn — and it is refused instead.
             grants,
+            sandbox: None,
             project_instructions: None,
             // An assistant has a SOUL.md before it has coding
             // instructions: who it is, how it talks — and reads it,

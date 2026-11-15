@@ -15,7 +15,8 @@ overridden by project files:
   conversation (prompts, code, tool output, your API key) is sent is never a
   cloned repository's call to make;
 - `[cache_compact]`, which spends money on an unattended provider request;
-- `[gateway]` and `[channels]`, which decide who may message your assistant.
+- `[gateway]` and `[channels]`, which decide who may message your assistant;
+- `[sandbox]`, which controls the experimental child-process sandbox.
 
 A user-scoped table is discarded whole rather than merged field by field: a
 project `[providers.openai]` cannot switch `auth` back, point `base_url`
@@ -23,6 +24,60 @@ elsewhere, or change anything else about a provider you configured. A project
 file that sets one of these is reported rather than silently ignored — as a
 system line in the TUI transcript at startup, on stderr from `ilar exec`, and
 as a `{"type":"notice"}` event under `ilar exec --json`.
+
+## Experimental process sandbox
+
+Off by default. On macOS, `ilar --experimental-sandbox` and
+`ilar exec --experimental-sandbox ...` enable write and network restrictions
+for shell-backed tools. The same setting is available in the user config:
+
+```toml
+[sandbox]
+enabled = true
+network = false
+profiles = ["cargo"]
+write_paths = ["/absolute/path/to/a/build-cache"]
+```
+
+Project `[sandbox]` tables are ignored and reported. Paths must be absolute,
+with no `..`; an explicit path grants its subtree. Unknown profile names
+refuse process launch. Supported profiles are `cargo` (registry/git caches
+and package-cache lock files), `python` (pip caches), and `node` (npm cache,
+logs, and update-check marker). Profiles do not install binaries or enable
+network. Symlinked cache locations need an explicit path grant. Parent cache
+directories must already exist if creating them needs a wider grant.
+
+Reads remain broad. Writes are limited to the command workspace, `/dev/null`,
+and configured paths/caches. Temporary-file environment variables point to
+the workspace; there is no shared `/tmp` write grant. Network is denied unless
+`network = true`, which permits all network access, not selected hosts.
+
+In the interactive root TUI, bash, service start, and sudo can request a
+`sandbox` exception with `write_paths`, `network`, or `unsandboxed`, plus a
+`reason`. The user sees the command and access request before launch. Use
+PageUp/PageDown to read long approval details. Approval applies only to that
+call; it does not persist. Cancellation or missing approval support refuses
+the call. Child sessions, `ilar exec`, and the gateway cannot approve these
+exceptions yet. Configure their required grants before launch.
+
+`unsandboxed` removes only ilar's sandbox for one approved call. Secret/root
+checks and inherited external restrictions still apply. Failed commands are
+not retried automatically by the sandbox. Experimental sudo also stops after
+its first requested-command launch instead of retrying from diagnostic text.
+Services keep their initial policy until restarted.
+
+This is not a complete security boundary. Direct file tools, Git helpers,
+provider requests, and other host-side operations are not confined by this
+process policy. Broad reads, IPC, inherited descriptors, and broker services
+remain outside its protection. Do not use it to run hostile code.
+
+The macOS backend uses the deprecated system `sandbox-exec` helper. An enabled
+sandbox fails on unsupported platforms or activation errors; it never falls
+back to an unrestricted shell. Some outer sandboxes prevent activation.
+Observe/training mode, saved project grants, strict read controls, and a Linux
+backend remain future work. See [experiments and limits](../experiments/sandbox/README.md).
+
+## Settings
 
 | Setting | Default | Description |
 | --- | --- | --- |

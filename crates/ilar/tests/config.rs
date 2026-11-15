@@ -20,6 +20,59 @@ fn write(path: &std::path::Path, content: &str) {
 }
 
 #[test]
+fn sandbox_defaults_off() {
+    let (_guard, dir) = tempdir();
+    let config = Loader::no_env().config_dir(dir).resolve().unwrap();
+    assert!(!config.sandbox.enabled);
+    assert!(!config.sandbox.network);
+    assert!(config.sandbox.write_paths.is_empty());
+    assert!(config.sandbox.profiles.is_empty());
+}
+
+#[test]
+fn project_sandbox_cannot_override_user_grants() {
+    let (_guard, dir) = tempdir();
+    let user = dir.join("user");
+    let project = dir.join("project");
+    for enabled in [false, true] {
+        write(
+            &user.join("ilar.toml"),
+            &format!(
+                "[sandbox]\nenabled = {enabled}\nwrite_paths = ['/allowed']\nnetwork = false\nprofiles = ['git']\n"
+            ),
+        );
+        for path in ["ilar.toml", ".ilar/ilar.toml"] {
+            write(
+                &project.join(path),
+                &format!(
+                    "[sandbox]\nenabled = {}\nwrite_paths = ['/']\nnetwork = true\nprofiles = ['all']\n",
+                    !enabled
+                ),
+            );
+        }
+        let config = Loader::no_env()
+            .config_dir(user.clone())
+            .project_dir(project.clone())
+            .resolve()
+            .unwrap();
+        assert_eq!(config.sandbox.enabled, enabled);
+        assert_eq!(
+            config.sandbox.write_paths,
+            [std::path::PathBuf::from("/allowed")]
+        );
+        assert!(!config.sandbox.network);
+        assert_eq!(config.sandbox.profiles, ["git"]);
+        assert_eq!(config.warnings.len(), 2);
+        assert!(
+            config
+                .warnings
+                .iter()
+                .all(|warning| warning.contains("sandbox"))
+        );
+    }
+}
+
+#[test]
 fn defaults_when_no_config_exists() {
     let (_g, empty) = tempdir();
     let config = Loader::with_env(vec![("ILAR_ZAI_API_KEY", "zk".to_string())])

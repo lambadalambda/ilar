@@ -11,6 +11,7 @@ pub mod image_gen;
 pub mod models;
 mod process;
 pub mod read;
+pub(crate) mod sandbox_grants;
 pub mod secrets_tool;
 pub mod service;
 pub mod sudo;
@@ -671,11 +672,16 @@ impl Heartbeat {
     }
 }
 
-/// Per-invocation context. No permission checks — the sandbox is the
-/// permission system.
+/// Per-invocation context. Optional child-process confinement does not
+/// constrain host-side file tools; secret/root grants remain separate.
 #[derive(Clone)]
 pub struct ToolContext {
     pub cwd: std::path::PathBuf,
+    pub sandbox: crate::sandbox::SandboxConfig,
+    /// Host approval prompts are available only in the root interactive
+    /// session. Child and notification contexts must leave this unset:
+    /// the UI routes questions by the root session's exact id.
+    pub sandbox_questions: Option<crate::question::QuestionSender>,
     pub location: WorkspaceLocation,
     /// Session the tool call belongs to (parent link for subagents).
     pub session_id: String,
@@ -912,10 +918,18 @@ impl ToolContext {
             spill_dir: None,
             heartbeat: None,
             secrets: None,
+            sandbox: crate::sandbox::SandboxConfig::default(),
+            sandbox_questions: None,
             withheld: Arc::from(Vec::new()),
             steers: None,
             detached_owner: None,
         })
+    }
+
+    /// Attach process sandbox settings without changing session identity.
+    pub fn with_sandbox(mut self, sandbox: crate::sandbox::SandboxConfig) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 
     /// Context with the secret store attached.
@@ -1247,6 +1261,7 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
     questions: Option<crate::question::QuestionSender>,
+    sandbox_extensions: bool,
     /// The session's service manager, when the service tool is
     /// installed: compaction asks it what is still running.
     services: Option<Arc<service::ServiceManager>>,
@@ -1334,6 +1349,7 @@ impl ToolRegistry {
                 Arc::new(web::WebFetchTool::default()),
             ],
             questions: None,
+            sandbox_extensions: false,
             services: None,
         }
     }
@@ -1349,6 +1365,7 @@ impl ToolRegistry {
                 Arc::new(web::WebFetchTool::default()),
             ],
             questions: None,
+            sandbox_extensions: false,
             services: None,
         }
     }
@@ -1599,15 +1616,32 @@ impl ToolRegistry {
         self.questions.as_ref()
     }
 
+    /// Publish sandbox extension arguments only for opted-in root sessions.
+    pub fn with_sandbox_extensions(mut self, enabled: bool) -> Self {
+        self.sandbox_extensions = enabled;
+        self
+    }
+
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions = self
             .tools
             .iter()
             .filter(|t| t.is_published())
-            .map(|t| ToolDefinition {
-                name: t.name().into(),
-                description: t.description().into(),
-                input_schema: t.input_schema(),
+            .map(|t| {
+                let mut input_schema = t.input_schema();
+                if !self.sandbox_extensions
+                    && matches!(t.name(), "bash" | "service" | "sudo")
+                    && let Some(properties) = input_schema
+                        .get_mut("properties")
+                        .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("sandbox");
+                }
+                ToolDefinition {
+                    name: t.name().into(),
+                    description: t.description().into(),
+                    input_schema,
+                }
             })
             .collect::<Vec<_>>();
         if self.questions.is_some() {

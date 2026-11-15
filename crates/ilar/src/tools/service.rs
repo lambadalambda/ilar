@@ -261,6 +261,8 @@ struct Input {
     /// Report the exit as a background job's result (start only).
     #[serde(default)]
     notify: bool,
+    #[serde(default)]
+    sandbox: Option<super::sandbox_grants::Request>,
 }
 
 /// How often a notifying service's watcher looks at it.
@@ -412,6 +414,7 @@ impl Tool for ServiceTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "sandbox": super::sandbox_grants::schema(),
                 "action": {"type": "string", "enum": ["start", "status", "logs", "stop"]},
                 "name": {"type": "string", "description": "Service name ([a-zA-Z0-9_-], max 64)"},
                 "command": {"type": "string", "description": "Shell command (start only)"},
@@ -475,8 +478,28 @@ impl Tool for ServiceTool {
                         Ok(granted) => granted,
                         Err(error) => return ToolOutput::error(error),
                     };
-                    let env = ChildEnv::shielded(ctx.secrets.as_ref(), &granted);
-                    let mut child = match shell_command(&command, &ctx.cwd, &env).spawn() {
+                    let sandbox = match super::sandbox_grants::resolve(
+                        &ctx,
+                        input.sandbox.as_ref(),
+                        "service",
+                        &command,
+                    )
+                    .await
+                    {
+                        Ok(config) => config,
+                        Err(error) => return ToolOutput::error(format!("service {name}: {error}")),
+                    };
+                    let mut env = ChildEnv::shielded(ctx.secrets.as_ref(), &granted);
+                    env.sandbox = sandbox;
+                    let mut launch = match shell_command(&command, &ctx.cwd, &env) {
+                        Ok(launch) => launch,
+                        Err(error) => {
+                            return ToolOutput::error(format!(
+                                "service {name}: sandbox setup failed: {error}"
+                            ));
+                        }
+                    };
+                    let mut child = match launch.spawn() {
                         Ok(child) => child,
                         Err(error) => {
                             return ToolOutput::error(format!("service {name}: {error}"));

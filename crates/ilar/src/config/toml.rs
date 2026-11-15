@@ -318,6 +318,7 @@ struct FileConfig {
     compaction: Option<CompactionLayer>,
     cache_compact: Option<CacheCompactLayer>,
     subagents: Option<SubagentLayer>,
+    sandbox: Option<crate::sandbox::SandboxConfig>,
     /// The assistant gateway's own settings, parsed by its crate: the
     /// core carries the table and decides only whose it is.
     gateway: Option<toml::Table>,
@@ -577,6 +578,8 @@ pub struct Config {
     pub agent: AgentConfig,
     pub compaction: CompactionConfig,
     pub cache_compact: CacheCompactConfig,
+    /// Process sandbox settings from the user's config only.
+    pub sandbox: crate::sandbox::SandboxConfig,
     pub subagents: SubagentConfig,
     /// `[gateway]` as written in the user's file, for the gateway crate
     /// to parse. User-scoped: a project may not point the user's
@@ -1001,6 +1004,7 @@ impl Config {
                     .and_then(|config| config.background_tool_timeout_ms)
                     .unwrap_or_else(default_background_tool_timeout_ms),
             },
+            sandbox: merged.sandbox.unwrap_or_default(),
             gateway: merged.gateway,
             channels: merged.channels,
             user_dir,
@@ -1249,6 +1253,7 @@ impl Config {
             custom_models: Vec::new(),
             compaction: CompactionConfig::default(),
             cache_compact: CacheCompactConfig::default(),
+            sandbox: crate::sandbox::SandboxConfig::default(),
             subagents: SubagentConfig::default(),
             endpoints: HashMap::new(),
             gateway: None,
@@ -1479,6 +1484,7 @@ const USER_SCOPED_TABLES: &[&str] = &[
     "cache_compact",
     "gateway",
     "channels",
+    "sandbox",
 ];
 
 /// Which user-scoped tables a project layer declares — read off the raw
@@ -1561,6 +1567,9 @@ fn merge_file(
     // carries these tables by now.
     let parsed = canonical_base_urls(parsed);
     let mut merged = base;
+    if parsed.sandbox.is_some() {
+        merged.sandbox = parsed.sandbox;
+    }
     if let Some(general) = parsed.general {
         overlay!(
             merged.general.get_or_insert_with(GeneralConfig::default),

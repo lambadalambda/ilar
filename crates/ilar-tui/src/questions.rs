@@ -1,5 +1,7 @@
 //! State and rendering for structured questions.
 
+use std::cell::Cell;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ilar::question::{Question, QuestionAnswer, QuestionKind, QuestionRequest, QuestionResponse};
 use ratatui::Frame;
@@ -88,6 +90,11 @@ pub(crate) struct QuestionModal {
     drafts: Vec<Draft>,
     current: usize,
     error: Option<String>,
+    // Rendering supplies the wrapped row offset and page size to input
+    // handling without requiring a mutable modal at every render call.
+    scroll: Cell<usize>,
+    page_height: Cell<usize>,
+    follow_cursor: bool,
 }
 
 impl QuestionModal {
@@ -114,6 +121,9 @@ impl QuestionModal {
             drafts,
             current: 0,
             error: None,
+            scroll: Cell::new(0),
+            page_height: Cell::new(1),
+            follow_cursor: false,
         }
     }
 
@@ -132,12 +142,24 @@ impl QuestionModal {
         }
         match key.code {
             KeyCode::Esc => return QuestionAction::Complete(QuestionResponse::Cancelled),
+            KeyCode::PageUp | KeyCode::PageDown => {
+                let step = self.page_height.get().saturating_sub(1).max(1);
+                self.scroll.set(if key.code == KeyCode::PageUp {
+                    self.scroll.get().saturating_sub(step)
+                } else {
+                    self.scroll.get().saturating_add(step)
+                });
+                self.follow_cursor = false;
+                return QuestionAction::Stay;
+            }
             KeyCode::BackTab => {
                 self.current = self.current.saturating_sub(1);
+                self.reset_view();
                 return QuestionAction::Stay;
             }
             _ => {}
         }
+        self.follow_cursor = true;
 
         let question = &self.request.questions[self.current];
         let option_count = choice_len(question);
@@ -187,13 +209,22 @@ impl QuestionModal {
         QuestionAction::Stay
     }
 
+    fn reset_view(&mut self) {
+        self.scroll.set(0);
+        self.follow_cursor = false;
+    }
+
     /// Step between questions without validating — the counterpart to
     /// BackTab, for an arrow the active draft could not use.
     fn move_question(&mut self, code: KeyCode) {
+        let previous = self.current;
         match code {
             KeyCode::Up => self.current = self.current.saturating_sub(1),
             KeyCode::Down if self.current + 1 < self.request.questions.len() => self.current += 1,
             _ => {}
+        }
+        if self.current != previous {
+            self.reset_view();
         }
     }
 
@@ -203,6 +234,7 @@ impl QuestionModal {
         if self.request.questions.is_empty() {
             return;
         }
+        self.follow_cursor = true;
         match &mut self.drafts[self.current] {
             Draft::FreeText(input) => input.insert(text),
             Draft::Single {
@@ -268,6 +300,7 @@ impl QuestionModal {
         }
         if self.current + 1 < self.request.questions.len() {
             self.current += 1;
+            self.reset_view();
             QuestionAction::Stay
         } else {
             let response = QuestionResponse::Answered {
@@ -349,30 +382,43 @@ impl QuestionModal {
             Style::default().add_modifier(Modifier::BOLD),
         )];
         if let Some(description) = &question.description {
-            lines.push(Line::styled(
-                description.as_str(),
-                Style::default().fg(theme::MUTED),
-            ));
+            lines.extend(
+                description
+                    .split('\n')
+                    .map(|line| Line::styled(line, Style::default().fg(theme::MUTED))),
+            );
         }
         lines.push(Line::default());
         let active_line = append_draft_lines(&mut lines, question, &self.drafts[self.current]);
 
         let error_height = u16::from(self.error.is_some() && inner.height > 1);
-        let body_height = inner.height.saturating_sub(error_height);
-        let body = Rect::new(inner.x, inner.y, inner.width, body_height);
+        let hint_height = u16::from(inner.height > error_height + 1);
+        let body_height = inner.height.saturating_sub(error_height + hint_height);
+        let body = Rect::new(inner.x, inner.y + hint_height, inner.width, body_height);
+        if hint_height > 0 {
+            frame.render_widget(
+                Paragraph::new("PgUp/PgDn scroll").style(Style::default().fg(theme::MUTED)),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+        }
         if body.height > 0 {
             let active_row = Paragraph::new(lines[..active_line].to_vec())
                 .wrap(Wrap { trim: false })
                 .line_count(body.width);
-            let scroll = active_row
-                .saturating_sub(body.height.saturating_sub(1) as usize)
-                .min(usize::from(u16::MAX)) as u16;
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .scroll((scroll, 0)),
-                body,
-            );
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            let max_scroll = paragraph
+                .line_count(body.width)
+                .saturating_sub(body.height as usize);
+            let scroll = if self.follow_cursor {
+                active_row.saturating_sub(body.height.saturating_sub(1) as usize)
+            } else {
+                self.scroll.get()
+            }
+            .min(max_scroll)
+            .min(usize::from(u16::MAX));
+            self.scroll.set(scroll);
+            self.page_height.set(body.height as usize);
+            frame.render_widget(paragraph.scroll((scroll as u16, 0)), body);
         }
         if let Some(error) = &self.error
             && error_height > 0
@@ -862,6 +908,70 @@ mod tests {
     }
 
     #[test]
+    fn long_descriptions_can_be_read_before_selecting_an_answer() {
+        let mut request = request();
+        request.questions[0].description =
+            Some((0..40).map(|row| format!("detail {row:02}\n")).collect());
+        let mut modal = QuestionModal::new(request);
+        let initial = screen(&modal, 40, 12);
+        assert!(initial.contains("Pick a language"), "{initial}");
+        assert!(initial.contains("detail 00"), "{initial}");
+        assert!(initial.contains("PgUp/PgDn"), "{initial}");
+        let mut inspected = initial;
+        for _ in 0..20 {
+            modal.handle_key(key(KeyCode::PageDown));
+            inspected.push_str(&screen(&modal, 40, 12));
+        }
+        for row in 0..40 {
+            assert!(inspected.contains(&format!("detail {row:02}")));
+        }
+        assert!(screen(&modal, 40, 12).contains("Other…"));
+        for _ in 0..20 {
+            modal.handle_key(key(KeyCode::PageUp));
+            screen(&modal, 40, 12);
+        }
+        assert!(screen(&modal, 40, 12).contains("detail 00"));
+        // Navigation returns to the answer without selecting it on scroll.
+        modal.handle_key(key(KeyCode::Down));
+        assert!(screen(&modal, 40, 12).contains("> [ ] Elm"));
+        modal.handle_key(key(KeyCode::Char(' ')));
+        modal.handle_key(key(KeyCode::Enter));
+        assert_eq!(modal.question_index(), 1);
+        assert!(screen(&modal, 40, 12).contains("Choose features"));
+        modal.handle_key(key(KeyCode::BackTab));
+        assert!(screen(&modal, 40, 12).contains("detail 00"));
+    }
+
+    #[test]
+    fn paging_wrapped_descriptions_does_not_edit_free_text() {
+        let mut request = request();
+        let mut question = request.questions.pop().unwrap();
+        question.description = Some((0..30).map(|index| format!("path{index:02} ")).collect());
+        let mut modal = QuestionModal::new(QuestionRequest {
+            questions: vec![question],
+        });
+        let mut inspected = screen(&modal, 24, 8);
+        for _ in 0..40 {
+            modal.handle_key(key(KeyCode::PageDown));
+            inspected.push_str(&screen(&modal, 24, 8));
+        }
+        for index in 0..30 {
+            assert!(inspected.contains(&format!("path{index:02}")));
+        }
+        modal.paste("unchanged");
+        modal.handle_key(key(KeyCode::PageUp));
+        screen(&modal, 24, 8);
+        let QuestionAction::Complete(QuestionResponse::Answered { answers }) =
+            modal.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("expected the text answer");
+        };
+        assert!(
+            matches!(&answers[0], QuestionAnswer::FreeText { text, .. } if text == "unchanged")
+        );
+    }
+
+    #[test]
     fn renders_number_description_options_markers_and_footer() {
         let output = screen(&QuestionModal::new(request()), 80, 24);
         assert!(output.contains("question 1/3"));
@@ -933,14 +1043,17 @@ mod tests {
                 kind: QuestionKind::FreeText,
             }],
         };
-        let output = screen(&QuestionModal::new(request), 12, 5);
+        let mut modal = QuestionModal::new(request);
+        let output = screen(&modal, 12, 5);
         assert_eq!(output.lines().count(), 5);
         // The shared modal chrome: a double border, like every other
         // overlay, and a margin the terminal edge cannot swallow.
         assert!(output.contains('╔') && output.contains('╝'), "{output}");
+        modal.paste("a");
+        let output = screen(&modal, 12, 5);
         assert!(
             output.contains('▏'),
-            "active answer should remain visible: {output}"
+            "active answer should become visible when editing: {output}"
         );
     }
 }

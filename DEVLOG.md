@@ -1,5 +1,23 @@
 # DEVLOG
 
+## Opt-in process sandbox experiment
+
+Added user-only `[sandbox]` settings and `--experimental-sandbox`, disabled
+by default. The macOS backend uses the system `sandbox-exec` helper to avoid
+compiling Seatbelt policy in a multithreaded parent's pre-exec hook. Reads
+stay broad; writes are confined to workspace and explicit cache/path grants;
+network is denied unless granted. Root TUI calls can request a once-only
+extension or bypass. No automatic fallback or retry follows a denial.
+
+Cargo, Python, npm/local-dependency, and Git baseline projects all passed.
+All sandboxed attempts stopped at activation with EPERM, before commands
+ran. Policy syntax and approval tests pass, but enforcement and cache defaults
+remain unverified on this restricted host. Observe-mode logging was not
+available; no training mode or learned policy is claimed. Direct file tools,
+Linux, saved project grants, and child/gateway approvals remain open work.
+See `experiments/sandbox/README.md` for commands and results. The sandbox issue
+stays open.
+
 ## 4-bit tool-call checker comparison
 
 Added MLX streaming and verdict-only timing to the offline checker runner.

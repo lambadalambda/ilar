@@ -437,6 +437,8 @@ struct Input {
     /// Stored secrets to hand the command as environment variables.
     #[serde(default)]
     secrets: Vec<String>,
+    #[serde(default)]
+    sandbox: Option<super::sandbox_grants::Request>,
 }
 
 impl Tool for BashTool {
@@ -468,6 +470,7 @@ impl Tool for BashTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "sandbox": super::sandbox_grants::schema(),
                 "command": {"type": "string", "description": "The shell command, run with sh -c in the project cwd"},
                 "timeout_ms": {"type": "integer", "description": format!("{TIMEOUT_MS_DESCRIPTION} A background run defaults to subagents.background_tool_timeout_ms instead (600000 unless configured).")},
                 "run_in_background": {"type": "boolean", "description": "Run detached; the result arrives as a notification that starts a follow-up turn. Send it as the only call in its response. Until it reports, the job holds this checkout: your own edit, write, bash, service start and sudo calls are refused, while read, glob and grep still work."},
@@ -492,6 +495,17 @@ impl Tool for BashTool {
             {
                 return ToolOutput::error(short_timeout_refusal("bash", timeout));
             }
+            let sandbox = match super::sandbox_grants::resolve(
+                &ctx,
+                input.sandbox.as_ref(),
+                "bash",
+                &input.command,
+            )
+            .await
+            {
+                Ok(config) => config,
+                Err(error) => return ToolOutput::error(format!("bash: {error}")),
+            };
             let spill = SpillTarget::from_context(&ctx);
             let granted = match ctx
                 .grant_secrets("bash", &input.secrets, &input.command)
@@ -508,7 +522,8 @@ impl Tool for BashTool {
                 .as_ref()
                 .map(|secrets| secrets.all())
                 .unwrap_or_default();
-            let env = ChildEnv::shielded_from(&stored, &granted);
+            let mut env = ChildEnv::shielded_from(&stored, &granted);
+            env.sandbox = sandbox;
             let granted = crate::secrets::redaction_set(stored, &granted);
             if input.run_in_background {
                 if ctx.has_workspace_lease() {
@@ -630,7 +645,13 @@ pub(crate) fn run_command(
     granted: Vec<crate::secrets::Granted>,
 ) -> ToolFuture {
     Box::pin(async move {
-        let mut child = match shell_command(&command_text, &cwd, &env).spawn() {
+        let mut command = match shell_command(&command_text, &cwd, &env) {
+            Ok(command) => command,
+            Err(error) => {
+                return ToolOutput::error(format!("{tool}: sandbox setup failed: {error}"));
+            }
+        };
+        let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => return ToolOutput::error(format!("{tool}: {e}")),
         };

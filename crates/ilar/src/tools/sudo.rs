@@ -44,6 +44,8 @@ struct Input {
     timeout_ms: Option<u64>,
     #[serde(default)]
     preview_bytes: Option<usize>,
+    #[serde(default)]
+    sandbox: Option<super::sandbox_grants::Request>,
 }
 
 /// One word, safe for `sh`: single-quoted, with any single quote
@@ -92,7 +94,10 @@ pub fn invocation(
 /// that hangs (a wedged sudo, a stuck NSS lookup) counts as "wants
 /// one": the person can still answer, and nothing ran as root.
 async fn passwordless(binary: &str, cwd: &std::path::Path, env: &ChildEnv) -> bool {
-    let mut command = super::process::shell_command(&format!("{binary} -n true"), cwd, env);
+    let Ok(mut command) = super::process::shell_command(&format!("{binary} -n true"), cwd, env)
+    else {
+        return false;
+    };
     let Ok(mut child) = command.spawn() else {
         return false;
     };
@@ -138,6 +143,7 @@ impl Tool for SudoTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "sandbox": super::sandbox_grants::schema(),
                 "command": {"type": "string", "description": "The shell command, run as root with sh -c in the project cwd"},
                 "reason": {"type": "string", "description": "Why this needs root; shown to the user with the command"},
                 "timeout_ms": {"type": "integer", "description": TIMEOUT_MS_DESCRIPTION},
@@ -164,6 +170,17 @@ impl Tool for SudoTool {
             {
                 return ToolOutput::error(short_timeout_refusal("sudo", timeout));
             }
+            let sandbox = match super::sandbox_grants::resolve(
+                &ctx,
+                input.sandbox.as_ref(),
+                "sudo",
+                &input.command,
+            )
+            .await
+            {
+                Ok(config) => config,
+                Err(error) => return ToolOutput::error(format!("sudo: {error}")),
+            };
             let Some(secrets) = ctx.secrets.as_ref() else {
                 return ToolOutput::error(
                     "sudo: this session has no secret store, so nobody can be asked for root",
@@ -214,6 +231,7 @@ impl Tool for SudoTool {
                     .into_iter()
                     .collect();
                 let mut env = ChildEnv::shielded_from(&stored, &[]);
+                env.sandbox = sandbox.clone();
                 env.stdin = stdin;
                 // sudo's own diagnostics, in the wording this code
                 // reads: "1 incorrect password attempt" is translated
@@ -238,7 +256,8 @@ impl Tool for SudoTool {
                 // Nothing known: ask the system before asking the
                 // person. A NOPASSWD rule means no prompt at all.
                 let stored = secrets.all();
-                let env = ChildEnv::shielded_from(&stored, &[]);
+                let mut env = ChildEnv::shielded_from(&stored, &[]);
+                env.sandbox = sandbox.clone();
                 if passwordless(&binary, &ctx.cwd, &env).await {
                     let output = run(None, stored).await;
                     // The probe passed and the command still wanted a
@@ -246,7 +265,9 @@ impl Tool for SudoTool {
                     // or a timestamp that expired in between. Ask,
                     // rather than hand back a refusal nobody was given
                     // the chance to answer.
-                    if !(output.is_error && output.content.contains("password is required")) {
+                    if ctx.sandbox.enabled
+                        || !(output.is_error && output.content.contains("password is required"))
+                    {
                         return output;
                     }
                     if !secrets.can_ask() {
@@ -292,7 +313,12 @@ impl Tool for SudoTool {
                     },
                 };
                 let mut output = run(Some(&password), secrets.all()).await;
-                if !(output.is_error && output.content.contains("incorrect password attempt")) {
+                // Under the experiment, never repeat a launched command based
+                // on output text: the command itself can print sudo's wording
+                // after it has already changed data.
+                if ctx.sandbox.enabled
+                    || !(output.is_error && output.content.contains("incorrect password attempt"))
+                {
                     return output;
                 }
                 // A password typed this session is forgotten, so the

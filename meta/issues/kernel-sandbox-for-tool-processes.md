@@ -15,14 +15,13 @@ anything tighter viable.
 
 ## Design sketch (from discussion, 2026-08-25)
 
-- One enforcement chokepoint already exists:
+- One process-launch point already exists:
   `tools/process.rs::shell_command` builds every child for bash and
-  services. Confine there via `pre_exec` — no wrapper binary,
-  inherited by the process group ilar already manages.
-- Backends: macOS Seatbelt (`sandbox_init`, generated profile —
-  what Codex CLI/Chrome ship on); Linux Landlock (`landlock` crate,
+  services. The experimental macOS backend uses the system sandbox helper;
+  the initial direct-`pre_exec` sketch is superseded (see results below).
+- Backends: macOS Seatbelt; planned Linux Landlock (`landlock` crate,
   unprivileged, stackable; network TCP on ≥6.7) + seccomp for
-  syscall classes. Old kernels: warn and run.
+  syscall classes. Refuse enabled confinement on unsupported backends.
 - Default policy: read broad, write confined to cwd + /tmp +
   session-granted paths + known caches (~/.cargo, ~/.rustup, …);
   network deny by default.
@@ -61,9 +60,9 @@ that matters. Mechanisms, all required:
 - "Allow for this project" is the default answer scope; persisted,
   so each unique question fires once per project ever. Coalesce
   multiple denials from one command into one question.
-- Transparent retry: after a grant, ilar re-runs the denied call
-  itself — the model never sees the denial in the common case, no
-  wasted turns.
+- Retry after a grant only if execution did not start, or the operation
+  is known to be safe to repeat. Otherwise show partial results and ask
+  before restarting; a denial can occur after a publish or migration.
 - Three modes: off (yolo), default (the above — the product),
   strict (no baked allowlist, read shielding, every escalation
   asks).
@@ -98,6 +97,59 @@ children that only the host process needs.
 - A probing design pass first (like the image feature): verify
   Seatbelt profiles against real cargo/git/npm workloads in this
   repo before committing to defaults; then slice.
+
+## Experimental implementation (2026-11-15)
+
+The first implementation is opt-in through user configuration or a CLI
+option. Existing launches must not change behavior. Start with macOS
+process confinement and test real build workloads before selecting
+production defaults. Unsupported backends must refuse an enabled sandbox,
+not silently run without it.
+
+- Keep broad reads and narrow write paths. Separate cache writes from
+  configuration writes and executable installation. Never grant all of
+  `.local`, `.config`, or `Library` just because one tool needs a subpath.
+- Use named toolchain profiles with explicit cache paths. Project files
+  can suggest profiles, but cannot authorize powerful capabilities or
+  modify saved grants. User-level configuration is the trusted source.
+- Let calls request extra write paths, network access, or execution
+  without ilar's sandbox, with a reason. Approval happens before launch.
+  Missing approval support means refusal. A bypass is for one call and
+  does not remove an inherited external sandbox or secret/root checks.
+- Observe mode is advisory: accesses produce proposed grants, never
+  automatic approval. Make its enforcement limits explicit. Accesses can
+  come from malicious project scripts; they are not proof of need.
+  Reliable access recording needs a separate platform-specific design.
+- Saved project grants belong outside repository-controlled files.
+  Coalesce requests; avoid repeated low-value questions. Do not infer a
+  sandbox denial from a generic permission error or retry partial work.
+- Process confinement alone does not constrain host-side file tools.
+  Document that boundary until direct tools enforce the same path policy.
+- Existing services need restart to change confinement. A grant does not
+  widen an already-running process. Container sockets and other brokers
+  can perform work outside the confined child and need separate treatment.
+
+Record example-project results and remaining gaps before widening this
+experiment. Keep this issue open until the full grant and policy design
+is implemented and tested.
+
+### Prototype results
+
+Implemented user-only `[sandbox]`, `--experimental-sandbox`, broad-read/narrow-write
+macOS policy, explicit Cargo/pip/npm cache profiles, and root TUI once-only
+extension/bypass approval. All process-tool launch paths, including background
+bash and sudo's probe, share the policy. Direct file tools are not covered.
+
+The prototype uses system `sandbox-exec`, not `sandbox_init` in `pre_exec`:
+policy compilation after fork can allocate or lock. Approval details are
+scrollable. Experimental sudo does not retry launched commands based on their
+output. No saved grants, observe mode, Linux backend, or child/gateway approval
+route is implemented yet.
+
+Four installed-toolchain baselines passed. All sandboxed attempts failed at
+activation with EPERM and did not execute the target. Syntax compilation and
+configuration/approval tests pass; actual enforcement needs an unrestricted
+host. See [experiment commands and results](../../experiments/sandbox/README.md).
 
 ## Milestone
 
