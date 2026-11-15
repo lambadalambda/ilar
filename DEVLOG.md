@@ -1,5 +1,23 @@
 # DEVLOG
 
+## Narrow read defaults for the process sandbox
+
+The opt-in macOS sandbox now denies content reads outside workspace, selected
+system/runtime and installed-toolchain paths, selected cache profiles, and
+explicit `read_paths`. Metadata probes remain allowed globally; dyld needs a
+literal root-directory read grant. This does not grant the root subtree.
+Read and write extensions are separate, and read requests use the existing
+once-only user approval flow. Direct host-side file tools remain unconfined.
+
+Host tests cover denied unrelated/symlink reads, read-only grants, write-only
+grants, and approval scope. Cargo, Python, npm, and Git workloads pass with
+explicit Cargo/Git configuration reads and a fixture npm cache grant. User
+configuration is not included in defaults because it can contain credentials.
+The Cargo probe selects `/usr/bin/cc` instead of the host's mise linker shim.
+`xcrun` cache-write and optional Git ignore-read warnings remain, rather than
+widening grants to all temporary files or user config. See the sandbox
+experiment notes for details. The design issue remains open.
+
 ## Opt-in process sandbox experiment
 
 Added user-only `[sandbox]` settings and `--experimental-sandbox`, disabled

@@ -9,14 +9,19 @@ Status: off by default; macOS backend only. See
 The sandbox applies to bash (foreground and background), service start, and
 sudo, including its authentication probe. It does not constrain ilar itself,
 direct file tools, Git helpers, provider requests, or every other subprocess.
-Reads remain broad. This is not a sandbox for hostile code.
+Content reads are restricted to workspace, runtime/toolchain defaults, selected
+cache profiles, and explicit read paths. See configuration for the default path
+groups. This is not a sandbox for hostile code.
 
 Enable it with `ilar --experimental-sandbox`,
 `ilar exec --experimental-sandbox ...`, or user-only `[sandbox] enabled = true`.
 The default policy allows workspace writes, uses that workspace for temporary
-files, and denies network. Explicit profiles grant Cargo, pip, or npm caches;
-explicit absolute write paths grant their subtrees. Cache parent directories
-must exist. Network grants permit all network access.
+files, and denies network. Explicit profiles grant read/write Cargo, pip, or
+npm caches. Explicit absolute `read_paths` and `write_paths` grant separate
+read and write access to their subtrees. Cache parent directories must exist.
+Network grants permit all network access. Metadata probes remain globally
+allowed; root-directory enumeration is allowed for macOS startup. Neither
+exception grants content reads across the home directory.
 
 Interactive root TUI calls can request once-only exceptions:
 
@@ -30,8 +35,11 @@ Interactive root TUI calls can request once-only exceptions:
 }
 ```
 
-`network: true` requests network access. `unsandboxed: true` requests execution
-without ilar's sandbox. Both need user approval. Exceptions are not saved and
+`read_paths` requests read-only access, with no write grant. `network: true`
+requests network access. `unsandboxed: true` requests execution without ilar's
+sandbox. All extensions need user approval. A denied operation does not open
+a prompt automatically: the agent must request an extension for a later call.
+Exceptions are not saved and
 do not remove outer restrictions or secret/root checks. Children, exec, and the
 gateway refuse exception requests because they have no approval route yet.
 
@@ -66,7 +74,7 @@ outward symlinks, partial execution before a denial, and localhost network.
 An approval test uses fake sudo (not root) to verify that a command's diagnostic
 text cannot cause a second execution under the same sandbox exception.
 
-## Results, 2026-11-15
+## Initial write/network results, 2026-11-15
 
 On the development Mac, the real Seatbelt compiler accepted generated policies,
 including escaped paths. The initial runner blocked activation with EPERM. After
@@ -88,13 +96,43 @@ These are focused checks, not proof of complete isolation. The npm project used
 an explicit cache grant; these workloads do not validate all named cache profiles
 or network-dependent package installation.
 
+## Narrow read follow-up, 2026-11-15
+
+The enabled sandbox now denies file-content reads except for workspace,
+selected system/runtime and installed-toolchain paths, cache profiles, and
+explicit read grants. Unrelated file reads, directory listing, and outward
+read symlinks are denied. Explicit reads grant no writes; explicit writes grant
+no reads. A once-approved read works only for that call. These behaviors have
+host tests; ordinary workspace reads are checked too, so a failure to start the
+shell cannot count as successful confinement.
+
+The four workloads pass with the tighter policy and these explicit grants:
+
+- Cargo: read `~/.cargo/config.toml` and `~/.cargo/config`. Use `/usr/bin/cc`
+  as linker to avoid a host mise shim that needs its own user config.
+- Python: no extra grants for the installed mise interpreter.
+- npm: read and write the fixture's external cache directory.
+- Git: read `~/.gitconfig` and `~/.config/git/config`.
+
+Cargo and Git initially failed on these ungranted config reads, as intended.
+Those files are not default grants because they can contain credentials.
+Apple `xcrun` still reports denied writes to its hard-coded per-user cache;
+Git reports a denied optional global-ignore read. The workloads complete, and
+no whole-temporary-directory or whole-config-directory grant was added to
+silence those warnings. This is not complete toolchain or cache-profile coverage.
+
+The macOS dynamic loader also needs to read the root directory. A literal `/`
+grant lets it start; a recursive root grant is not used. The default still
+exposes filesystem metadata and installed-tool data, not only project files.
+
 ## Checks
 
-Focused policy, configuration, approval, and TUI question tests passed. Workspace
-Clippy passed with all targets/features and warnings denied. The workspace test
-run had one failure in the existing serve transcript-pagination test; its
-focused all-features rerun passed. Doc tests passed. Strict test-first was not
-completed for the cross-module prototype; regression tests were added and run.
+The read follow-up passed 19 sandbox library checks, two configuration checks,
+and all 10 integration checks, including explicit host tests. Workspace Clippy
+passed with all targets/features and warnings denied. The full all-features
+workspace test suite and doc tests passed. The initial prototype did not use
+strict test-first throughout; the read follow-up started with failing read-denial
+and redirected-toolchain regression tests.
 
 ## Not implemented
 
@@ -103,12 +141,12 @@ completed for the cross-module prototype; regression tests were added and run.
   policy was learned from command errors. Future observations must propose
   grants, never approve them automatically.
 - Saved per-project/session grants and automatic toolchain-profile inference.
-- Strict read/secret-file confinement, direct file-tool policy, host allowlists,
-  and Linux confinement.
+- Direct file-tool policy, sensitive-file exclusions within otherwise allowed
+  roots, host allowlists, and Linux confinement.
 - Gateway/child approval routing and a separate private temporary directory.
 
-Broad reads, IPC/brokers, inherited descriptors, cache poisoning, pathname
-replacement/hard links, and descendants that leave the process group remain
-limits. Do not treat a service's initial "started" result as proof of activation;
-check status/logs. Do not enable this as a production default until successful
-host enforcement and workload experiments establish its behavior.
+Metadata disclosure, readable installed-tool data, IPC/brokers, inherited
+descriptors, cache poisoning, pathname replacement/hard links, and descendants
+that leave the process group remain limits. Do not treat a service's initial
+"started" result as proof of activation; check status/logs. Keep this experiment
+opt-in while the missing controls and wider workload coverage remain open.

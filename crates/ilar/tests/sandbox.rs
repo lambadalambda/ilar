@@ -133,6 +133,119 @@ mod macos {
 
     #[tokio::test]
     #[ignore = "requires a host that permits Seatbelt activation"]
+    async fn unrelated_reads_and_outward_read_symlinks_are_denied() {
+        let root = fixture();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let protected = root.path().join("private");
+        std::fs::write(&protected, "synthetic private content").unwrap();
+        std::os::unix::fs::symlink(&protected, project.join("link")).unwrap();
+        std::fs::write(project.join("visible"), "workspace content").unwrap();
+        let visible = run(&project, "cat visible".into(), vec![]).await;
+        assert!(!visible.is_error, "{}", visible.content);
+        assert!(visible.content.contains("workspace content"));
+        let data_alias =
+            Path::new("/System/Volumes/Data").join(protected.strip_prefix("/").unwrap());
+        let mut paths = vec![protected.clone(), project.join("link")];
+        if data_alias.is_file() {
+            paths.push(data_alias);
+        }
+        for path in paths {
+            let output = run(&project, format!("cat {}", quote(&path)), vec![]).await;
+            assert!(output.is_error, "{}", output.content);
+            assert!(!output.content.contains("synthetic private content"));
+        }
+        let listing = run(&project, format!("ls {}", quote(root.path())), vec![]).await;
+        assert!(listing.is_error, "{}", listing.content);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a host that permits Seatbelt activation"]
+    async fn explicit_reads_do_not_grant_writes_or_sibling_reads() {
+        let root = fixture();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let reference = root.path().join("reference");
+        std::fs::write(&reference, "reference content").unwrap();
+        let mut ctx = ToolContext::root(project);
+        ctx.sandbox.enabled = true;
+        ctx.sandbox.read_paths = vec![reference.clone()];
+        let output = BashTool.run(json!({"command": format!("cat {}; printf changed >> {}", quote(&reference), quote(&reference))}), ctx.clone()).await;
+        assert!(output.is_error, "{}", output.content);
+        assert!(
+            output.content.contains("reference content"),
+            "{}",
+            output.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(&reference).unwrap(),
+            "reference content"
+        );
+        let sibling = root.path().join("sibling");
+        std::fs::write(&sibling, "sibling content").unwrap();
+        let output = BashTool
+            .run(json!({"command": format!("cat {}", quote(&sibling))}), ctx)
+            .await;
+        assert!(output.is_error);
+        assert!(!output.content.contains("sibling content"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a host that permits Seatbelt activation"]
+    async fn an_approved_read_is_limited_to_one_call() {
+        use ilar::question::{QuestionAnswer, QuestionResponse};
+        let root = fixture();
+        let project = root.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let reference = root.path().join("reference");
+        std::fs::write(&reference, "approved reference").unwrap();
+        let mut ctx = ToolContext::root(project);
+        ctx.sandbox.enabled = true;
+        let (sender, mut receiver) = ilar::question::question_channel(1);
+        ctx.sandbox_questions = Some(sender);
+        let approve = async {
+            let prompt = receiver.recv().await.unwrap();
+            assert!(
+                prompt.request.questions[0]
+                    .description
+                    .as_ref()
+                    .unwrap()
+                    .contains("Read paths")
+            );
+            prompt
+                .reply
+                .send(QuestionResponse::Answered {
+                    answers: vec![QuestionAnswer::SingleChoice {
+                        question_id: "sandbox_approval".into(),
+                        option_id: Some("once".into()),
+                        other: None,
+                    }],
+                })
+                .unwrap();
+        };
+        let command = format!("cat {}", quote(&reference));
+        let (output, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(
+                BashTool.run(
+                    json!({"command": command, "sandbox": {
+                        "read_paths": [reference], "reason": "Read the reference file"
+                    }}),
+                    ctx.clone()
+                ),
+                approve
+            )
+        })
+        .await
+        .expect("read approval should complete");
+        assert!(!output.is_error, "{}", output.content);
+        assert!(output.content.contains("approved reference"));
+        let output = BashTool.run(json!({"command": command}), ctx).await;
+        assert!(output.is_error);
+        assert!(!output.content.contains("approved reference"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a host that permits Seatbelt activation"]
     async fn denied_write_preserves_partial_work_and_does_not_follow_a_symlink() {
         let root = fixture();
         let project = root.path().join("project");
@@ -170,6 +283,17 @@ mod macos {
         .await;
         assert!(!output.is_error, "{}", output.content);
         assert!(cache.join("entry").exists());
+        let read = run(
+            &project,
+            format!("cat {}/entry", quote(&cache)),
+            vec![cache.clone()],
+        )
+        .await;
+        assert!(
+            read.is_error,
+            "a write grant must not grant reads: {}",
+            read.content
+        );
         let protected = root.path().join("other");
         let output = run(
             &project,
@@ -221,7 +345,7 @@ mod macos {
             (
                 "cargo-offline",
                 &rust,
-                "env -u CARGO_TARGET_DIR cargo build --offline && ./target/debug/sandbox-probe"
+                "env -u CARGO_TARGET_DIR RUSTFLAGS='-C linker=/usr/bin/cc' cargo build --offline && ./target/debug/sandbox-probe"
                     .to_string(),
                 vec![],
             ),
@@ -249,6 +373,17 @@ mod macos {
         ] {
             let mut ctx = ToolContext::root(project.to_path_buf());
             ctx.sandbox.enabled = enabled;
+            ctx.sandbox.read_paths = grants.clone();
+            if name == "cargo-offline" {
+                // The host has Cargo configuration; it is not a safe default
+                // grant because such files can contain registry credentials.
+                let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+                ctx.sandbox.read_paths.extend([home.join(".cargo/config.toml"), home.join(".cargo/config")]);
+            }
+            if name == "git-local" {
+                let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+                ctx.sandbox.read_paths.extend([home.join(".gitconfig"), home.join(".config/git/config")]);
+            }
             ctx.sandbox.write_paths = grants;
             let output = BashTool
                 .run(json!({"command": command, "timeout_ms": 120000}), ctx)

@@ -28,7 +28,7 @@ as a `{"type":"notice"}` event under `ilar exec --json`.
 ## Experimental process sandbox
 
 Off by default. On macOS, `ilar --experimental-sandbox` and
-`ilar exec --experimental-sandbox ...` enable write and network restrictions
+`ilar exec --experimental-sandbox ...` enable read, write, and network restrictions
 for shell-backed tools. The same setting is available in the user config:
 
 ```toml
@@ -36,6 +36,7 @@ for shell-backed tools. The same setting is available in the user config:
 enabled = true
 network = false
 profiles = ["cargo"]
+read_paths = ["/absolute/path/to/a/reference-directory"]
 write_paths = ["/absolute/path/to/a/build-cache"]
 ```
 
@@ -47,18 +48,41 @@ logs, and update-check marker). Profiles do not install binaries or enable
 network. Symlinked cache locations need an explicit path grant. Parent cache
 directories must already exist if creating them needs a wider grant.
 
-Reads remain broad. Writes are limited to the command workspace, `/dev/null`,
-and configured paths/caches. Temporary-file environment variables point to
-the workspace; there is no shared `/tmp` write grant. Network is denied unless
+Content reads are denied outside these defaults and explicit `read_paths`:
+
+- The command workspace, including local dependencies and environments.
+- macOS runtime paths (`/System`, `/bin`, `/sbin`, selected `/usr` subtrees),
+  Apple developer tools, and specific system lookup/certificate files.
+- Homebrew installation subtrees: `bin`, `sbin`, `lib`, `opt`, `Cellar`, and
+  `share` under `/opt/homebrew`; equivalent selected `/usr/local` paths.
+  General Homebrew `etc` contents are not included.
+- `~/.cargo/bin`, `~/.rustup/toolchains`, `~/.rustup/settings.toml`, and
+  `~/.local/share/mise/installs`. Other layouts need explicit grants.
+- Read/write caches from selected profiles. No profiles are selected by default.
+
+The whole home, `.config`, `.local`, and user `Library` trees are not granted.
+User config files such as `.gitconfig`, `.cargo/config.toml`, and `.npmrc`
+need explicit read grants; they can contain credentials. Symlinked user
+installation roots need an explicit grant if they redirect elsewhere.
+Filesystem metadata probes (existence, size, and similar attributes) remain
+allowed globally. Listing the root directory is allowed for macOS startup,
+but listing other ungranted directories or reading their files is not.
+
+Writes are limited to the workspace, `/dev/null`, and configured paths/caches.
+`read_paths` adds no writes; `write_paths` adds no reads. Set both for an external
+read/write directory. Temporary-file environment variables point to the
+workspace; there is no shared `/tmp` write grant. Network is denied unless
 `network = true`, which permits all network access, not selected hosts.
 
 In the interactive root TUI, bash, service start, and sudo can request a
-`sandbox` exception with `write_paths`, `network`, or `unsandboxed`, plus a
+`sandbox` exception with `read_paths`, `write_paths`, `network`, or `unsandboxed`, plus a
 `reason`. The user sees the command and access request before launch. Use
 PageUp/PageDown to read long approval details. Approval applies only to that
 call; it does not persist. Cancellation or missing approval support refuses
 the call. Child sessions, `ilar exec`, and the gateway cannot approve these
-exceptions yet. Configure their required grants before launch.
+exceptions yet. Configure their required grants before launch. A denied read
+returns an error, not an automatic prompt. The agent must request an extension;
+ilar does not infer a needed path or rerun partial work.
 
 `unsandboxed` removes only ilar's sandbox for one approved call. Secret/root
 checks and inherited external restrictions still apply. Failed commands are
@@ -68,14 +92,15 @@ Services keep their initial policy until restarted.
 
 This is not a complete security boundary. Direct file tools, Git helpers,
 provider requests, and other host-side operations are not confined by this
-process policy. Broad reads, IPC, inherited descriptors, and broker services
-remain outside its protection. Do not use it to run hostile code.
+process policy. Metadata disclosure, IPC, inherited descriptors, and broker
+services remain outside its protection. Secrets inside an allowed workspace
+or toolchain path are readable. Do not use it to run hostile code.
 
 The macOS backend uses the deprecated system `sandbox-exec` helper. An enabled
 sandbox fails on unsupported platforms or activation errors; it never falls
 back to an unrestricted shell. Some outer sandboxes prevent activation.
-Observe/training mode, saved project grants, strict read controls, and a Linux
-backend remain future work. See [experiments and limits](../experiments/sandbox/README.md).
+Observe/training mode, saved project grants, and a Linux backend remain future
+work. See [experiments and limits](../experiments/sandbox/README.md).
 
 ## Settings
 

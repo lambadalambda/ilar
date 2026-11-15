@@ -1,8 +1,9 @@
-//! Experimental, opt-in macOS child-process write/network restrictions.
+//! Experimental, opt-in macOS child-process read/write/network restrictions.
 //!
-//! Reads and non-file/non-network operations remain broadly allowed. This is not
-//! full App Sandbox isolation: inherited file descriptors are not revoked, and
-//! IPC to other processes is not confined. Do not use it to run hostile code.
+//! File contents are restricted to workspace, runtime/toolchain defaults, and
+//! explicit grants. Metadata probes remain allowed outside those roots. This is
+//! not full App Sandbox isolation: inherited descriptors and IPC remain outside
+//! its protection. Do not use it to run hostile code.
 //!
 //! Writes are allowed in the canonical workspace, `/dev/null`, explicit absolute
 //! `write_paths`, and caches selected by explicit profile names. No shared `/tmp`,
@@ -13,10 +14,11 @@
 //!
 //! Paths must be absolute and contain no `..`. Existing symlinks are resolved;
 //! missing suffixes are anchored to the canonical nearest existing directory.
-//! Dangling symlinks, non-UTF-8 paths, and resolution errors fail closed. Filesystem
-//! changes after resolution can make a grant stop working; they do not add grants.
+//! Dangling symlinks, non-UTF-8 paths, and resolution errors fail closed.
+//! Grants are pathname-based, not inode isolation. Path replacement and hard
+//! links remain limits; resolution is not a lock on the directory tree.
 //!
-//! Named profiles add only caches under the parent's `HOME`: `cargo` adds registry
+//! Named profiles add read/write caches under the parent's `HOME`: `cargo` adds registry
 //! and git caches plus package-cache locks; `python` adds pip caches; `node` adds
 //! npm caches/logs and its update-check marker. They never enable network, install
 //! binaries, or infer permissions from commands, dependencies, or error messages.
@@ -42,6 +44,7 @@ use anyhow::{Context, bail, ensure};
 #[serde(default, deny_unknown_fields)]
 pub struct SandboxConfig {
     pub enabled: bool,
+    pub read_paths: Vec<PathBuf>,
     pub write_paths: Vec<PathBuf>,
     pub network: bool,
     pub profiles: Vec<String>,
@@ -173,6 +176,7 @@ fn build_profile(
         format!("(subpath {})", sbpl_path(cwd)?),
         "(literal \"/dev/null\")".into(),
     ];
+    let mut reads = grants.clone();
     for path in &config.write_paths {
         grants.push(format!("(subpath {})", sbpl_path(&resolve_path(path)?)?));
     }
@@ -199,19 +203,98 @@ fn build_profile(
                     "sandbox cache path redirects through a symlink: {}; use an explicit write_paths grant instead",
                     expected.display()
                 );
-                grants.push(format!("({filter} {})", sbpl_path(&resolved)?));
+                let grant = format!("({filter} {})", sbpl_path(&resolved)?);
+                reads.push(grant.clone());
+                grants.push(grant);
             }
         }
     }
     grants.sort();
     grants.dedup();
+    for path in &config.read_paths {
+        reads.push(format!("(subpath {})", sbpl_path(&resolve_path(path)?)?));
+    }
+    // Runtime and installed-tool data, not arbitrary user configuration.
+    // APPROXIMATION: this macOS baseline covers common toolchains; which
+    // additional paths do other installations need? Extend only from probes.
+    for path in [
+        "/System",
+        "/bin",
+        "/sbin",
+        "/usr/bin",
+        "/usr/sbin",
+        "/usr/lib",
+        "/usr/libexec",
+        "/usr/share",
+        "/usr/local/bin",
+        "/usr/local/lib",
+        "/usr/local/opt",
+        "/usr/local/Cellar",
+        "/usr/local/share",
+        "/Library/Apple",
+        "/Library/Developer",
+        "/Applications/Xcode.app",
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/opt/homebrew/lib",
+        "/opt/homebrew/opt",
+        "/opt/homebrew/Cellar",
+        "/opt/homebrew/share",
+        "/private/var/db/dyld",
+        "/private/var/db/timezone",
+        "/private/etc/ssl",
+    ] {
+        reads.push(format!("(subpath {})", sbpl_string(path)?));
+    }
+    // dyld probes the root directory on current macOS. Literal, not subpath:
+    // root enumeration must not grant access to every file below it.
+    reads.push("(literal \"/\")".into());
+    for path in [
+        "/dev/null",
+        "/dev/zero",
+        "/dev/random",
+        "/dev/urandom",
+        "/private/etc/hosts",
+        "/private/etc/resolv.conf",
+        "/private/etc/localtime",
+        "/private/etc/passwd",
+        "/private/etc/group",
+        "/private/etc/services",
+        "/private/etc/protocols",
+        "/Library/Preferences/com.apple.dt.Xcode.plist",
+        "/opt/homebrew/etc/ca-certificates/cert.pem",
+    ] {
+        reads.push(format!("(literal {})", sbpl_string(path)?));
+    }
+    if let Some(home) = home {
+        let home = resolve_path(home)?;
+        for path in [
+            ".cargo/bin",
+            ".rustup/toolchains",
+            ".rustup/settings.toml",
+            ".local/share/mise/installs",
+        ] {
+            let expected = home.join(path);
+            // Optional defaults must not make unrelated commands fail. Skip
+            // redirected/unavailable roots; an explicit grant can authorize
+            // their actual target without granting a broader default.
+            if let Ok(resolved) = resolve_path(&expected)
+                && resolved == expected
+            {
+                reads.push(format!("(subpath {})", sbpl_path(&resolved)?));
+            }
+        }
+    }
+    reads.sort();
+    reads.dedup();
     let network = if config.network {
         ""
     } else {
         "(deny network*)\n"
     };
     Ok(format!(
-        "(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*\n  {})\n{network}",
+        "(version 1)\n(allow default)\n(deny file-read*)\n(allow file-read-metadata)\n(allow file-read*\n  {})\n(deny file-write*)\n(allow file-write*\n  {})\n{network}",
+        reads.join("\n  "),
         grants.join("\n  ")
     ))
 }
@@ -352,6 +435,32 @@ mod tests {
             ..Default::default()
         };
         assert!(build_profile(&home, &config, Some(&home)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redirected_default_toolchains_require_an_explicit_read_grant() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let home = root.path().join("home");
+        let tools = root.path().join("tools");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir_all(home.join(".rustup")).unwrap();
+        std::fs::create_dir(&tools).unwrap();
+        std::os::unix::fs::symlink(&tools, home.join(".rustup/toolchains")).unwrap();
+        let grant = format!(
+            "(subpath {})",
+            sbpl_path(&tools.canonicalize().unwrap()).unwrap()
+        );
+        let mut config = SandboxConfig::default();
+        let profile = build_profile(&workspace, &config, Some(&home)).unwrap();
+        assert!(!profile.contains(&grant));
+        config.read_paths.push(tools);
+        assert!(
+            build_profile(&workspace, &config, Some(&home))
+                .unwrap()
+                .contains(&grant)
+        );
     }
 
     #[test]

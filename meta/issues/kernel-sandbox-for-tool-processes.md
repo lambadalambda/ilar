@@ -154,6 +154,34 @@ preserved partial work, and network denied unless granted. Named cache profiles
 and network-dependent package installation still need workload tests.
 See [experiment commands and results](../../experiments/sandbox/README.md).
 
+## Narrow read defaults (requested 2026-11-15)
+
+Within the opt-in sandbox, deny file content reads outside the workspace,
+explicit read/write grants, system runtime paths, and narrow toolchain/cache
+profiles. Do not grant the whole home, `.config`, `.local`, or `Library` tree.
+Allow metadata probes needed for command lookup without allowing directory
+contents or file data. Add `read_paths` to trusted user configuration and to
+once-only call approvals, with read and write scopes shown separately.
+
+Check denied unrelated-home reads, outward symlinks, approved read-only access,
+and Cargo/Python/npm/Git workloads on the host. Do not silently widen the policy
+to fix a failed build. Keep direct host-side file tools outside the claimed
+process boundary; no automatic retries or denial-generated prompts are added.
+
+Implemented `read_paths` in user config and once-only approval requests. Default
+reads cover workspace, selected macOS runtime/developer files, selected Homebrew
+installation trees, and Rust/mise installation paths. Cache profiles grant
+read/write cache access; ordinary write grants do not add reads. Metadata probes
+remain global, and dyld requires literal root-directory reads. Redirected default
+user toolchain paths are omitted; explicit target grants can enable them.
+
+Host tests confirm denied unrelated/symlink reads and directory listing,
+read-only grants, write-only grants, and once-only read approval. All four
+workloads pass with explicit Cargo/Git config reads; the Cargo probe uses the
+system linker instead of a host mise shim. `xcrun` cache and optional Git-ignore
+warnings remain. No whole-home or whole-config grant was added. See the
+experiment notes for details and remaining limits.
+
 ## Milestone
 
 13 — Guard rails

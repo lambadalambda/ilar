@@ -13,6 +13,8 @@ use crate::sandbox::SandboxConfig;
 #[serde(deny_unknown_fields)]
 pub(crate) struct Request {
     #[serde(default)]
+    read_paths: Vec<std::path::PathBuf>,
+    #[serde(default)]
     write_paths: Vec<std::path::PathBuf>,
     #[serde(default)]
     network: bool,
@@ -26,7 +28,8 @@ pub(crate) fn schema() -> serde_json::Value {
         "type": "object",
         "description": "Experimental sandbox extension for this call only. Requires user approval before execution; unavailable in unattended or child sessions. Never retry partial work automatically. Omit for normal execution.",
         "properties": {
-            "write_paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute paths that need write access; each grants its subtree."},
+            "read_paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute paths that need read access; each grants its subtree, without writes."},
+            "write_paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute paths that need write access; each grants its subtree, without extra reads."},
             "network": {"type": "boolean", "description": "Request all network access, not a host allowlist."},
             "unsandboxed": {"type": "boolean", "description": "Run without ilar's sandbox for this call. An external sandbox and secret/root checks still apply."},
             "reason": {"type": "string", "description": "Why this call needs the extra access; shown to the user."}
@@ -51,10 +54,19 @@ pub(crate) async fn resolve(
     if request.reason.trim().is_empty() {
         return Err("sandbox extension requires a reason".into());
     }
-    if request.write_paths.iter().any(|path| !path.is_absolute()) {
-        return Err("sandbox write paths must be absolute".into());
+    if request
+        .read_paths
+        .iter()
+        .chain(&request.write_paths)
+        .any(|path| !path.is_absolute())
+    {
+        return Err("sandbox read/write paths must be absolute".into());
     }
-    if !request.unsandboxed && !request.network && request.write_paths.is_empty() {
+    if !request.unsandboxed
+        && !request.network
+        && request.write_paths.is_empty()
+        && request.read_paths.is_empty()
+    {
         return Err("sandbox extension requests no additional access".into());
     }
     let sender = ctx.sandbox_questions.as_ref().ok_or(
@@ -66,8 +78,14 @@ pub(crate) async fn resolve(
         .map(|path| format!("  {}", path.display()))
         .collect::<Vec<_>>()
         .join("\n");
+    let read_paths = request
+        .read_paths
+        .iter()
+        .map(|path| format!("  {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
     let description = format!(
-        "Tool: {tool}\nCommand: {command}\nReason: {}\nWrite paths (including descendants):\n{paths}\nAll network access: {}\nRun without ilar's sandbox: {}\nThis approval is for one call. It does not remove an external sandbox or secret/root checks.",
+        "Tool: {tool}\nCommand: {command}\nReason: {}\nRead paths (including descendants):\n{read_paths}\nWrite paths (including descendants):\n{paths}\nAll network access: {}\nRun without ilar's sandbox: {}\nThis approval is for one call. It does not remove an external sandbox or secret/root checks.",
         request.reason, request.network, request.unsandboxed
     );
     let stored = ctx
@@ -123,6 +141,7 @@ pub(crate) async fn resolve(
     if !approved {
         return Err("sandbox exception denied; command was not started".into());
     }
+    config.read_paths.extend(request.read_paths.iter().cloned());
     config
         .write_paths
         .extend(request.write_paths.iter().cloned());
@@ -182,12 +201,19 @@ mod tests {
                 })
                 .unwrap();
         };
-        let request = request();
+        let mut request = request();
+        request.read_paths = vec!["/reference-file".into()];
         let (result, ()) = tokio::join!(resolve(&ctx, Some(&request), "bash", "build"), approve);
+        let config = result.unwrap();
         assert_eq!(
-            result.unwrap().write_paths,
+            config.read_paths,
+            [std::path::PathBuf::from("/reference-file")]
+        );
+        assert_eq!(
+            config.write_paths,
             [std::path::PathBuf::from("/extra-cache")]
         );
+        assert!(ctx.sandbox.read_paths.is_empty());
         assert!(ctx.sandbox.write_paths.is_empty());
     }
 

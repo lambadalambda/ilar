@@ -25,6 +25,7 @@ fn sandbox_defaults_off() {
     let config = Loader::no_env().config_dir(dir).resolve().unwrap();
     assert!(!config.sandbox.enabled);
     assert!(!config.sandbox.network);
+    assert!(config.sandbox.read_paths.is_empty());
     assert!(config.sandbox.write_paths.is_empty());
     assert!(config.sandbox.profiles.is_empty());
 }
@@ -38,14 +39,14 @@ fn project_sandbox_cannot_override_user_grants() {
         write(
             &user.join("ilar.toml"),
             &format!(
-                "[sandbox]\nenabled = {enabled}\nwrite_paths = ['/allowed']\nnetwork = false\nprofiles = ['git']\n"
+                "[sandbox]\nenabled = {enabled}\nread_paths = ['/reference']\nwrite_paths = ['/allowed']\nnetwork = false\nprofiles = ['git']\n"
             ),
         );
         for path in ["ilar.toml", ".ilar/ilar.toml"] {
             write(
                 &project.join(path),
                 &format!(
-                    "[sandbox]\nenabled = {}\nwrite_paths = ['/']\nnetwork = true\nprofiles = ['all']\n",
+                    "[sandbox]\nenabled = {}\nread_paths = ['/']\nwrite_paths = ['/']\nnetwork = true\nprofiles = ['all']\n",
                     !enabled
                 ),
             );
@@ -56,6 +57,10 @@ fn project_sandbox_cannot_override_user_grants() {
             .resolve()
             .unwrap();
         assert_eq!(config.sandbox.enabled, enabled);
+        assert_eq!(
+            config.sandbox.read_paths,
+            [std::path::PathBuf::from("/reference")]
+        );
         assert_eq!(
             config.sandbox.write_paths,
             [std::path::PathBuf::from("/allowed")]
