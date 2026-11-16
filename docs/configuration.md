@@ -16,6 +16,7 @@ overridden by project files:
   cloned repository's call to make;
 - `[cache_compact]`, which spends money on an unattended provider request;
 - `[gateway]` and `[channels]`, which decide who may message your assistant;
+- `[tool_review]`, which selects the optional tool-call reviewer;
 - `[sandbox]`, which controls the experimental child-process sandbox.
 
 A user-scoped table is discarded whole rather than merged field by field: a
@@ -24,6 +25,60 @@ elsewhere, or change anything else about a provider you configured. A project
 file that sets one of these is reported rather than silently ignored — as a
 system line in the TUI transcript at startup, on stderr from `ilar exec`, and
 as a `{"type":"notice"}` event under `ilar exec --json`.
+
+## Experimental tool-call review
+
+Off by default. Add this table to your user config to record model reviews of
+proposed tool calls:
+
+```toml
+[tool_review]
+model = "custom/checker" # A model configured through [models] or a provider.
+timeout_ms = 10000
+```
+
+The table enables observation only. No reviewer model is selected by default.
+Project tables are ignored and reported. The timeout must be 1–60000 ms.
+Each call adds a provider request and can incur a charge. Calls are reviewed
+before tool dispatch, with up to four reviews at once, without a workspace lock.
+A slow reviewer delays dispatch. The timeout is per review, not per tool batch:
+eight stalled reviews can take about two timeout periods. There are no retries.
+Total serialized input is limited to 128 KiB; oversized arguments produce an
+error rather than a partial review. Collected answer text is limited to 8 KiB.
+The request asks for at most 1024 output tokens, but some adapters, including
+ChatGPT authentication, omit that wire limit; timeout and cancellation still apply.
+
+The reviewer receives exact proposed tool arguments, the working directory,
+current sandbox settings/grants, up to eight recent recorded user messages,
+and up to eight recent assistant/tool text records. Each history excerpt is
+limited to 2048 bytes; images and reasoning are omitted. History is marked as
+incomplete and untrusted evidence is separate from recorded user messages.
+Recorded messages can include runtime notifications or delegated tasks; they
+are not all new human authority. Project instructions and compaction summaries
+are not promoted to user instructions. This is a bounded-context experiment,
+not a proof that a call has user authorization.
+
+Stored secret values are removed from history. If the secret store is locked
+or unreadable, review is skipped and an error is recorded. Calls with stored secret values
+in their arguments are not sent to the reviewer and receive an error record.
+This is not general secret detection: other code, arguments, and tool output
+can be sent to the selected model. Choose its endpoint accordingly.
+
+The reviewer has no tools and returns `allow`, `ask`, or `deny` with a reason.
+Timeouts, invalid output, and provider errors produce error records, not an
+allow verdict. None of these results changes tool execution, existing approval
+questions, or sandbox grants. Observation mode is not a safety control.
+It covers root and child tool calls, direct file tools, and background launch
+requests. It does not inspect commands later run inside scripts or services.
+The `question` tool is excluded because it requests user input.
+
+Results are `tool_review` events in session JSONL, linked by `tool_call_id`, with
+model, verdict or error, reason, and elapsed milliseconds. They do not enter the
+agent conversation or appear as approval prompts. Inspect a session file with:
+
+```sh
+jq 'select(.type == "tool_review")' /path/to/session.jsonl
+```
 
 ## Experimental process sandbox
 

@@ -319,6 +319,7 @@ struct FileConfig {
     cache_compact: Option<CacheCompactLayer>,
     subagents: Option<SubagentLayer>,
     sandbox: Option<crate::sandbox::SandboxConfig>,
+    tool_review: Option<crate::tool_review::Config>,
     /// The assistant gateway's own settings, parsed by its crate: the
     /// core carries the table and decides only whose it is.
     gateway: Option<toml::Table>,
@@ -580,6 +581,8 @@ pub struct Config {
     pub cache_compact: CacheCompactConfig,
     /// Process sandbox settings from the user's config only.
     pub sandbox: crate::sandbox::SandboxConfig,
+    /// Optional observation-only reviewer, selected by the user, never a project.
+    pub tool_review: Option<crate::tool_review::Config>,
     pub subagents: SubagentConfig,
     /// `[gateway]` as written in the user's file, for the gateway crate
     /// to parse. User-scoped: a project may not point the user's
@@ -861,6 +864,17 @@ impl Config {
             }
         }
 
+        if let Some(review) = &merged.tool_review {
+            anyhow::ensure!(
+                !review.model.trim().is_empty(),
+                "tool_review.model must not be empty"
+            );
+            crate::provider::resolve_model(&review.model).context("invalid tool_review.model")?;
+            anyhow::ensure!(
+                (1..=60_000).contains(&review.timeout_ms),
+                "tool_review.timeout_ms must be between 1 and 60000"
+            );
+        }
         let secrets = crate::secrets::SecretStore::open(&state_dir);
         let providers = resolve_providers(&merged, env, Some(&secrets), PROVIDERS);
 
@@ -1005,6 +1019,7 @@ impl Config {
                     .unwrap_or_else(default_background_tool_timeout_ms),
             },
             sandbox: merged.sandbox.unwrap_or_default(),
+            tool_review: merged.tool_review,
             gateway: merged.gateway,
             channels: merged.channels,
             user_dir,
@@ -1254,6 +1269,7 @@ impl Config {
             compaction: CompactionConfig::default(),
             cache_compact: CacheCompactConfig::default(),
             sandbox: crate::sandbox::SandboxConfig::default(),
+            tool_review: None,
             subagents: SubagentConfig::default(),
             endpoints: HashMap::new(),
             gateway: None,
@@ -1485,6 +1501,7 @@ const USER_SCOPED_TABLES: &[&str] = &[
     "gateway",
     "channels",
     "sandbox",
+    "tool_review",
 ];
 
 /// Which user-scoped tables a project layer declares — read off the raw
@@ -1569,6 +1586,9 @@ fn merge_file(
     let mut merged = base;
     if parsed.sandbox.is_some() {
         merged.sandbox = parsed.sandbox;
+    }
+    if parsed.tool_review.is_some() {
+        merged.tool_review = parsed.tool_review;
     }
     if let Some(general) = parsed.general {
         overlay!(

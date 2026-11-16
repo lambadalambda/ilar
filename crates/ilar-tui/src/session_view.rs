@@ -799,7 +799,8 @@ fn restored_session_invocation_view_in(
                     0,
                 )));
             }
-            ilar::session::SessionEvent::TurnFinished { .. } => {}
+            ilar::session::SessionEvent::ToolReview { .. }
+            | ilar::session::SessionEvent::TurnFinished { .. } => {}
         }
     }
     if liveness == Liveness::Settled {

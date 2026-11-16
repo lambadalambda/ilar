@@ -309,6 +309,15 @@ pub(crate) fn project_event_with(
             "before": before,
             "ts": ts,
         }),
+        // Observation text stays in the private JSONL, not the display projection.
+        SessionEvent::ToolReview {
+            id, tool_call_id, ..
+        } => json!({
+            "type": "tool_review",
+            "id": id,
+            "tool_call_id": tool_call_id,
+            "ts": ts,
+        }),
         SessionEvent::MemoryRecall { id, ids, text, .. } => json!({
             "type": "memory_recall",
             "id": id,

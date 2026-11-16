@@ -1697,6 +1697,7 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
             | SessionEvent::MemoryRecall { id, .. }
             | SessionEvent::Rewind { id, .. }
             | SessionEvent::TurnEnded { id, .. }
+            | SessionEvent::ToolReview { id, .. }
             | SessionEvent::TurnFinished { id, .. } => Some(id),
         };
         if let Some(event_id) = event_id
@@ -1760,7 +1761,9 @@ fn validate_replay(events: &[SessionEvent], id: &str) -> std::io::Result<Vec<Str
                 }
                 unanswered_calls.remove(position);
             }
-            SessionEvent::Meta { .. } | SessionEvent::SubagentInvocation { .. } => {}
+            SessionEvent::Meta { .. }
+            | SessionEvent::SubagentInvocation { .. }
+            | SessionEvent::ToolReview { .. } => {}
             _ if !unanswered_calls.is_empty() => {
                 return invalid_replay(id, "new event before tool calls received results");
             }
@@ -1834,7 +1837,7 @@ fn has_unanswered_calls(events: &[SessionEvent]) -> bool {
 }
 
 /// The events [`validate_replay`] lets past an outstanding call: a
-/// result answers one, and these two it skips outright.
+/// result answers one, and metadata events are skipped outright.
 ///
 /// Kind only. The validator has more to say about each of them — an
 /// orphan result and a second `Meta` are both rejected — but neither
@@ -1846,6 +1849,7 @@ fn allowed_while_unanswered(event: &SessionEvent) -> bool {
         SessionEvent::ToolResult { .. }
             | SessionEvent::Meta { .. }
             | SessionEvent::SubagentInvocation { .. }
+            | SessionEvent::ToolReview { .. }
     )
 }
 
@@ -2457,6 +2461,7 @@ fn render_transcript(events: &[SessionEvent], model: Option<&str>) -> Vec<ChatMe
             | SessionEvent::ImageCutoff { .. }
             | SessionEvent::Rewind { .. }
             | SessionEvent::TurnEnded { .. }
+            | SessionEvent::ToolReview { .. }
             | SessionEvent::TurnFinished { .. } => {}
             // One more block of the user message it follows: the
             // prompt, or a step's tool results when it came late.

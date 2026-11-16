@@ -1016,6 +1016,20 @@ impl Secrets {
         self.stored_and_lock().0
     }
 
+    /// A complete snapshot for outbound auxiliary requests. Unlike `all`, a
+    /// locked or unreadable store is an error, never an empty redaction set.
+    pub(crate) fn try_all(&self) -> Result<Vec<Granted>> {
+        let mut all = self.store.all()?;
+        all.extend(
+            self.held
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(name, value)| Granted::new(name, value.clone())),
+        );
+        Ok(all)
+    }
+
     /// [`Self::all`], and whether the store withheld its values because
     /// it is locked — the one read that answers both, so a scrub does
     /// not read the file twice to find out what it just could not see.

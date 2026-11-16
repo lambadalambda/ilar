@@ -195,6 +195,13 @@ pub enum SessionEvent {
         detail: String,
         ts: DateTime<Utc>,
     },
+    /// Observation-only tool review. Metadata, never model conversation.
+    ToolReview {
+        id: String,
+        tool_call_id: String,
+        observation: crate::tool_review::Observation,
+        ts: DateTime<Utc>,
+    },
     /// How a started turn finished and how long it worked, written by
     /// the turn itself as its last event — root or task, clean or not.
     /// Without it a replay could only guess where a turn began: an
@@ -279,6 +286,7 @@ impl SessionEvent {
             | SessionEvent::MemoryRecall { ts, .. }
             | SessionEvent::Rewind { ts, .. }
             | SessionEvent::TurnEnded { ts, .. }
+            | SessionEvent::ToolReview { ts, .. }
             | SessionEvent::TurnFinished { ts, .. } => *ts,
         }
     }

@@ -1,5 +1,37 @@
 # DEVLOG
 
+## Observation-only tool-call review
+
+Added an opt-in `[tool_review]` table in user config with an explicit model and
+bounded timeout. Project config cannot enable review or select its destination.
+The turn loop reviews exact tool arguments before executor dispatch and workspace
+acquisition. Up to four reviews run together; no reviewer gets tools or retries.
+Observation does not change execution, approval questions, or sandbox grants.
+An enforcement hook in the executor is deferred until an enforcement mode exists.
+
+Context separates recent raw user-message records from untrusted assistant/tool
+text. It excludes images, reasoning, project instructions, and compaction
+summaries, with bounded history excerpts and an explicit omission notice. Raw
+user records can include runtime notifications and delegated tasks; the prompt
+does not label them all as new human authority. Stored secrets are redacted from
+history; calls containing stored secret values are not sent for review. This
+is not general secret detection, and selected endpoints receive task data.
+
+Verdicts and errors are `tool_review` session metadata, linked to calls, with
+model and latency. They never enter the agent conversation. Root/child calls,
+direct tools, and background launch requests share this path; `question` is
+excluded. No automatic permissions, remembered reviewer approvals, production
+model choice, or safety guarantee is added by this observation prototype.
+
+Astra's review found that an unreadable store could leave outbound requests
+without redaction. Review now uses one fallible snapshot and records a skip
+until the store is readable. A locked-store regression failed before this fix
+and passes after it. Module and configuration behavior also started with failing
+tests. All 2066 workspace tests pass (24 ignored), with all-feature/all-target
+Clippy and changed-file formatting checks passing. An existing transcript-paging
+test failed once, then passed alone and on the full rerun. Independent review
+found no remaining blockers.
+
 ## Sandbox approval review fixes
 
 Configured read/write roots now use canonical paths when checking whether a

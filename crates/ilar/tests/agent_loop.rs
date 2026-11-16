@@ -217,6 +217,190 @@ fn tool_call_event(id: &str, msg: &str) -> ProviderEvent {
 }
 
 #[tokio::test]
+async fn tool_review_observes_child_calls_without_changing_execution_or_conversation() {
+    for review_events in [
+        vec![
+            ProviderEvent::TextDelta(r#"{"verdict":"deny","reason":"observation marker"}"#.into()),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+                usage: Default::default(),
+            },
+        ],
+        vec![ProviderEvent::Error("review unavailable".into())],
+    ] {
+        let (store, session_id) = temp_session("build");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let registry = registry_with(EchoTool {
+            calls: calls.clone(),
+        });
+        let provider = MockProvider::new(vec![
+            vec![
+                ProviderEvent::ToolCallStarted {
+                    id: "observed-call".into(),
+                    name: "echo".into(),
+                    item_id: None,
+                },
+                tool_call_event("observed-call", "exact argument"),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::ToolUse,
+                    usage: Default::default(),
+                },
+            ],
+            review_events,
+            vec![
+                ProviderEvent::TextDelta("done".into()),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Default::default(),
+                },
+            ],
+        ]);
+        let config = LoopConfig {
+            tool_review: Some(ilar::tool_review::Config {
+                model: "zai/glm-4.7".into(),
+                timeout_ms: 1000,
+            }),
+            ..LoopConfig::default()
+        };
+        let ctx = ToolContext {
+            depth: 1,
+            ..ToolContext::root(std::env::temp_dir())
+        };
+        run_turn(
+            &provider,
+            &registry,
+            &store,
+            &session_id,
+            "echo the argument",
+            &[],
+            None,
+            config,
+            events_channel().0,
+            CancellationToken::new(),
+            ctx,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [serde_json::json!({"msg":"exact argument"})]
+        );
+        let reader = store.load(&session_id).unwrap();
+        let observation = reader
+            .events()
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::ToolReview {
+                    tool_call_id,
+                    observation,
+                    ..
+                } => {
+                    assert_eq!(tool_call_id, "observed-call");
+                    Some(observation)
+                }
+                _ => None,
+            })
+            .expect("persisted observation");
+        assert!(
+            observation.verdict == Some(ilar::tool_review::Verdict::Deny)
+                || observation.error.is_some()
+        );
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].tools.is_empty());
+        let last_context = serde_json::to_string(&requests[2].messages).unwrap();
+        assert!(!last_context.contains("observation marker"));
+        assert!(!last_context.contains("review unavailable"));
+    }
+}
+
+#[tokio::test]
+async fn tool_review_keeps_stored_secret_values_out_of_reviewer_requests() {
+    for (secret_in_call, locked) in [(false, false), (true, false), (false, true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = ilar::secrets::SecretStore::open(dir.path());
+        secrets
+            .set("REVIEW_TOKEN", "", "review-secret-value")
+            .unwrap();
+        if locked {
+            secrets.encrypt("review-master-password").unwrap();
+            ilar::secrets::forget_master(&secrets);
+        }
+        let (store, session_id) = temp_session("build");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let registry = registry_with(EchoTool {
+            calls: calls.clone(),
+        });
+        let argument = if secret_in_call {
+            "review-secret-value"
+        } else {
+            "public"
+        };
+        let mut turns = vec![vec![
+            ProviderEvent::ToolCallStarted {
+                id: "secret-call".into(),
+                name: "echo".into(),
+                item_id: None,
+            },
+            tool_call_event("secret-call", argument),
+            ProviderEvent::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+                usage: Default::default(),
+            },
+        ]];
+        if !secret_in_call && !locked {
+            turns.push(vec![
+                ProviderEvent::TextDelta(r#"{"verdict":"ask","reason":"check"}"#.into()),
+                ProviderEvent::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Default::default(),
+                },
+            ]);
+        }
+        turns.push(vec![ProviderEvent::TurnComplete {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        }]);
+        let provider = MockProvider::new(turns);
+        let config = LoopConfig {
+            tool_review: Some(ilar::tool_review::Config {
+                model: "zai/glm-4.7".into(),
+                timeout_ms: 1000,
+            }),
+            ..LoopConfig::default()
+        };
+        run_turn(
+            &provider,
+            &registry,
+            &store,
+            &session_id,
+            "echo this; review-secret-value is private",
+            &[],
+            None,
+            config,
+            events_channel().0,
+            CancellationToken::new(),
+            ToolContext::root(dir.path().to_path_buf())
+                .with_secrets(ilar::secrets::Secrets::new(secrets)),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        let requests = provider.requests();
+        if secret_in_call || locked {
+            assert_eq!(requests.len(), 2);
+            assert!(store.load(&session_id).unwrap().events().iter().any(|event| matches!(event, SessionEvent::ToolReview { observation, .. } if observation.verdict.is_none() && observation.error.as_deref().is_some_and(|error| error.contains("secret")))));
+        } else {
+            let review = serde_json::to_string(&requests[1].messages).unwrap();
+            assert!(!review.contains("review-secret-value"));
+            assert!(review.contains("<secret:REVIEW_TOKEN>"));
+        }
+    }
+}
+
+#[tokio::test]
 async fn every_provider_step_uses_the_stable_session_cache_key() {
     let (store, session_id) = temp_session("build");
     let provider = MockProvider::new(vec![

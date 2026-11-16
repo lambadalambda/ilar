@@ -123,10 +123,42 @@ The existing credential-search case is unrelated to the user's requested task.
   need separate treatment. Model-plus-rules-plus-sandbox is the working direction,
   not a decision to replace user approval or external isolation.
 
+## Observation-mode prototype (requested 2026-11-15)
+
+Build an opt-in reviewer with an explicitly selected model in user-only config.
+Review exact executable tool arguments with user instructions kept separate from
+untrusted conversation/tool data. Record allow/ask/deny or review errors and
+latency in session history, without adding the verdict to model conversation.
+Observation does not change execution, manual approvals, or sandbox grants.
+Bound requests, support cancellation, and give the reviewer no tools. Cover
+root and child calls, direct file tools, and background launch requests. Keep
+`question` outside review because it requests user input rather than effects.
+No model default, automatic grants, cached approvals, or enforcement in this
+first prototype.
+
+Implemented observation before dispatch in the turn loop; no executor enforcement
+hook is needed until enforcement is added. Requests and replies are bounded,
+with per-review timeouts and cancellation. Session metadata is excluded from
+model conversation and recall. A fallible secret snapshot prevents outbound
+review when the store is locked or unreadable. Secret-bearing arguments are
+skipped; readable history is redacted. Bounded recorded messages can include
+notifications/delegation, so this prototype does not establish human authority.
+
+Six module tests cover strict verdicts, exact arguments, no tools, input/output
+limits, failures, timeout and cancellation. Configuration and turn integration
+tests cover user-only settings, child-depth calls, unchanged execution after
+deny/errors, metadata replay, history redaction, and secret/locked-store skips.
+All 2066 workspace tests pass (24 ignored); all-target/all-feature Clippy and
+changed-file formatting checks pass. One existing transcript-paging test failed
+on the first full run, then passed alone and on the full rerun. Astra reviewed
+the design and the locked-store fix with no remaining blockers. This issue
+remains open for policy evaluation and any future enforcement mode.
+
 ## Acceptance Criteria
 
 - Document intended authorization boundaries, especially legitimate credential
   audits versus secret access/export, and test the missing context pairs.
 - Compare candidates on the reusable set with matched timing/stopping conditions.
 - Decide whether a runtime prototype is justified and record its limits before
-  selecting a default model or approval mode. Runtime integration is not yet built.
+  selecting a default model or approval mode. Observation integration is built;
+  enforcement and a default reviewer remain undecided.

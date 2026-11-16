@@ -803,6 +803,7 @@ impl RuntimePlan {
     ) -> Result<Tooling> {
         let loop_config = LoopConfig {
             compaction_threshold: config.compaction.threshold,
+            tool_review: config.tool_review.clone(),
             max_iterations: config.agent.max_iterations,
             max_output_tokens: (config.agent.max_output_tokens > 0)
                 .then_some(config.agent.max_output_tokens),

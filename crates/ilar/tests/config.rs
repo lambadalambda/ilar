@@ -20,6 +20,59 @@ fn write(path: &std::path::Path, content: &str) {
 }
 
 #[test]
+fn tool_review_is_user_only_and_requires_an_explicit_model() {
+    let (_guard, dir) = tempdir();
+    let user = dir.join("user");
+    let project = dir.join("project");
+    write(
+        &user.join("ilar.toml"),
+        "[tool_review]\nmodel = 'custom/checker'\ntimeout_ms = 2500\n",
+    );
+    write(
+        &project.join("ilar.toml"),
+        "[tool_review]\nmodel = 'custom/attacker'\n",
+    );
+    let config = Loader::no_env()
+        .config_dir(user)
+        .project_dir(project)
+        .resolve()
+        .unwrap();
+    assert_eq!(config.tool_review.as_ref().unwrap().model, "custom/checker");
+    assert_eq!(config.tool_review.as_ref().unwrap().timeout_ms, 2500);
+    assert!(
+        config
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("tool_review"))
+    );
+}
+
+#[test]
+fn tool_review_defaults_off_and_rejects_missing_model_or_invalid_timeout() {
+    let (_guard, dir) = tempdir();
+    assert!(
+        Loader::no_env()
+            .config_dir(dir.clone())
+            .resolve()
+            .unwrap()
+            .tool_review
+            .is_none()
+    );
+    for table in [
+        "[tool_review]\ntimeout_ms = 10\n",
+        "[tool_review]\nmodel = ''\n",
+        "[tool_review]\nmodel = 'custom/checker'\ntimeout_ms = 0\n",
+        "[tool_review]\nmodel = 'custom/checker'\ntimeout_ms = 60001\n",
+    ] {
+        write(&dir.join("ilar.toml"), table);
+        assert!(
+            Loader::no_env().config_dir(dir.clone()).resolve().is_err(),
+            "{table}"
+        );
+    }
+}
+
+#[test]
 fn sandbox_defaults_off() {
     let (_guard, dir) = tempdir();
     let config = Loader::no_env().config_dir(dir).resolve().unwrap();

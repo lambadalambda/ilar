@@ -125,6 +125,7 @@ pub fn entries(events: &[SessionEvent]) -> Vec<Entry> {
             | SessionEvent::MemoryRecall { .. }
             | SessionEvent::Rewind { .. }
             | SessionEvent::TurnEnded { .. }
+            | SessionEvent::ToolReview { .. }
             | SessionEvent::TurnFinished { .. } => {}
         }
     }

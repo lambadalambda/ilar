@@ -31,5 +31,6 @@ pub mod skill;
 pub mod subagent;
 pub mod text;
 pub mod todo;
+pub mod tool_review;
 pub mod tools;
 pub mod topic;
