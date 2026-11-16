@@ -90,14 +90,6 @@ async fn run_at(
 ) -> anyhow::Result<ToolOutput> {
     let implementation = file_tool(tool)?;
     let request = strip_sandbox(&mut input)?;
-    if ctx.sandbox.enabled
-        && implementation.workspace_access() == WorkspaceAccess::Mutating
-        && let Some(request) = &request
-    {
-        request
-            .require_write_directories()
-            .map_err(anyhow::Error::msg)?;
-    }
     let detail = serde_json::to_string(&input)?;
     let mut config = super::sandbox_grants::resolve(ctx, request.as_ref(), tool, &detail)
         .await

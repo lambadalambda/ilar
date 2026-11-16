@@ -1,5 +1,30 @@
 # DEVLOG
 
+## Optional sandbox arguments stay optional
+
+The imgsearch session `95ab1b7e` sent a full inactive sandbox object on every
+file call. Validation errors led it from an empty request to `read_paths: ["/"]`.
+OpenAI Responses can normalize omitted `strict` into strict schemas, making
+optional fields mandatory. The serializer now sends `strict: false`, as Codex's
+shell tool definitions do. This fixes the wire contract; the original endpoint's
+normalization was not captured, so it remains the likely cause, not a proven one.
+
+Inactive objects use the existing policy, with no reason required. Canonical
+workspace paths count as existing read/write coverage without adding retained
+grants. External symlink targets do not count as workspace paths. Active new
+access and bypasses still require a reason and approval. Validation errors tell
+the agent to omit unneeded requests rather than invent a wider path.
+
+Atomic-directory validation now follows coverage checks, so redundant workspace
+file grants do not prevent normal writes or mixed permission requests. Existing
+alias tests now put their granted targets outside the workspace; otherwise the
+new workspace coverage correctly makes their approval unnecessary.
+
+Verification: workspace all-feature tests and all-target Clippy pass. Final
+focused grant and macOS worker tests pass, including mixed requests and missing
+reasons. Independent review found no blockers. No live model request was made;
+installed binaries and user configuration were not changed.
+
 ## Sandbox coverage for direct file tools
 
 Move `read`, `write`, `edit`, `glob`, and `grep` file access into a short-lived

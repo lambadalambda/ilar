@@ -233,6 +233,15 @@ proposed arguments. Atomic replacement needs read/write directory grants;
 existing exact-file write requests are refused before approval rather than
 silently widened. Worker cancellation retains its write lease through reaping.
 
+## Optional sandbox arguments (2026-11-16)
+
+The latest imgsearch transcript filled every sandbox field, then escalated from
+an empty request to `/` after validation errors. OpenAI Responses can normalize
+omitted `strict` into strict schemas. Explicitly send `strict: false` for our
+optional tool arguments. Treat inactive sandbox objects as existing-policy calls,
+recognize canonical workspace read/write coverage, and explain how to omit an
+unneeded request in validation errors. Keep actual extensions and bypasses gated.
+
 ## Milestone
 
 13 — Guard rails

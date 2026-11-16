@@ -196,6 +196,13 @@ read/write directory. Temporary-file environment variables point to the
 workspace; there is no shared `/tmp` write grant. Network is denied unless
 `network = true`, which permits all network access, not selected hosts.
 
+For normal workspace operations, omit `sandbox`: workspace reads and writes are
+already allowed. An inactive object (`{}` or empty path lists with false flags)
+also uses the existing policy. Requests wholly covered by the workspace or
+existing explicit grants do not prompt or need a reason. Requests for additional
+access still need a reason and approval. Grant paths must be absolute; `.` is
+not a grant path, and `/` requests access to the whole filesystem.
+
 In the interactive root TUI, file tools, bash, service start, and sudo can request a
 `sandbox` exception with `read_paths`, `write_paths`, `network`, or `unsandboxed`, plus a
 `reason`. The user sees the command and access request before launch. Use

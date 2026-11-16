@@ -20,32 +20,21 @@ pub(crate) struct Request {
     network: bool,
     #[serde(default)]
     unsandboxed: bool,
+    #[serde(default)]
     reason: String,
-}
-
-impl Request {
-    /// Atomic file tools need temporary siblings. Never widen a file grant to
-    /// its parent silently. Missing paths can still name new directories.
-    pub(crate) fn require_write_directories(&self) -> Result<(), String> {
-        if !self.unsandboxed && self.write_paths.iter().any(|path| path.is_file()) {
-            return Err("atomic file replacement requires a directory grant for temporary siblings; grant read and write access to the containing directory instead of only the file".into());
-        }
-        Ok(())
-    }
 }
 
 pub(crate) fn schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
-        "description": "Experimental sandbox extension. Requires user approval before execution; read/write paths and network can be allowed once or for this live session. Unsandboxed execution is once-only. Unavailable in unattended or child sessions. Omit to use existing grants. Never retry partial work automatically.",
+        "description": "Experimental sandbox extension for access beyond the existing policy. The workspace is already readable and writable: omit sandbox for normal workspace operations. An empty inactive object uses the existing policy too. Additional access requires user approval; read/write paths and network can be allowed once or for this live session. Unsandboxed execution is once-only. Unavailable in unattended or child sessions. Never retry partial work automatically.",
         "properties": {
             "read_paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute paths that need read access; each grants its subtree, without writes."},
             "write_paths": {"type": "array", "items": {"type": "string"}, "description": "Absolute paths that need write access; each grants its subtree, without extra reads."},
             "network": {"type": "boolean", "description": "Request all network access, not a host allowlist."},
             "unsandboxed": {"type": "boolean", "description": "Run without ilar's sandbox for this call. An external sandbox and secret/root checks still apply."},
-            "reason": {"type": "string", "description": "Why this call needs the extra access; shown to the user."}
-        },
-        "required": ["reason"]
+            "reason": {"type": "string", "description": "Required when requesting additional access or unsandboxed execution; explain why, for the user."}
+        }
     })
 }
 
@@ -62,11 +51,15 @@ pub(crate) async fn resolve(
     let Some(request) = request else {
         return Ok(config);
     };
+    let inactive = !request.unsandboxed
+        && !request.network
+        && request.write_paths.is_empty()
+        && request.read_paths.is_empty();
+    if inactive {
+        return Ok(config);
+    }
     if !config.enabled {
         return Err("sandbox extensions require the experimental sandbox to be enabled".into());
-    }
-    if request.reason.trim().is_empty() {
-        return Err("sandbox extension requires a reason".into());
     }
     if request
         .read_paths
@@ -74,14 +67,7 @@ pub(crate) async fn resolve(
         .chain(&request.write_paths)
         .any(|path| !path.is_absolute())
     {
-        return Err("sandbox read/write paths must be absolute".into());
-    }
-    if !request.unsandboxed
-        && !request.network
-        && request.write_paths.is_empty()
-        && request.read_paths.is_empty()
-    {
-        return Err("sandbox extension requests no additional access".into());
+        return Err("sandbox read/write paths must be absolute. The workspace is already readable and writable; omit sandbox for workspace operations. Request only additional absolute paths, not '/' as a substitute for '.'".into());
     }
     let mut request = request.clone();
     for path in request
@@ -92,10 +78,13 @@ pub(crate) async fn resolve(
         *path =
             crate::sandbox::resolve_path(path).map_err(|error| format!("sandbox path: {error}"))?;
     }
+    let workspace = crate::sandbox::resolve_path(&ctx.cwd)
+        .map_err(|error| format!("sandbox workspace: {error}"))?;
     let covered = |paths: &[std::path::PathBuf], roots: &[std::path::PathBuf]| {
         let roots: Vec<_> = roots
             .iter()
             .filter_map(|root| crate::sandbox::resolve_path(root).ok())
+            .chain(std::iter::once(workspace.clone()))
             .collect();
         paths
             .iter()
@@ -107,6 +96,20 @@ pub(crate) async fn resolve(
         && covered(&request.write_paths, &config.write_paths)
     {
         return Ok(config);
+    }
+    // Atomic replacement needs temporary siblings only for newly requested
+    // write access. Redundant workspace/file grants need no directory approval.
+    if matches!(tool, "write" | "edit")
+        && !request.unsandboxed
+        && request
+            .write_paths
+            .iter()
+            .any(|path| !covered(std::slice::from_ref(path), &config.write_paths) && path.is_file())
+    {
+        return Err("atomic file replacement requires a directory grant for temporary siblings; grant read and write access to the containing directory instead of only the file".into());
+    }
+    if request.reason.trim().is_empty() {
+        return Err("additional sandbox access requires a reason. The workspace is already readable and writable; omit sandbox for workspace operations".into());
     }
     let sender = ctx.sandbox_questions.as_ref().ok_or(
         "sandbox extension refused: nobody can approve this call; configure required paths before launch",
@@ -222,6 +225,106 @@ pub(crate) async fn resolve(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn inactive_requests_use_existing_policy_without_a_reason_or_approver() {
+        let mut ctx = ToolContext::root(std::env::temp_dir());
+        for enabled in [false, true] {
+            ctx.sandbox.enabled = enabled;
+            for input in [
+                serde_json::json!({}),
+                serde_json::json!({"read_paths":[],"write_paths":[],"network":false,"unsandboxed":false,"reason":""}),
+            ] {
+                let request = serde_json::from_value(input).unwrap();
+                let result = resolve(&ctx, Some(&request), "grep", "search workspace")
+                    .await
+                    .unwrap();
+                assert_eq!(result.enabled, enabled);
+                assert!(result.read_paths.is_empty() && result.write_paths.is_empty());
+                assert!(!result.network);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_grants_need_no_approval_but_do_not_cover_external_targets() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mut ctx = ToolContext::root(workspace.path().to_owned());
+        ctx.sandbox.enabled = true;
+        let file = workspace.path().join("file");
+        std::fs::write(&file, "local").unwrap();
+        let mut request: Request = serde_json::from_value(
+            serde_json::json!({"read_paths":[file],"write_paths":[file],"reason":""}),
+        )
+        .unwrap();
+        let config = resolve(&ctx, Some(&request), "write", "replace workspace file")
+            .await
+            .unwrap();
+        assert!(config.read_paths.is_empty() && config.write_paths.is_empty());
+        request.network = true;
+        request.reason = "Network for workspace operation".into();
+        assert!(
+            resolve(&ctx, Some(&request), "write", "workspace and network")
+                .await
+                .unwrap_err()
+                .contains("nobody")
+        );
+        request.network = false;
+        request.read_paths = vec![outside.path().to_owned()];
+        request.reason = "Read external files".into();
+        assert!(
+            resolve(&ctx, Some(&request), "read", "external read")
+                .await
+                .unwrap_err()
+                .contains("nobody")
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), workspace.path().join("alias")).unwrap();
+            request.read_paths = vec![workspace.path().join("alias")];
+            assert!(
+                resolve(&ctx, Some(&request), "read", "external alias")
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn active_requests_still_require_a_reason() {
+        let mut ctx = ToolContext::root(std::env::temp_dir());
+        ctx.sandbox.enabled = true;
+        for input in [
+            serde_json::json!({"read_paths":["/"]}),
+            serde_json::json!({"network":true,"reason":" "}),
+            serde_json::json!({"unsandboxed":true,"reason":""}),
+        ] {
+            let request = serde_json::from_value(input).unwrap();
+            assert!(
+                resolve(&ctx, Some(&request), "read", "extra access")
+                    .await
+                    .unwrap_err()
+                    .contains("requires a reason")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn relative_requests_explain_that_workspace_access_is_already_allowed() {
+        let mut ctx = ToolContext::root(std::env::temp_dir());
+        ctx.sandbox.enabled = true;
+        let request =
+            serde_json::from_value(serde_json::json!({"read_paths":["."],"reason":"Read repo"}))
+                .unwrap();
+        let error = resolve(&ctx, Some(&request), "grep", "search")
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("absolute") && error.contains("omit") && error.contains("workspace"),
+            "{error}"
+        );
+    }
+
     fn request() -> Request {
         serde_json::from_value(serde_json::json!({
             "write_paths": ["/extra-cache"], "reason": "Build cache"
@@ -237,7 +340,8 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         let alias = root.path().join("alias");
         std::os::unix::fs::symlink(&target, &alias).unwrap();
-        let mut ctx = ToolContext::root(root.path().to_path_buf());
+        let workspace = tempfile::tempdir().unwrap();
+        let mut ctx = ToolContext::root(workspace.path().to_path_buf());
         ctx.sandbox.enabled = true;
         ctx.sandbox.read_paths = vec![alias.clone()];
         ctx.sandbox.write_paths = vec![alias];
@@ -491,7 +595,8 @@ mod tests {
         std::fs::create_dir(&second).unwrap();
         let alias = root.path().join("alias");
         std::os::unix::fs::symlink(&first, &alias).unwrap();
-        let mut ctx = ToolContext::root(root.path().to_path_buf());
+        let workspace = tempfile::tempdir().unwrap();
+        let mut ctx = ToolContext::root(workspace.path().to_path_buf());
         ctx.sandbox.enabled = true;
         let (sender, mut receiver) = crate::question::question_channel(1);
         ctx.sandbox_questions = Some(sender);

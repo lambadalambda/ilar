@@ -330,6 +330,9 @@ fn wire_tool(tool: &ToolDefinition) -> serde_json::Value {
         "name": tool.name,
         "description": tool.description,
         "parameters": tool.input_schema,
+        // Responses otherwise normalizes compatible schemas into strict mode,
+        // which can turn optional arguments into required filler values.
+        "strict": false,
     })
 }
 
@@ -939,6 +942,25 @@ fn required_u64(value: &serde_json::Value, field: &str, label: &str) -> Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_wire_explicitly_preserves_optional_arguments() {
+        let tool = crate::tools::ToolRegistry::builtin()
+            .with_sandbox_extensions(true)
+            .definitions()
+            .into_iter()
+            .find(|tool| tool.name == "grep")
+            .unwrap();
+        let wire = wire_tool(&tool);
+        assert_eq!(wire["strict"], false);
+        assert_eq!(wire["parameters"], tool.input_schema);
+        assert!(
+            !wire["parameters"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("sandbox"))
+        );
+    }
 
     /// A replayed conversation is only cacheable if the server can
     /// rebuild the item graph it handed us, so items go back in the shape
