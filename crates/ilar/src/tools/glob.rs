@@ -322,6 +322,7 @@ impl Tool for GlobTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "sandbox": super::sandbox_grants::schema(),
                 "pattern": {
                     "type": "string",
                     "description": "Glob pattern, relative to cwd or absolute"
@@ -337,6 +338,9 @@ impl Tool for GlobTool {
 
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
         Box::pin(async move {
+            if ctx.sandbox.enabled || input.get("sandbox").is_some() {
+                return super::file_worker::run("glob", input, &ctx).await;
+            }
             let input: Input = match parse_input(input, "glob") {
                 Ok(v) => v,
                 Err(e) => return e,

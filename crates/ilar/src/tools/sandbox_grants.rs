@@ -23,6 +23,17 @@ pub(crate) struct Request {
     reason: String,
 }
 
+impl Request {
+    /// Atomic file tools need temporary siblings. Never widen a file grant to
+    /// its parent silently. Missing paths can still name new directories.
+    pub(crate) fn require_write_directories(&self) -> Result<(), String> {
+        if !self.unsandboxed && self.write_paths.iter().any(|path| path.is_file()) {
+            return Err("atomic file replacement requires a directory grant for temporary siblings; grant read and write access to the containing directory instead of only the file".into());
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -113,7 +124,7 @@ pub(crate) async fn resolve(
         .collect::<Vec<_>>()
         .join("\n");
     let description = format!(
-        "Tool: {tool:?}\n\nCaller-provided text (quoted):\nCommand: {command:?}\nReason: {:?}\n\nRequested access (host-generated):\nRead paths (including descendants):\n{read_paths}\nWrite paths (including descendants):\n{paths}\nAll network access: {}\nRun without ilar's sandbox: {}\nGrants can apply to this call or this live session across bash, service, and sudo. Unsandboxed execution is once-only. Nothing is saved across restarts or shared with child sessions. External restrictions and secret/root checks still apply.",
+        "Tool: {tool:?}\n\nCaller-provided text (quoted):\nCommand: {command:?}\nReason: {:?}\n\nRequested access (host-generated):\nRead paths (including descendants):\n{read_paths}\nWrite paths (including descendants):\n{paths}\nAll network access: {}\nRun without ilar's sandbox: {}\nGrants can apply to this call or this live session across file tools, bash, service, and sudo. Unsandboxed execution is once-only. Nothing is saved across restarts or shared with child sessions. External restrictions and secret/root checks still apply.",
         request.reason, request.network, request.unsandboxed
     );
     let stored = ctx

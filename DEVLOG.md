@@ -1,5 +1,34 @@
 # DEVLOG
 
+## Sandbox coverage for direct file tools
+
+Move `read`, `write`, `edit`, `glob`, and `grep` file access into a short-lived
+`ilar-file-worker` process when the experimental sandbox is enabled. Reuse the
+process policy and once/session approvals. The parent still owns provider,
+configuration, and session access. The helper is an installed sibling binary;
+its extra read grant covers the executable alone, not its directory.
+
+IPC carries file-tool arguments, image bytes, and file-read digests. The parent
+merges observations only if compaction has not cleared their generation. It
+does not reopen target files. Mutating worker supervision keeps the workspace
+lease until process exit, including cancellation. Worker failures never trigger
+an unrestricted fallback or an automatic retry. Approval details include the
+proposed file operation. Atomic writes need read/write directory grants, unlike
+shell direct writes; existing exact-file write requests are refused before approval.
+
+Grep output is saved by the parent to its configured output directory. Spill
+writes use the existing descriptor-relative atomic replacement helper to refuse
+a symlink destination. Workers get read access only to that output directory,
+not the rest of the session state. Walkers retain ignore settings, but outside
+ignore files require explicit grants. Denied walk entries can look like empty
+results. Existing read/hash and external-writer races are not fixed here.
+
+Verification: workspace all-feature tests and all-target Clippy pass. Five macOS
+integration tests cover confinement and approvals; eight worker tests cover IPC,
+edit observations, compaction, failure, and caller-drop reaping. The independent
+review found approval-detail and exact-file grant issues; both were corrected
+and the focused tests pass. No installed binaries or user config were changed.
+
 ## Native ShieldAgent observations
 
 The initial runtime reviewer expected generic JSON and could not reproduce the

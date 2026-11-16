@@ -106,6 +106,28 @@ pub fn command(cwd: &Path, config: &SandboxConfig) -> anyhow::Result<tokio::proc
     if !config.enabled {
         return Ok(tokio::process::Command::new("sh"));
     }
+    sandbox_command(cwd, config, Path::new("/bin/sh"), false)
+}
+
+/// Launch an installed helper with the same policy as shell tools. Only the
+/// executable itself gets an extra read grant, not its installation directory.
+pub(crate) fn program(
+    cwd: &Path,
+    config: &SandboxConfig,
+    executable: &Path,
+) -> anyhow::Result<tokio::process::Command> {
+    if !config.enabled {
+        return Ok(tokio::process::Command::new(executable));
+    }
+    sandbox_command(cwd, config, executable, true)
+}
+
+fn sandbox_command(
+    cwd: &Path,
+    config: &SandboxConfig,
+    executable: &Path,
+    grant_executable: bool,
+) -> anyhow::Result<tokio::process::Command> {
     #[cfg(target_os = "macos")]
     {
         let workspace = resolve_path(cwd)?;
@@ -114,9 +136,20 @@ pub fn command(cwd: &Path, config: &SandboxConfig) -> anyhow::Result<tokio::proc
             "sandbox workspace must be an existing directory"
         );
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let profile = build_profile(&workspace, config, home.as_deref())?;
+        let mut profile = build_profile(&workspace, config, home.as_deref())?;
+        let executable = if grant_executable {
+            let executable = resolve_path(executable)?;
+            ensure!(executable.is_file(), "sandbox helper is not a file");
+            profile.push_str(&format!(
+                "\n(allow file-read* (literal {}))\n",
+                sbpl_path(&executable)?
+            ));
+            executable
+        } else {
+            executable.to_path_buf()
+        };
         let mut command = tokio::process::Command::new("/usr/bin/sandbox-exec");
-        command.args(["-p", &profile, "/bin/sh"]);
+        command.args(["-p", &profile]).arg(executable);
         command.current_dir(&workspace);
         for key in ["TMPDIR", "TMP", "TEMP"] {
             command.env(key, &workspace);
@@ -125,7 +158,7 @@ pub fn command(cwd: &Path, config: &SandboxConfig) -> anyhow::Result<tokio::proc
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = cwd;
+        let _ = (cwd, config, executable, grant_executable);
         anyhow::bail!("experimental process sandbox is supported only on macOS")
     }
 }
@@ -365,6 +398,49 @@ mod tests {
         assert_eq!(child.get_args().count(), 0);
         assert_eq!(child.get_envs().count(), 0);
         assert!(child.get_current_dir().is_none());
+    }
+
+    #[test]
+    fn disabled_program_preserves_executable_without_validating_paths() {
+        let child = program(
+            Path::new("missing"),
+            &SandboxConfig::default(),
+            Path::new("/missing/worker"),
+        )
+        .unwrap();
+        assert_eq!(child.as_std().get_program(), "/missing/worker");
+        assert_eq!(child.as_std().get_args().count(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn helper_executable_grant_does_not_grant_its_directory() {
+        let workspace = tempfile::tempdir().unwrap();
+        let installation = tempfile::tempdir().unwrap();
+        let executable = installation.path().join("helper");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&executable, "#!/bin/sh\nexec /bin/cat \"$@\"\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let secret = installation.path().join("secret");
+        std::fs::write(&secret, "not-readable").unwrap();
+        let config = SandboxConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let output = program(workspace.path(), &config, &executable)
+            .unwrap()
+            .arg(&secret)
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
+            "status: {}; stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

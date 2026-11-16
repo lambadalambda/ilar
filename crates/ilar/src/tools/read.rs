@@ -69,6 +69,7 @@ impl Tool for ReadTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "sandbox": super::sandbox_grants::schema(),
                 "path": {"type": "string", "description": super::PATH_DESCRIPTION},
                 "offset": {"type": "integer", "description": "1-based line to start at"},
                 "limit": {"type": "integer", "description": "Max lines to return, at most 2000 (the default)"}
@@ -79,6 +80,9 @@ impl Tool for ReadTool {
 
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
         Box::pin(async move {
+            if ctx.sandbox.enabled || input.get("sandbox").is_some() {
+                return super::file_worker::run("read", input, &ctx).await;
+            }
             let input: Input = match parse_input(input, "read") {
                 Ok(v) => v,
                 Err(e) => return e,

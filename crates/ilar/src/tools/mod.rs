@@ -4,6 +4,8 @@ pub mod bash;
 pub mod binary;
 pub mod edit;
 pub mod executor;
+#[doc(hidden)]
+pub mod file_worker;
 pub mod glob;
 pub mod grep;
 pub mod history;
@@ -563,9 +565,63 @@ struct SeenFilesState {
     /// The compaction this map has already reacted to (see
     /// [`SeenFiles::forget_after_compaction`]).
     compaction: Option<String>,
+    generation: u64,
+    observations: Option<HashMap<PathBuf, [u8; 32]>>,
+}
+
+/// Pure IPC data: paths are already canonicalized by the observing process.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct SeenFilesTransfer {
+    generation: u64,
+    pub(crate) digests: Vec<(PathBuf, [u8; 32])>,
 }
 
 impl SeenFiles {
+    pub(crate) fn snapshot(&self) -> SeenFilesTransfer {
+        let state = self.inner.lock().unwrap();
+        SeenFilesTransfer {
+            generation: state.generation,
+            digests: state
+                .digests
+                .iter()
+                .map(|(path, hash)| (path.clone(), *hash))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn from_snapshot(snapshot: SeenFilesTransfer) -> Self {
+        Self {
+            inner: Arc::new(std::sync::Mutex::new(SeenFilesState {
+                digests: snapshot.digests.into_iter().collect(),
+                generation: snapshot.generation,
+                observations: Some(HashMap::new()),
+                ..Default::default()
+            })),
+        }
+    }
+
+    pub(crate) fn updates(&self) -> SeenFilesTransfer {
+        let state = self.inner.lock().unwrap();
+        SeenFilesTransfer {
+            generation: state.generation,
+            digests: state
+                .observations
+                .iter()
+                .flat_map(|entries| entries.iter())
+                .map(|(path, hash)| (path.clone(), *hash))
+                .collect(),
+        }
+    }
+
+    /// Merge observations without probing the parent's filesystem. A compaction
+    /// during execution invalidates all observations from that worker.
+    pub(crate) fn merge_updates(&self, updates: SeenFilesTransfer) {
+        let mut state = self.inner.lock().unwrap();
+        if state.generation == updates.generation {
+            state.digests.extend(updates.digests);
+        }
+    }
+
     /// Record contents the caller already holds (write, edit). Contents
     /// past [`MAX_TRACKED_FILE_BYTES`] are dropped, so the map never
     /// claims to have seen a file `edit` would refuse to open anyway.
@@ -573,11 +629,13 @@ impl SeenFiles {
         if contents.len() as u64 > MAX_TRACKED_FILE_BYTES {
             return;
         }
-        self.inner
-            .lock()
-            .unwrap()
-            .digests
-            .insert(canonical_key(path), digest(contents));
+        let key = canonical_key(path);
+        let hash = digest(contents);
+        let mut state = self.inner.lock().unwrap();
+        state.digests.insert(key.clone(), hash);
+        if let Some(observations) = &mut state.observations {
+            observations.insert(key, hash);
+        }
     }
 
     /// Record whatever is on disk right now (read, which streams a window
@@ -618,6 +676,13 @@ impl SeenFiles {
         if state.compaction.as_deref() != latest {
             state.compaction = latest.map(str::to_string);
             state.digests.clear();
+            state.generation = state
+                .generation
+                .checked_add(1)
+                .expect("compaction generation overflow");
+            if let Some(observations) = &mut state.observations {
+                observations.clear();
+            }
         }
     }
 }
@@ -672,8 +737,8 @@ impl Heartbeat {
     }
 }
 
-/// Per-invocation context. Optional child-process confinement does not
-/// constrain host-side file tools; secret/root grants remain separate.
+/// Per-invocation context. When enabled, child-process confinement also
+/// covers direct-file tools through the file worker; secret/root grants remain separate.
 #[derive(Clone)]
 pub struct ToolContext {
     pub cwd: std::path::PathBuf,
@@ -1634,7 +1699,10 @@ impl ToolRegistry {
             .map(|t| {
                 let mut input_schema = t.input_schema();
                 if !self.sandbox_extensions
-                    && matches!(t.name(), "bash" | "service" | "sudo")
+                    && matches!(
+                        t.name(),
+                        "bash" | "service" | "sudo" | "read" | "write" | "edit" | "glob" | "grep"
+                    )
                     && let Some(properties) = input_schema
                         .get_mut("properties")
                         .and_then(serde_json::Value::as_object_mut)

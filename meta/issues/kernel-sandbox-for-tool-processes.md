@@ -215,6 +215,24 @@ scopes. Quote and escape paths and caller text, and separate caller text from
 host-generated access fields. Keep implicit workspace/profile coverage and
 filesystem race limits outside this follow-up.
 
+## Direct file tools (requested 2026-11-16)
+
+Confine `read`, `write`, `edit`, `glob`, and `grep` with the same policy and
+once/session approvals as process tools. Use a short-lived sandboxed worker;
+path checks in the privileged parent do not close symlink and replacement races.
+Keep provider/config/session access in the parent. Transfer file-read digests
+and image bytes through IPC, without reopening target files in the parent.
+Keep workspace leases until worker exit, preserve edit freshness and cancellation,
+and refuse calls if the worker or sandbox cannot start. Sandbox-off behavior is
+unchanged. The worker is an installed sibling binary, never resolved through PATH.
+
+Implemented with shared file-tool bodies and dedicated IPC. MacOS checks cover
+workspace operations, stale edits, outside/symlink denial, separate read/write
+grants, and once/session sharing with shell calls. Approval text includes the
+proposed arguments. Atomic replacement needs read/write directory grants;
+existing exact-file write requests are refused before approval rather than
+silently widened. Worker cancellation retains its write lease through reaping.
+
 ## Milestone
 
 13 — Guard rails

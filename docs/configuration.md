@@ -150,7 +150,8 @@ carry over unchanged. This remains observation only, not automatic approval.
 
 Off by default. On macOS, `ilar --experimental-sandbox` and
 `ilar exec --experimental-sandbox ...` enable read, write, and network restrictions
-for shell-backed tools. The same setting is available in the user config:
+for shell-backed tools and `read`, `write`, `edit`, `glob`, and `grep`.
+The same setting is available in the user config:
 
 ```toml
 [sandbox]
@@ -195,12 +196,12 @@ read/write directory. Temporary-file environment variables point to the
 workspace; there is no shared `/tmp` write grant. Network is denied unless
 `network = true`, which permits all network access, not selected hosts.
 
-In the interactive root TUI, bash, service start, and sudo can request a
+In the interactive root TUI, file tools, bash, service start, and sudo can request a
 `sandbox` exception with `read_paths`, `write_paths`, `network`, or `unsandboxed`, plus a
 `reason`. The user sees the command and access request before launch. Use
 PageUp/PageDown to read long approval details. Choose "Allow this call only"
 or "Allow for this session" for read paths, write paths, and network. Session
-grants apply to later bash, service start, and sudo calls without asking again,
+grants apply to later file-tool, bash, service start, and sudo calls without asking again,
 including calls that omit the `sandbox` argument. Read grants do not add writes.
 They are kept in memory for this live session only: closing/restarting its
 runtime, or resuming it later, does not restore them. Other sessions and child
@@ -224,9 +225,23 @@ not retried automatically by the sandbox. Experimental sudo also stops after
 its first requested-command launch instead of retrying from diagnostic text.
 Services keep their initial policy until restarted.
 
-This is not a complete security boundary. Direct file tools, Git helpers,
-provider requests, and other host-side operations are not confined by this
-process policy. Metadata disclosure, IPC, inherited descriptors, and broker
+File tools run in the installed `ilar-file-worker` binary beside `ilar` or
+`ilar-gateway`. Use `scripts/install.sh` to install all three. A missing helper
+refuses the call; ilar does not search PATH or fall back to host file access.
+File contents, image attachments, and edit digests cross a private pipe. The
+parent retains approvals and workspace locks. Unlike a shell's direct write,
+atomic file tools need read and write grants for the containing directory:
+temporary siblings and the directory descriptor are part of replacement.
+Requests that name an existing file as a write grant are refused before approval.
+A configured exact-file grant or an unresolved file path does not widen access;
+it can still fail during the operation.
+Grep output files get a read-only grant for the tool-output directory, not the
+whole state directory. External ignore files need explicit read grants; denied
+walk entries can produce an empty search result rather than an error.
+
+This is not a complete security boundary. Git helpers, provider requests,
+and other host-side operations are not confined by this process policy.
+Metadata disclosure, IPC, inherited descriptors, and broker
 services remain outside its protection. Secrets inside an allowed workspace
 or toolchain path are readable. Do not use it to run hostile code.
 

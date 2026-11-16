@@ -139,8 +139,20 @@ impl SpillTarget {
         if let Err(error) = tokio::fs::create_dir_all(&self.dir).await {
             return Err(format!("(could not save the full output: {error})"));
         }
-        if let Err(error) = tokio::fs::write(&path, body).await {
-            return Err(format!("(could not save the full output: {error})"));
+        let bytes = body.to_vec();
+        let destination = path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::atomic_file::replace(
+                &destination,
+                &bytes,
+                crate::atomic_file::Mode::Force(0o600),
+            )
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(format!("(could not save the full output: {error})")),
+            Err(error) => return Err(format!("(could not save the full output: {error})")),
         }
         Ok(format!(
             "full output: {} ({}, {}) — {advice}",
@@ -729,6 +741,22 @@ pub(crate) fn run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spill_refuses_a_destination_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "keep").unwrap();
+        let target = SpillTarget {
+            dir: dir.path().to_path_buf(),
+            session_id: "session".into(),
+            call_id: "call".into(),
+        };
+        std::os::unix::fs::symlink(&victim, target.path()).unwrap();
+        assert!(target.write_note(b"replace", "read it").await.is_err());
+        assert_eq!(std::fs::read_to_string(victim).unwrap(), "keep");
+    }
 
     #[tokio::test]
     async fn an_empty_command_and_a_seconds_shaped_timeout_are_refused() {

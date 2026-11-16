@@ -44,6 +44,7 @@ impl Tool for WriteTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "sandbox": super::sandbox_grants::schema(),
                 "path": {"type": "string", "description": super::PATH_DESCRIPTION},
                 "content": {"type": "string", "description": "The whole file; to change part of one, use edit"}
             },
@@ -53,6 +54,9 @@ impl Tool for WriteTool {
 
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
         Box::pin(async move {
+            if ctx.sandbox.enabled || input.get("sandbox").is_some() {
+                return super::file_worker::run("write", input, &ctx).await;
+            }
             let input: Input = match parse_input(input, "write") {
                 Ok(v) => v,
                 Err(e) => return e,

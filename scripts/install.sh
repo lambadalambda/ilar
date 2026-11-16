@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the release binaries — ilar and ilar-gateway — and install them.
+# Build and install ilar, ilar-gateway, and the sandboxed file helper.
 #
 #   scripts/install.sh [destination]     # default: ~/.local/bin
 #
@@ -15,7 +15,7 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cargo build --release --manifest-path "$root/Cargo.toml"
 
 mkdir -p "$dest"
-for bin in ilar ilar-gateway; do
+for bin in ilar ilar-gateway ilar-file-worker; do
     rm -f "$dest/$bin"
     cp "$root/target/release/$bin" "$dest/$bin"
 

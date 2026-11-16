@@ -87,6 +87,7 @@ impl Tool for EditTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "sandbox": super::sandbox_grants::schema(),
                 "path": {"type": "string", "description": super::PATH_DESCRIPTION},
                 "old_string": {"type": "string", "description": "The exact current text to replace, without read's \"N→\" prefixes; must match once unless replace_all"},
                 "new_string": {"type": "string", "description": "What it becomes; empty deletes the passage"},
@@ -98,6 +99,9 @@ impl Tool for EditTool {
 
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
         Box::pin(async move {
+            if ctx.sandbox.enabled || input.get("sandbox").is_some() {
+                return super::file_worker::run("edit", input, &ctx).await;
+            }
             let input: Input = match parse_input(input, "edit") {
                 Ok(v) => v,
                 Err(e) => return e,

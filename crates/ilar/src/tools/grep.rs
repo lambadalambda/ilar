@@ -146,6 +146,7 @@ impl Tool for GrepTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "sandbox": super::sandbox_grants::schema(),
                 "pattern": {"type": "string", "description": "Rust regex"},
                 "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute (default: cwd)"},
                 "include_ignored": {
@@ -172,6 +173,14 @@ impl Tool for GrepTool {
 
     fn run(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture {
         Box::pin(async move {
+            if ctx.sandbox.enabled || input.get("sandbox").is_some() {
+                let output = super::file_worker::run("grep", input, &ctx).await;
+                return spill_over_budget(
+                    output,
+                    super::bash::SpillTarget::from_context(&ctx).as_ref(),
+                )
+                .await;
+            }
             let input: Input = match parse_input(input, "grep") {
                 Ok(v) => v,
                 Err(e) => return e,
