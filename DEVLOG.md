@@ -1,5 +1,20 @@
 # DEVLOG
 
+## Readable approval questions
+
+The imgsearch screenshot showed a fixed 76-column, 24-row question window in
+a much larger terminal, with low-contrast details and hidden choices. Questions
+now use the terminal width and grow with their content. Detail scrolling is
+separate from choices and the footer. Long answers can be scrolled without
+changing selection; text inputs follow their wrapped caret position.
+
+Sandbox approvals show requested rights before caller text, emphasize access
+headings and paths, and warn only for capabilities actually requested. Empty
+path sections, false flags, and long scope boilerplate are removed. Caller text
+and paths stay escaped so they cannot insert permission headings. Render tests
+cover 160x80 and 80x24 terminals, long choices, multiline text, and the dark theme.
+Astra found two answer-scroll defects; both have focused regression tests.
+
 ## Optional sandbox arguments stay optional
 
 The imgsearch session `95ab1b7e` sent a full inactive sandbox object on every

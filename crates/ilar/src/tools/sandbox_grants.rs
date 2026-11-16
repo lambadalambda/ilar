@@ -114,22 +114,39 @@ pub(crate) async fn resolve(
     let sender = ctx.sandbox_questions.as_ref().ok_or(
         "sandbox extension refused: nobody can approve this call; configure required paths before launch",
     )?;
-    let paths = request
-        .write_paths
-        .iter()
-        .map(|path| format!("  {path:?}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let read_paths = request
-        .read_paths
-        .iter()
-        .map(|path| format!("  {path:?}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let description = format!(
-        "Tool: {tool:?}\n\nCaller-provided text (quoted):\nCommand: {command:?}\nReason: {:?}\n\nRequested access (host-generated):\nRead paths (including descendants):\n{read_paths}\nWrite paths (including descendants):\n{paths}\nAll network access: {}\nRun without ilar's sandbox: {}\nGrants can apply to this call or this live session across file tools, bash, service, and sudo. Unsandboxed execution is once-only. Nothing is saved across restarts or shared with child sessions. External restrictions and secret/root checks still apply.",
-        request.reason, request.network, request.unsandboxed
+    let mut sections = vec![format!("Tool: {tool:?}")];
+    for (label, paths) in [
+        ("Read paths", &request.read_paths),
+        ("Write paths", &request.write_paths),
+    ] {
+        if !paths.is_empty() {
+            let paths = paths
+                .iter()
+                .map(|path| format!("  {path:?}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(format!("{label} (including descendants):\n{paths}"));
+        }
+    }
+    if request.network {
+        sections.push("All network access: true (all hosts, including localhost)".into());
+    }
+    if request.unsandboxed {
+        sections.push("Run without ilar's sandbox: true (file and network restrictions removed for this call)".into());
+    }
+    sections.push(
+        if request.unsandboxed {
+            "Scope: this call only. External restrictions and secret/root checks still apply."
+        } else {
+            "Scope: this call or this live session; not saved or shared with child sessions."
+        }
+        .into(),
     );
+    sections.push(format!(
+        "Reason: {:?}\nCommand: {command:?}",
+        request.reason
+    ));
+    let description = sections.join("\n\n");
     let stored = ctx
         .secrets
         .as_ref()
@@ -363,6 +380,42 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn approval_shows_requested_access_without_empty_sections_or_false_warnings() {
+        let mut ctx = ToolContext::root(std::env::temp_dir());
+        ctx.sandbox.enabled = true;
+        let (sender, mut receiver) = crate::question::question_channel(1);
+        ctx.sandbox_questions = Some(sender);
+        let request: Request = serde_json::from_value(
+            serde_json::json!({"read_paths":["/external-reference"],"reason":"Read reference"}),
+        )
+        .unwrap();
+        let approve = async {
+            let prompt = receiver.recv().await.unwrap();
+            let description = prompt.request.questions[0].description.as_ref().unwrap();
+            assert!(
+                description.contains("/external-reference")
+                    && description.contains("Read reference")
+            );
+            assert!(description.find("Read paths").unwrap() < description.find("Reason:").unwrap());
+            assert!(
+                description.find("Read paths").unwrap() < description.find("Command:").unwrap()
+            );
+            assert!(
+                !description.contains("Write paths")
+                    && !description.contains("network")
+                    && !description.contains("unsandboxed"),
+                "{description}"
+            );
+            answer(prompt, "once");
+        };
+        let (result, ()) = tokio::join!(
+            resolve(&ctx, Some(&request), "read", "reference.txt"),
+            approve
+        );
+        result.unwrap();
     }
 
     #[tokio::test]

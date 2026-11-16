@@ -70,6 +70,7 @@ impl InputBuffer {
         &self.text
     }
 
+    #[cfg(test)]
     pub(crate) fn cursor(&self) -> usize {
         self.cursor
     }
@@ -440,6 +441,7 @@ impl InputBuffer {
             cursor_x: (UnicodeWidthStr::width(&self.text[cursor.start..cursor_byte]) as u16)
                 .min(width.saturating_sub(1)),
             cursor_y: cursor_row.saturating_sub(start) as u16,
+            cursor_byte: cursor_byte - cursor.start,
             cursor_line: cursor_row + 1,
             line_count: rows.len(),
         }
@@ -463,6 +465,8 @@ pub(crate) struct InputView {
     pub(crate) lines: Vec<String>,
     pub(crate) cursor_x: u16,
     pub(crate) cursor_y: u16,
+    /// Byte offset in the cursor's wrapped row, for inline caret rendering.
+    pub(crate) cursor_byte: usize,
     pub(crate) cursor_line: usize,
     pub(crate) line_count: usize,
 }

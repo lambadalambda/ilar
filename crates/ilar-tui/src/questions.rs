@@ -1,21 +1,19 @@
 //! State and rendering for structured questions.
 
 use std::cell::Cell;
+use std::ops::Range;
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ilar::question::{Question, QuestionAnswer, QuestionKind, QuestionRequest, QuestionResponse};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::input::{InputBuffer, PromptAction, handle_prompt_key};
 use crate::theme;
-
-/// The modal's outer width. Two of those cells are its borders, so a
-/// footer has `MODAL_WIDTH - 2` to live in before it is clipped.
-const MODAL_WIDTH: u16 = 76;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum QuestionAction {
@@ -94,7 +92,9 @@ pub(crate) struct QuestionModal {
     // handling without requiring a mutable modal at every render call.
     scroll: Cell<usize>,
     page_height: Cell<usize>,
-    follow_cursor: bool,
+    answer_scroll: Cell<usize>,
+    answer_page_height: Cell<usize>,
+    follow_answer: bool,
 }
 
 impl QuestionModal {
@@ -123,7 +123,9 @@ impl QuestionModal {
             error: None,
             scroll: Cell::new(0),
             page_height: Cell::new(1),
-            follow_cursor: false,
+            answer_scroll: Cell::new(0),
+            answer_page_height: Cell::new(1),
+            follow_answer: true,
         }
     }
 
@@ -142,6 +144,16 @@ impl QuestionModal {
         }
         match key.code {
             KeyCode::Esc => return QuestionAction::Complete(QuestionResponse::Cancelled),
+            KeyCode::PageUp | KeyCode::PageDown if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                let step = self.answer_page_height.get().saturating_sub(1).max(1);
+                self.answer_scroll.set(if key.code == KeyCode::PageUp {
+                    self.answer_scroll.get().saturating_sub(step)
+                } else {
+                    self.answer_scroll.get().saturating_add(step)
+                });
+                self.follow_answer = false;
+                return QuestionAction::Stay;
+            }
             KeyCode::PageUp | KeyCode::PageDown => {
                 let step = self.page_height.get().saturating_sub(1).max(1);
                 self.scroll.set(if key.code == KeyCode::PageUp {
@@ -149,7 +161,6 @@ impl QuestionModal {
                 } else {
                     self.scroll.get().saturating_add(step)
                 });
-                self.follow_cursor = false;
                 return QuestionAction::Stay;
             }
             KeyCode::BackTab => {
@@ -159,8 +170,8 @@ impl QuestionModal {
             }
             _ => {}
         }
-        self.follow_cursor = true;
 
+        self.follow_answer = true;
         let question = &self.request.questions[self.current];
         let option_count = choice_len(question);
         let allow_other = allows_other(question);
@@ -211,7 +222,8 @@ impl QuestionModal {
 
     fn reset_view(&mut self) {
         self.scroll.set(0);
-        self.follow_cursor = false;
+        self.answer_scroll.set(0);
+        self.follow_answer = true;
     }
 
     /// Step between questions without validating — the counterpart to
@@ -234,7 +246,7 @@ impl QuestionModal {
         if self.request.questions.is_empty() {
             return;
         }
-        self.follow_cursor = true;
+        self.follow_answer = true;
         match &mut self.drafts[self.current] {
             Draft::FreeText(input) => input.insert(text),
             Draft::Single {
@@ -348,107 +360,191 @@ impl QuestionModal {
             return;
         }
         let question = &self.request.questions[self.current];
-        let area = crate::modals::centered_rect(available, MODAL_WIDTH, available.height.min(24));
-        // Lowercase, like every other overlay's title: this one alone
-        // shouted.
-        let title = format!(
-            " question {}/{} ",
-            self.current + 1,
-            self.request.questions.len()
-        );
-        // Same chrome as every other overlay: the border carries the
-        // footer, so the body only has to make room for an error line.
-        let Some(inner) = crate::modals::modal_frame(
-            frame,
-            area,
-            &title,
-            theme::MARKUP,
-            &question_footer(
-                question,
-                newline_keys,
-                self.current + 1 == self.request.questions.len(),
-            ),
-        ) else {
-            return;
-        };
-
+        // Use the terminal's width and grow vertically with wrapped content.
+        // Details scroll independently; answers and keys never follow them offscreen.
+        let bounds = crate::modals::centered_rect(available, available.width, available.height);
+        let width = bounds.width.saturating_sub(2).max(1);
         let requirement = if question.required {
             "required"
         } else {
             "optional"
         };
-        let mut lines = vec![Line::styled(
+        let mut details = vec![Line::styled(
             format!("{}  ({requirement})", question.prompt),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::PRIMARY)
+                .add_modifier(Modifier::BOLD),
         )];
         if let Some(description) = &question.description {
-            lines.extend(
+            details.extend(
                 description
                     .split('\n')
-                    .map(|line| Line::styled(line, Style::default().fg(theme::MUTED))),
+                    .map(|line| description_line(question, line)),
             );
         }
-        lines.push(Line::default());
-        let active_line = append_draft_lines(&mut lines, question, &self.drafts[self.current]);
-
-        let error_height = u16::from(self.error.is_some() && inner.height > 1);
-        let hint_height = u16::from(inner.height > error_height + 1);
-        let body_height = inner.height.saturating_sub(error_height + hint_height);
-        let body = Rect::new(inner.x, inner.y + hint_height, inner.width, body_height);
-        if hint_height > 0 {
-            frame.render_widget(
-                Paragraph::new("PgUp/PgDn scroll").style(Style::default().fg(theme::MUTED)),
-                Rect::new(inner.x, inner.y, inner.width, 1),
-            );
-        }
-        if body.height > 0 {
-            let active_row = Paragraph::new(lines[..active_line].to_vec())
+        let details = Paragraph::new(details)
+            .style(Style::default().fg(theme::PRIMARY))
+            .wrap(Wrap { trim: false });
+        let detail_rows = details.line_count(width);
+        let mut answers = Vec::new();
+        let active = append_draft_lines(&mut answers, question, &self.drafts[self.current], width);
+        let wrapped_rows = |end| {
+            Paragraph::new(answers[..end].to_vec())
                 .wrap(Wrap { trim: false })
-                .line_count(body.width);
-            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-            let max_scroll = paragraph
-                .line_count(body.width)
-                .saturating_sub(body.height as usize);
-            let scroll = if self.follow_cursor {
-                active_row.saturating_sub(body.height.saturating_sub(1) as usize)
-            } else {
-                self.scroll.get()
-            }
-            .min(max_scroll)
+                .line_count(width)
+        };
+        let active = wrapped_rows(active.start)..wrapped_rows(active.end);
+        let answers = Paragraph::new(answers)
+            .style(Style::default().fg(theme::PRIMARY))
+            .wrap(Wrap { trim: false });
+        let answer_rows = answers.line_count(width);
+        let footer = Paragraph::new(question_footer(
+            question,
+            newline_keys,
+            self.current + 1 == self.request.questions.len(),
+            width,
+        ))
+        .style(Style::default().fg(theme::PRIMARY))
+        .wrap(Wrap { trim: false });
+        let footer_rows = footer.line_count(width);
+        let desired_height =
+            detail_rows + answer_rows + footer_rows + 3 + usize::from(self.error.is_some());
+        let area = crate::modals::centered_rect(
+            available,
+            bounds.width,
+            desired_height.min(usize::from(u16::MAX)) as u16,
+        );
+        let height = area.height.saturating_sub(2);
+        let error_height = u16::from(self.error.is_some() && height > 1);
+        let footer_height = (footer_rows as u16).min(height.saturating_sub(error_height + 2));
+        let content_height = height.saturating_sub(error_height + footer_height);
+        let answer_height = (answer_rows.min(usize::from(u16::MAX)) as u16)
+            .min(content_height.saturating_sub(2).max(1))
+            .min(content_height);
+        let detail_height = content_height.saturating_sub(answer_height);
+        let gap = u16::from(detail_height as usize > detail_rows);
+        let detail_height = detail_height.saturating_sub(gap);
+        let overflow = detail_rows > usize::from(detail_height);
+        let title = if overflow && width >= 28 {
+            format!(
+                " question {}/{} · PgUp/PgDn ",
+                self.current + 1,
+                self.request.questions.len()
+            )
+        } else if overflow && width >= 11 {
+            " PgUp/PgDn ".to_string()
+        } else {
+            format!(
+                " question {}/{} ",
+                self.current + 1,
+                self.request.questions.len()
+            )
+        };
+        let answer_hint = if answer_rows > usize::from(answer_height) {
+            " Shift-PgUp/PgDn "
+        } else {
+            ""
+        };
+        let Some(inner) =
+            crate::modals::modal_frame(frame, area, &title, theme::MARKUP, answer_hint)
+        else {
+            return;
+        };
+        let scroll = self
+            .scroll
+            .get()
+            .min(detail_rows.saturating_sub(usize::from(detail_height)))
             .min(usize::from(u16::MAX));
-            self.scroll.set(scroll);
-            self.page_height.set(body.height as usize);
-            frame.render_widget(paragraph.scroll((scroll as u16, 0)), body);
+        self.scroll.set(scroll);
+        self.page_height.set(usize::from(detail_height).max(1));
+        frame.render_widget(
+            details.scroll((scroll as u16, 0)),
+            Rect::new(inner.x, inner.y, inner.width, detail_height),
+        );
+        let answer_scroll = if self.follow_answer {
+            // Show the whole focused choice when it fits; start at its label
+            // otherwise. Shift-PgUp/PgDn can read the rest without selecting.
+            active
+                .end
+                .saturating_sub(usize::from(answer_height))
+                .min(active.start)
+        } else {
+            self.answer_scroll.get()
         }
+        .min(answer_rows.saturating_sub(usize::from(answer_height)))
+        .min(usize::from(u16::MAX));
+        self.answer_scroll.set(answer_scroll);
+        self.answer_page_height
+            .set(usize::from(answer_height).max(1));
+        let answer_y = inner.y + detail_height + gap;
+        frame.render_widget(
+            answers.scroll((answer_scroll as u16, 0)),
+            Rect::new(inner.x, answer_y, inner.width, answer_height),
+        );
+        let error_y = answer_y + answer_height;
         if let Some(error) = &self.error
             && error_height > 0
         {
             frame.render_widget(
                 Paragraph::new(error.as_str()).style(Style::default().fg(theme::ERROR)),
-                Rect::new(inner.x, body.bottom(), inner.width, 1),
+                Rect::new(inner.x, error_y, inner.width, 1),
             );
         }
+        frame.render_widget(
+            footer,
+            Rect::new(inner.x, error_y + error_height, inner.width, footer_height),
+        );
     }
+}
+
+/// Style only complete, top-level host labels. Command and reason values are
+/// quoted on one physical line by the host; never scan inside those values.
+/// This is presentation, not proof that a request came from the host.
+fn description_line<'a>(question: &Question, line: &'a str) -> Line<'a> {
+    if question.id != "sandbox_approval" {
+        return Line::from(line);
+    }
+    let style = if line.starts_with("Command: ") || line.starts_with("Reason: ") {
+        Style::default().fg(theme::SECONDARY)
+    } else if [
+        "Requested access (host-generated):",
+        "Read paths (including descendants):",
+        "Write paths (including descendants):",
+        "Read paths:",
+        "Write paths:",
+        "All network access: true",
+        "Run without ilar's sandbox: true",
+    ]
+    .iter()
+    .any(|label| line.starts_with(label))
+    {
+        Style::default()
+            .fg(theme::WAITING)
+            .add_modifier(Modifier::BOLD)
+    } else if line.starts_with("  \"") {
+        Style::default()
+            .fg(theme::PRIMARY)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::PRIMARY)
+    };
+    Line::styled(line, style)
 }
 
 fn append_draft_lines<'a>(
     lines: &mut Vec<Line<'a>>,
     question: &'a Question,
     draft: &'a Draft,
-) -> usize {
+    width: u16,
+) -> Range<usize> {
     match (draft, &question.kind) {
-        (Draft::FreeText(input), QuestionKind::FreeText) => {
-            let active = lines.len();
-            let display = text_with_caret(input);
-            for (index, text) in display.split('\n').enumerate() {
-                lines.push(Line::from(format!(
-                    "{}{}",
-                    if index == 0 { "> " } else { "  " },
-                    text
-                )));
-            }
-            active
-        }
+        (Draft::FreeText(input), QuestionKind::FreeText) => append_input_lines(
+            lines,
+            input,
+            "> ",
+            width,
+            Style::default().fg(theme::PRIMARY),
+        ),
         (
             Draft::Single {
                 selected,
@@ -466,6 +562,7 @@ fn append_draft_lines<'a>(
             |index| *selected == Some(index),
             *allow_other,
             other,
+            width,
         ),
         (
             Draft::Multiple {
@@ -484,8 +581,18 @@ fn append_draft_lines<'a>(
             |index| selected[index],
             *allow_other,
             other,
+            width,
         ),
-        _ => lines.len(),
+        _ => lines.len()..lines.len(),
+    }
+}
+
+fn choice_style(focused: bool) -> Style {
+    let style = Style::default().fg(theme::PRIMARY);
+    if focused {
+        style.bg(theme::SELECTION_BG).add_modifier(Modifier::BOLD)
+    } else {
+        style
     }
 }
 
@@ -496,39 +603,53 @@ fn append_choices<'a>(
     checked: impl Fn(usize) -> bool,
     allow_other: bool,
     other: &'a InputBuffer,
-) -> usize {
-    let mut active = lines.len();
+    width: u16,
+) -> Range<usize> {
+    let mut active = lines.len()..lines.len();
     for (index, option) in options.iter().enumerate() {
-        if cursor == index {
-            active = lines.len();
-        }
+        let start = lines.len();
         let pointer = if cursor == index { ">" } else { " " };
         let marker = if checked(index) { "[x]" } else { "[ ]" };
-        lines.push(Line::from(format!("{pointer} {marker} {}", option.label)));
+        lines.push(Line::styled(
+            format!("{pointer} {marker} {}", option.label),
+            choice_style(cursor == index),
+        ));
         if let Some(description) = &option.description {
-            lines.push(Line::styled(
-                format!("      {description}"),
-                Style::default().fg(theme::MUTED),
-            ));
+            lines.extend(description.split('\n').map(|line| {
+                Line::styled(
+                    format!("      {line}"),
+                    Style::default().fg(theme::SECONDARY),
+                )
+            }));
+        }
+        if cursor == index {
+            active = start..lines.len();
         }
     }
     if allow_other {
         let index = options.len();
-        if cursor == index {
-            active = lines.len();
-        }
         let pointer = if cursor == index { ">" } else { " " };
         let marker = if other.is_blank() { "[ ]" } else { "[x]" };
-        let other_display = if cursor == index {
-            text_with_caret(other)
-        } else if other.text().is_empty() {
+        if cursor == index {
+            return append_input_lines(
+                lines,
+                other,
+                &format!("{pointer} {marker} "),
+                width,
+                choice_style(true),
+            );
+        }
+        let other_display = if other.text().is_empty() {
             "Other…".to_string()
         } else {
             other.text().to_string()
         };
         let mut rows = other_display.split('\n').collect::<Vec<_>>();
         let first = rows.remove(0);
-        lines.push(Line::from(format!("{pointer} {marker} {first}")));
+        lines.push(Line::styled(
+            format!("{pointer} {marker} {first}"),
+            choice_style(cursor == index),
+        ));
         lines.extend(
             rows.into_iter()
                 .map(|row| Line::from(format!("      {row}"))),
@@ -537,35 +658,51 @@ fn append_choices<'a>(
     active
 }
 
-/// Padded like every other `modal_frame` footer: it is right-aligned in
-/// the bottom border and would otherwise butt into the corner.
-/// It also has to fit: the modal is capped at [`MODAL_WIDTH`] and a
-/// right-aligned title is clipped from the tail, so an overlong footer
-/// loses `Esc cancel` — the one key that always has to be findable.
-/// The free-text form says `↑↓` alone for that reason, where the choice
-/// form has the room to say `↑↓ navigate`.
-fn question_footer(question: &Question, newline_keys: &str, last: bool) -> String {
-    // Enter sends on the last question, and "next" promised one that
-    // is not there. `BackTab` is the terminal's name for the key, not
-    // the keyboard's.
+/// Keep essential actions first on narrow terminals. This footer has its own
+/// wrapped rows instead of being clipped inside the bottom border.
+fn question_footer(question: &Question, newline_keys: &str, last: bool, width: u16) -> String {
     let enter = if last { "Enter send" } else { "Enter next" };
-    match &question.kind {
-        QuestionKind::FreeText => {
-            // No ↑↓ here: the footer has 74 cells and this form spends
-            // 18 of them on the newline keys. Moving between questions
-            // with the arrows is an edge affordance and lives in F1.
-            format!(" {enter} · {newline_keys} newline · Shift-Tab back · Esc cancel ")
-        }
-        QuestionKind::SingleChoice { .. } | QuestionKind::MultipleChoice { .. } => {
-            format!(" ↑↓ navigate · Space select · {enter} · Shift-Tab back · Esc cancel ")
-        }
+    let actions = match &question.kind {
+        QuestionKind::FreeText if width >= 50 => format!("{enter} · {newline_keys} newline"),
+        QuestionKind::FreeText => enter.to_string(),
+        _ if width >= 50 => format!("↑↓ navigate · Space select · {enter}"),
+        _ if width >= 28 => format!("↑↓ · Space select · {enter}"),
+        _ => format!("Space · {enter}"),
+    };
+    if width >= 74 {
+        format!("{actions} · Shift-Tab back · Esc cancel")
+    } else if unicode_width::UnicodeWidthStr::width(actions.as_str()) + 13 <= usize::from(width) {
+        format!("{actions} · Esc cancel")
+    } else {
+        format!("{actions}\nEsc cancel")
     }
 }
 
-fn text_with_caret(input: &InputBuffer) -> String {
-    let mut display = input.text().to_string();
-    display.insert(input.cursor(), '▏');
-    display
+/// Use the prompt buffer's wrapping and caret mapping. Reserve a cell for
+/// the inline caret so Paragraph cannot wrap these prepared rows again.
+fn append_input_lines(
+    lines: &mut Vec<Line<'_>>,
+    input: &InputBuffer,
+    prefix: &str,
+    width: u16,
+    style: Style,
+) -> Range<usize> {
+    let indent = " ".repeat(prefix.width());
+    let view = input.multiline_view(
+        width.saturating_sub(prefix.width() as u16 + 1).max(1),
+        u16::MAX,
+    );
+    let active = lines.len() + usize::from(view.cursor_y);
+    for (index, mut text) in view.lines.into_iter().enumerate() {
+        if index == usize::from(view.cursor_y) {
+            text.insert(view.cursor_byte, '▏');
+        }
+        lines.push(Line::styled(
+            format!("{}{text}", if index == 0 { prefix } else { &indent }),
+            style,
+        ));
+    }
+    active..active + 1
 }
 
 fn answer(question: &Question, draft: &Draft) -> Option<QuestionAnswer> {
@@ -907,6 +1044,197 @@ mod tests {
         )
     }
 
+    fn approval_request(rows: usize) -> QuestionRequest {
+        QuestionRequest {
+            questions: vec![Question {
+                id: "approval".into(),
+                prompt: "Approve this request?".into(),
+                description: Some(
+                    (0..rows)
+                        .map(|row| format!("detail {row:02}: {}", "path/".repeat(19)))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                required: true,
+                kind: QuestionKind::SingleChoice {
+                    allow_other: false,
+                    options: ["Deny", "Allow this call only", "Allow for this session"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, label)| QuestionOption {
+                            id: index.to_string(),
+                            label: label.into(),
+                            description: (index == 2).then(|| "Reuse these read/write paths and network access in this live session only.".into()),
+                        })
+                        .collect(),
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn large_questions_use_terminal_space_and_readable_text() {
+        let modal = QuestionModal::new(approval_request(44));
+        let mut terminal = Terminal::new(TestBackend::new(160, 80)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, frame.area(), "Ctrl-J"))
+            .unwrap();
+        let output = screen(&modal, 160, 80);
+        for text in [
+            "detail 00",
+            "detail 43",
+            "Deny",
+            "Allow for this session",
+            "Esc cancel",
+        ] {
+            assert!(output.contains(text), "missing {text}: {output}");
+        }
+        let buffer = terminal.backend().buffer();
+        let detail = buffer
+            .content
+            .windows(6)
+            .find(|cells| {
+                cells
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .eq(["d", "e", "t", "a", "i", "l"])
+            })
+            .unwrap();
+        assert_eq!(detail[0].fg, theme::PRIMARY, "details must not be muted");
+        let focused = buffer
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == ">")
+            .unwrap();
+        assert!(focused.modifier.contains(Modifier::BOLD));
+        assert_eq!(focused.bg, theme::SELECTION_BG);
+    }
+
+    #[test]
+    fn small_questions_keep_choices_and_cancel_visible_while_details_scroll() {
+        for (width, height) in [(40, 14), (80, 23)] {
+            let mut modal = QuestionModal::new(approval_request(30));
+            for step in 0..5 {
+                let output = screen(&modal, width, height);
+                for text in [
+                    "Deny",
+                    "Allow this call only",
+                    "Allow for this session",
+                    "Esc cancel",
+                    "PgUp/PgDn",
+                ] {
+                    assert!(
+                        output.contains(text),
+                        "page {step}, missing {text}: {output}"
+                    );
+                }
+                modal.handle_key(key(KeyCode::PageDown));
+            }
+            modal.handle_key(key(KeyCode::Down));
+            modal.handle_key(key(KeyCode::Char(' ')));
+            assert!(screen(&modal, width, height).contains("> [x] Allow this call only"));
+        }
+    }
+
+    #[test]
+    fn compact_sandbox_approval_fits_large_terminal_and_pins_choices_on_small_terminal() {
+        let mut request = approval_request(0);
+        let command = format!(
+            "{}printf command-end",
+            "cargo test --workspace --all-features && ".repeat(18)
+        );
+        let read_path = "/Users/alice/.config/ilar/settings.toml";
+        let write_path = "/Users/alice/.local/share/ilar/sessions";
+        request.questions[0].id = "sandbox_approval".into();
+        request.questions[0].prompt = "Approve this sandbox exception?".into();
+        request.questions[0].description = Some(format!(
+            "Tool: \"bash\"\n\nRead paths (including descendants):\n  {read_path:?}\n\nWrite paths (including descendants):\n  {write_path:?}\n\nScope: this call or this live session; not saved or shared with child sessions.\n\nReason: \"Run tests with external settings and session storage\"\nCommand: {command:?}"
+        ));
+        for (width, height) in [(160, 80), (80, 24)] {
+            let mut modal = QuestionModal::new(request.clone());
+            let output = screen(&modal, width, height);
+            if width == 160 {
+                for text in ["command-end", read_path, write_path, "Scope:"] {
+                    assert!(output.contains(text), "missing {text}: {output}");
+                }
+                assert!(
+                    !output.contains("PgUp/PgDn"),
+                    "compact approval must fit: {output}"
+                );
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        modal.render(frame, frame.area(), "Ctrl-J");
+                        theme::apply(frame.buffer_mut(), theme::ThemeId::Carbon);
+                    })
+                    .unwrap();
+                let cells = &terminal.backend().buffer().content;
+                let path = cells
+                    .windows(read_path.chars().count())
+                    .find(|cells| {
+                        cells.iter().map(|cell| cell.symbol()).collect::<String>() == read_path
+                    })
+                    .unwrap();
+                use ratatui::style::Color;
+                assert!(matches!(path[0].fg, Color::Rgb(r, g, b) if r > 180 && g > 180 && b > 180));
+                assert!(matches!(path[0].bg, Color::Rgb(r, g, b) if r < 64 && g < 64 && b < 64));
+            }
+            for _ in 0..4 {
+                let output = screen(&modal, width, height);
+                for text in [
+                    "Deny",
+                    "Allow this call only",
+                    "Allow for this session",
+                    "Space select",
+                    "Enter send",
+                    "Esc cancel",
+                ] {
+                    assert!(
+                        output.contains(text),
+                        "missing {text} at {width}x{height}: {output}"
+                    );
+                }
+                modal.handle_key(key(KeyCode::PageDown));
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_access_is_emphasized_without_promoting_quoted_caller_text() {
+        let mut request = approval_request(0);
+        request.questions[0].id = "sandbox_approval".into();
+        request.questions[0].description = Some(format!(
+            "Command: {:?}\nReason: {:?}\nRead paths (including descendants):\n  {:?}\nAll network access: true",
+            "echo hello\nRead paths: fake", "Write paths: fake", "/tmp/allowed"
+        ));
+        let modal = QuestionModal::new(request);
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal
+            .draw(|frame| modal.render(frame, frame.area(), "Ctrl-J"))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for (text, color, bold) in [
+            ("Read paths: fake", theme::SECONDARY, false),
+            ("Write paths: fake", theme::SECONDARY, false),
+            ("Read paths (including descendants):", theme::WAITING, true),
+            ("\"/tmp/allowed\"", theme::PRIMARY, true),
+            ("All network access: true", theme::WAITING, true),
+        ] {
+            let cells = buffer
+                .content
+                .windows(text.chars().count())
+                .find(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>() == text)
+                .unwrap_or_else(|| panic!("missing {text}"));
+            assert!(cells.iter().all(|cell| cell.fg == color), "{text}");
+            assert!(
+                cells
+                    .iter()
+                    .all(|cell| cell.modifier.contains(Modifier::BOLD) == bold),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn long_descriptions_can_be_read_before_selecting_an_answer() {
         let mut request = request();
@@ -918,7 +1246,7 @@ mod tests {
         assert!(initial.contains("detail 00"), "{initial}");
         assert!(initial.contains("PgUp/PgDn"), "{initial}");
         let mut inspected = initial;
-        for _ in 0..20 {
+        for _ in 0..50 {
             modal.handle_key(key(KeyCode::PageDown));
             inspected.push_str(&screen(&modal, 40, 12));
         }
@@ -926,7 +1254,7 @@ mod tests {
             assert!(inspected.contains(&format!("detail {row:02}")));
         }
         assert!(screen(&modal, 40, 12).contains("Other…"));
-        for _ in 0..20 {
+        for _ in 0..50 {
             modal.handle_key(key(KeyCode::PageUp));
             screen(&modal, 40, 12);
         }
@@ -984,11 +1312,8 @@ mod tests {
         assert!(output.contains("Enter next"), "{output}");
     }
 
-    /// The footer of a free-text question offers Shift-Enter only where
-    /// the terminal can report it; Ctrl-J is offered either way. And it
-    /// fits: the footer is right-aligned in the bottom border and is
-    /// clipped from the tail, so the longer form used to eat
-    /// `Esc cancel` at every terminal width.
+    /// The free-text footer offers Shift-Enter only where the terminal can
+    /// report it. Both forms keep Esc cancel visible in the fixed footer.
     #[test]
     fn the_free_text_footer_offers_the_keys_that_arrive_and_fits() {
         let free_text = QuestionRequest {
@@ -1001,8 +1326,6 @@ mod tests {
             }],
         };
         let modal = QuestionModal::new(free_text);
-        let question = &modal.request.questions[0];
-
         let enhanced = screen_with(&modal, 100, 24, "Shift-Enter/Ctrl-J");
         assert!(
             enhanced.contains("Shift-Enter/Ctrl-J newline"),
@@ -1017,17 +1340,104 @@ mod tests {
             "a key this terminal cannot send was offered: {plain}"
         );
         assert!(plain.contains("Esc cancel"), "{plain}");
+    }
 
-        // Measured, not eyeballed: two of the modal's cells are its
-        // borders.
-        for newline_keys in ["Shift-Enter/Ctrl-J", "Ctrl-J"] {
-            let footer = question_footer(question, newline_keys, true);
-            let width = unicode_width::UnicodeWidthStr::width(footer.as_str());
-            assert!(
-                width <= usize::from(MODAL_WIDTH) - 2,
-                "{width} cells of footer in {} : {footer}",
-                MODAL_WIDTH - 2
-            );
+    #[test]
+    fn text_answers_follow_wrapped_caret_after_paste_typing_and_movement() {
+        for question in request().questions {
+            let other = choice_len(&question);
+            let mut modal = QuestionModal::new(QuestionRequest {
+                questions: vec![question],
+            });
+            for _ in 0..other {
+                modal.handle_key(key(KeyCode::Down));
+            }
+            modal.paste(&format!(
+                "{}\n{}",
+                "naïve 👩‍💻 words ".repeat(12),
+                "last line ".repeat(12)
+            ));
+            for code in [
+                None,
+                Some(KeyCode::Home),
+                Some(KeyCode::Left),
+                Some(KeyCode::Char('z')),
+            ] {
+                if let Some(code) = code {
+                    modal.handle_key(key(code));
+                }
+                let output = screen(&modal, 24, 10);
+                assert!(
+                    output.contains('▏'),
+                    "caret hidden after {code:?}: {output}"
+                );
+                assert!(output.contains("Esc cancel"), "{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn final_choice_text_is_readable_without_changing_multiple_selection() {
+        for oversized in [false, true] {
+            let mut request = request();
+            request.questions.remove(0);
+            let QuestionKind::MultipleChoice {
+                options,
+                allow_other,
+            } = &mut request.questions[0].kind
+            else {
+                panic!()
+            };
+            *allow_other = false;
+            *options = (0..20)
+                .map(|index| QuestionOption {
+                    id: index.to_string(),
+                    label: format!("Option {index}"),
+                    description: None,
+                })
+                .collect();
+            options[19].label = "Final option with a wrapped label tail".into();
+            options[19].description = Some(if oversized {
+                (0..12)
+                    .map(|row| format!("description row {row:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                "Final description tail".into()
+            });
+            let mut modal = QuestionModal::new(request);
+            modal.handle_key(key(KeyCode::Char(' ')));
+            for _ in 0..19 {
+                modal.handle_key(key(KeyCode::Down));
+            }
+            modal.handle_key(key(KeyCode::Char(' ')));
+            let selected = modal.answers();
+            let mut output = screen(&modal, 40, 12);
+            assert!(output.contains("Final option"), "{output}");
+            if oversized {
+                assert!(output.contains("Shift-PgUp/PgDn"), "{output}");
+                for _ in 0..15 {
+                    modal.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::SHIFT));
+                    output.push_str(&screen(&modal, 40, 12));
+                }
+                for row in 0..12 {
+                    assert!(
+                        output.contains(&format!("description row {row:02}")),
+                        "{output}"
+                    );
+                }
+            } else {
+                assert!(output.contains("label tail"), "{output}");
+                assert!(output.contains("Final description tail"), "{output}");
+            }
+            assert_eq!(modal.answers(), selected, "paging must not select");
+            modal.handle_key(key(KeyCode::Up));
+            modal.handle_key(key(KeyCode::Down));
+            assert!(screen(&modal, 40, 12).contains("> [x] Final option"));
+            modal.handle_key(key(KeyCode::Enter));
+            modal.handle_key(key(KeyCode::BackTab));
+            assert_eq!(modal.answers(), selected, "navigation must preserve picks");
+            assert!(screen(&modal, 40, 12).contains("> [x] Final option"));
         }
     }
 
