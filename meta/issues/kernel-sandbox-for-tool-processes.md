@@ -242,6 +242,31 @@ optional tool arguments. Treat inactive sandbox objects as existing-policy calls
 recognize canonical workspace read/write coverage, and explain how to omit an
 unneeded request in validation errors. Keep actual extensions and bypasses gated.
 
+## Normal coding defaults and approval usability (2026-11-16)
+
+Run the imgsearch mixed-random-library task with ilar in an isolated worktree,
+then tune narrow defaults from actual failures. Existing transcripts show denied
+Go module-cache reads, mise wrapper configuration reads, and macOS compiler-cache
+writes. TMPDIR equal to the repo also makes Go ignore the repo's go.mod. Allow
+trusted installed skill references and dependency cache reads without granting
+whole home/config/temp trees. Keep disposable writes inside the worktree and
+network/shared external writes behind approval. Approval coverage must match the
+actual default policy. Improve question sizing, contrast, emphasis, and choice
+visibility so ordinary requests do not need needless scrolling.
+
+Delivered: rights-first, terminal-sized approval questions; workspace-local
+scratch/cache/mise state; read-only Go dependencies and frozen trusted skill
+targets; shared shell/file-worker policy; narrow Homebrew SDK pkg-config reads.
+The isolated ilar retest passed frontend checks, then final verification passed
+Go library/database tests and linked INDEX reads with no exceptions. Private
+Git config and local TCP listeners remain denied by default. Tests cover
+symlink-safe cache creation, read-only skill roots, and pinned mise selection.
+See `experiments/sandbox/README.md` for results.
+
+Follow-ups, not blockers for this experiment: use a driver's alternate
+`RuntimeOptions.user_dir` for frozen skill registrations; preserve project
+compiler selection when avoiding Apple's shared-cache launchers.
+
 ## Milestone
 
 13 — Guard rails

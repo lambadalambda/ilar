@@ -6,17 +6,19 @@ Status: off by default; macOS backend only. See
 
 ## Scope
 
-The sandbox applies to bash (foreground and background), service start, and
-sudo, including its authentication probe. It does not constrain ilar itself,
-direct file tools, Git helpers, provider requests, or every other subprocess.
+The sandbox applies to bash (foreground and background), service start,
+sudo (including its authentication probe), and direct file tools through
+`ilar-file-worker`. It does not constrain ilar itself, Git helpers, provider
+requests, or every other subprocess.
 Content reads are restricted to workspace, runtime/toolchain defaults, selected
 cache profiles, and explicit read paths. See configuration for the default path
 groups. This is not a sandbox for hostile code.
 
 Enable it with `ilar --experimental-sandbox`,
 `ilar exec --experimental-sandbox ...`, or user-only `[sandbox] enabled = true`.
-The default policy allows workspace writes, uses that workspace for temporary
-files, and denies network. Explicit profiles grant read/write Cargo, pip, or
+The default policy allows workspace writes, puts temporary files and tool caches
+under workspace `.ilar-cache`, and denies network. Explicit profiles grant
+read/write Cargo, pip, or
 npm caches. Explicit absolute `read_paths` and `write_paths` grant separate
 read and write access to their subtrees. Cache parent directories must exist.
 Network grants permit all network access. Metadata probes remain globally
@@ -150,6 +152,63 @@ the full all-features workspace suite and doc tests pass. Formatting checks
 pass for the changed Rust files. An independent review found no remaining
 blockers after retained canonical targets were revalidated on reuse.
 
+## Coding-task experiment, 2026-11-16
+
+Ran the imgsearch mixed-random-library task through `ilar exec` with the sandbox
+enabled, in a separate worktree. Copied installed Node dependencies into that
+worktree before the run; no package downloads or permission exceptions were
+allowed. The agent implemented the feature without changing the user's active
+checkout. Its feature patch is experimental and is not merged by this work.
+
+Baseline: 91 frontend tests, Svelte checks, and the production build with asset
+validation passed. Go tests could not start because `TMPDIR` was the repo root:
+Go deliberately ignores a `go.mod` at the system temporary root. Mise tried to
+read global configuration and write its shared trust records. Git tried to read
+`.gitconfig`, and Apple's tool launcher tried to write `xcrun_db` in the user's
+general temporary directory. Loading the web skill worked, but reading its
+`~/.agents/skills/modern-web-guidance/INDEX.md` was denied. Earlier imgsearch
+transcripts also show denied reads of `~/go/pkg/mod` download metadata.
+
+These failures call for readable dependency/skill data and worktree-local
+scratch space, not a whole-home read grant or shared-cache writes. Private user
+configuration, arbitrary outside writes, network, and sandbox bypass remain
+approval decisions.
+
+### Final defaults and retest
+
+Temporary files, Go build data, npm/XDG caches, Clang modules, and mise state
+now use `.ilar-cache` below the workspace. Directory creation uses open directory
+descriptors and rejects symlinks instead of following them with parent rights.
+The Go module cache is readable but not writable. Trusted user skill roots are
+resolved once at session setup; broad targets and inner symlink escapes do not
+get extra access. Shell and direct-file workers use the same policy and cache
+environment. Mise retains inherited version precedence and project-aware shims.
+Selected native Apple tools avoid the shared `xcrun` cache launcher.
+
+A fresh full ilar run (`4d602c2d-d758-4c5c-9069-90f406686c2b`) in the isolated
+clone passed all 91 frontend tests, Svelte checks, and production build/asset
+validation. Go started correctly. It exposed one more missing read: Homebrew's
+macOS SDK pkg-config data, used to find `libffi.pc`. Added only that read-only
+subtree, not Homebrew's whole `Library`.
+
+A final ilar verification passed linked skill INDEX reads, `pkg-config --cflags
+vips`, `mise exec -- go test ./internal/library`, and `mise exec -- go test
+./internal/db`, with no extra grants. Config-free Git status worked, with a
+warning for the denied private global-ignore file. Direct `.gitconfig` reads
+remained denied. The broad Go suite still fails tests that bind a localhost
+port: network, including loopback, remains an approval decision. No installs,
+network grants, or changes to the active imgsearch checkout were used.
+
+The experimental feature changes remain in `../imgsearch-sandbox-retest` and
+the earlier `../imgsearch-sandbox-experiment`; they are not part of ilar's patch.
+The ilar all-features workspace suite passes (2,111 tests, 27 ignored), as do
+workspace Clippy and changed-file formatting. Real macOS checks pass for Go/cgo,
+mise tasks, pinned Go selection, write confinement, and denied loopback access.
+
+Limited follow-ups: a driver's alternate `RuntimeOptions.user_dir` is not used
+for frozen skill registration yet, and native compiler selection does not fully
+preserve project-selected compiler shims. Neither needs wider default access.
+
 ## Not implemented
 
 - Reliable observe/training mode. The initial runner blocked unified-log access;
@@ -157,9 +216,10 @@ blockers after retained canonical targets were revalidated on reuse.
   policy was learned from command errors. Future observations must propose
   grants, never approve them automatically.
 - Persistent per-project grants and automatic toolchain-profile inference.
-- Direct file-tool policy, sensitive-file exclusions within otherwise allowed
-  roots, host allowlists, and Linux confinement.
-- Gateway/child approval routing and a separate private temporary directory.
+- Sensitive-file exclusions within otherwise allowed roots, host allowlists,
+  and Linux confinement.
+- Gateway/child approval routing and an OS-private temporary directory outside
+  the workspace.
 
 Metadata disclosure, readable installed-tool data, IPC/brokers, inherited
 descriptors, cache poisoning, pathname replacement/hard links, and descendants

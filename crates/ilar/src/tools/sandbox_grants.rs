@@ -78,22 +78,13 @@ pub(crate) async fn resolve(
         *path =
             crate::sandbox::resolve_path(path).map_err(|error| format!("sandbox path: {error}"))?;
     }
-    let workspace = crate::sandbox::resolve_path(&ctx.cwd)
-        .map_err(|error| format!("sandbox workspace: {error}"))?;
-    let covered = |paths: &[std::path::PathBuf], roots: &[std::path::PathBuf]| {
-        let roots: Vec<_> = roots
-            .iter()
-            .filter_map(|root| crate::sandbox::resolve_path(root).ok())
-            .chain(std::iter::once(workspace.clone()))
-            .collect();
-        paths
-            .iter()
-            .all(|path| roots.iter().any(|root| path.starts_with(root)))
-    };
+    let roots = crate::sandbox::access_roots(&ctx.cwd, &config)
+        .map_err(|error| format!("sandbox policy: {error}"))?;
+    let covered = |paths: &[std::path::PathBuf], write: bool| roots.covers(paths, write);
     if !request.unsandboxed
         && (!request.network || config.network)
-        && covered(&request.read_paths, &config.read_paths)
-        && covered(&request.write_paths, &config.write_paths)
+        && covered(&request.read_paths, false)
+        && covered(&request.write_paths, true)
     {
         return Ok(config);
     }
@@ -104,7 +95,7 @@ pub(crate) async fn resolve(
         && request
             .write_paths
             .iter()
-            .any(|path| !covered(std::slice::from_ref(path), &config.write_paths) && path.is_file())
+            .any(|path| !covered(std::slice::from_ref(path), true) && path.is_file())
     {
         return Err("atomic file replacement requires a directory grant for temporary siblings; grant read and write access to the containing directory instead of only the file".into());
     }
@@ -305,6 +296,46 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn default_and_profile_roots_need_no_read_approval_but_keep_writes_separate() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut ctx = ToolContext::root(workspace.path().to_owned());
+        ctx.sandbox.enabled = true;
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let mut request: Request = serde_json::from_value(serde_json::json!({
+            "read_paths": [home.join("go/pkg/mod/cache/download"), "/usr/bin/git",
+                "/opt/homebrew/Library/Homebrew/os/mac/pkgconfig/27/libffi.pc"]
+        }))
+        .unwrap();
+        assert!(
+            resolve(&ctx, Some(&request), "read", "references")
+                .await
+                .is_ok()
+        );
+        for path in request.read_paths.clone() {
+            request.write_paths = vec![path];
+            assert!(
+                resolve(&ctx, Some(&request), "bash", "write references")
+                    .await
+                    .is_err()
+            );
+        }
+        ctx.sandbox.profiles = vec!["cargo".into()];
+        request.read_paths = vec![home.join(".cargo/registry")];
+        request.write_paths = request.read_paths.clone();
+        assert!(
+            resolve(&ctx, Some(&request), "bash", "cargo cache")
+                .await
+                .is_ok()
+        );
+        request.write_paths = vec![home.join(".cargo/.package-cache/child")];
+        assert!(
+            resolve(&ctx, Some(&request), "bash", "not a lock file")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

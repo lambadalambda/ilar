@@ -199,9 +199,17 @@ fn worker_command(
     worker: &Path,
 ) -> anyhow::Result<tokio::process::Command> {
     let mut command = crate::sandbox::program(cwd, config, worker)?;
+    // Keep the launcher's local cache environment across env_clear. These are
+    // explicit policy overrides, not inherited credentials or loader hooks.
+    let sandbox_env: Vec<_> = command
+        .as_std()
+        .get_envs()
+        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value.to_owned())))
+        .collect();
     // No inherited credentials, loader hooks, proxy settings or user PATH.
     command
         .env_clear()
+        .envs(sandbox_env)
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .env("PATH", "/usr/bin:/bin")
@@ -217,9 +225,11 @@ fn worker_command(
             command.env(key, value);
         }
     }
-    // env_clear also removes the launcher's workspace-scoped temp variables.
-    for key in ["TMPDIR", "TMP", "TEMP"] {
-        command.env(key, cwd);
+    if !config.enabled {
+        // Preserve the previous unsandboxed worker environment.
+        for key in ["TMPDIR", "TMP", "TEMP"] {
+            command.env(key, cwd);
+        }
     }
     Ok(command)
 }
@@ -270,6 +280,35 @@ pub async fn worker_main() -> anyhow::Result<()> {
 mod tests {
     use super::super::SeenFiles;
     use std::path::Path;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn worker_restores_local_caches_after_clearing_inherited_environment() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = crate::sandbox::SandboxConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        let child =
+            super::worker_command(workspace.path(), &config, Path::new("/bin/cat")).unwrap();
+        let expected = workspace
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join(".ilar-cache/tmp");
+        assert!(
+            child
+                .as_std()
+                .get_envs()
+                .any(|(k, v)| k == "TMPDIR" && v == Some(expected.as_os_str()))
+        );
+        assert!(
+            child
+                .as_std()
+                .get_envs()
+                .any(|(k, v)| k == "GOCACHE" && v.is_some())
+        );
+    }
 
     #[test]
     fn sandbox_request_is_removed_before_execution() {

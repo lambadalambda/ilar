@@ -599,6 +599,8 @@ impl RuntimePlan {
         if let Some(enabled) = options.sandbox {
             sandbox.enabled = enabled;
         }
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        sandbox.freeze_default_skill_roots(home.as_deref(), config.dirs().0);
         Ok(Self {
             sandbox,
             session_id: options.resume.clone(),
@@ -1308,6 +1310,39 @@ mod tests {
 
     /// A name the program does not know, answered with the names it
     /// does: an agent list is three words long and was left out.
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_freezes_trusted_user_config_skill_registration_at_resolve() {
+        let root = tempfile::tempdir().unwrap();
+        let user = root.path().join("config");
+        let target = root.path().join("installed/skills");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, user.join("skills")).unwrap();
+        let config = crate::config::Loader::with_env(vec![("ILAR_ZAI_API_KEY", "zk".to_owned())])
+            .config_dir(user)
+            .state_dir(root.path().join("state"))
+            .resolve()
+            .unwrap();
+        for enabled in [true, false] {
+            let plan = RuntimePlan::resolve(
+                &config,
+                &RuntimeOptions {
+                    cwd: root.path().join("workspace"),
+                    sandbox: Some(enabled),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                plan.sandbox
+                    .default_skill_roots
+                    .contains(&target.canonicalize().unwrap()),
+                enabled
+            );
+        }
+    }
+
     #[test]
     fn an_unknown_agent_names_the_agents_that_exist() {
         let guard = tempfile::tempdir().unwrap();

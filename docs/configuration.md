@@ -177,24 +177,41 @@ Content reads are denied outside these defaults and explicit `read_paths`:
   Apple developer tools, and specific system lookup/certificate files.
 - Homebrew installation subtrees: `bin`, `sbin`, `lib`, `opt`, `Cellar`, and
   `share` under `/opt/homebrew`; equivalent selected `/usr/local` paths.
-  General Homebrew `etc` contents are not included.
+  General Homebrew `etc` contents are not included. The macOS SDK pkg-config
+  data under `Library/Homebrew/os/mac/pkgconfig` is also readable; the rest of
+  Homebrew's `Library` is not granted.
 - `~/.cargo/bin`, `~/.rustup/toolchains`, `~/.rustup/settings.toml`, and
-  `~/.local/share/mise/installs`. Other layouts need explicit grants.
+  installed mise tools and shims under `~/.local/share/mise`.
+- The Go module cache at `~/go/pkg/mod`, read-only. Missing dependencies still
+  need an approved download; shared-cache writes are not allowed by default.
+- Trusted user skill directories (`~/.agents/skills`, `~/.claude/skills`, and
+  the user ilar config's `skills` directory), read-only. At session setup, ilar
+  freezes existing canonical targets, including linked installations. Broad
+  targets such as the whole home are rejected. Links inside a skill tree do
+  not grant access to outside files; a changed registration needs a new session.
 - Read/write caches from selected profiles. No profiles are selected by default.
 
 The whole home, `.config`, `.local`, and user `Library` trees are not granted.
 User config files such as `.gitconfig`, `.cargo/config.toml`, and `.npmrc`
-need explicit read grants; they can contain credentials. Symlinked user
-installation roots need an explicit grant if they redirect elsewhere.
+need explicit read grants; they can contain credentials. Apart from the trusted
+skill registrations above, symlinked user installation roots need an explicit
+grant if they redirect elsewhere.
 Filesystem metadata probes (existence, size, and similar attributes) remain
 allowed globally. Listing the root directory is allowed for macOS startup,
 but listing other ungranted directories or reading their files is not.
 
 Writes are limited to the workspace, `/dev/null`, and configured paths/caches.
 `read_paths` adds no writes; `write_paths` adds no reads. Set both for an external
-read/write directory. Temporary-file environment variables point to the
-workspace; there is no shared `/tmp` write grant. Network is denied unless
-`network = true`, which permits all network access, not selected hosts.
+read/write directory. Temporary files and tool caches use subdirectories of
+`.ilar-cache` in the workspace, not the workspace root or shared `/tmp`.
+Go build, npm, XDG, and Clang module caches use this local tree. Mise uses
+workspace-local cache/state/config paths instead of private user configuration
+and shared trust records. Project tool selection still applies. On macOS,
+selected native Apple compiler tools avoid `xcrun`'s shared-cache launcher;
+project-selected compiler shims are not fully covered yet. Existing cache
+symlinks are rejected before ilar creates these directories.
+Network is denied unless `network = true`, which permits all network access,
+not selected hosts.
 
 For normal workspace operations, omit `sandbox`: workspace reads and writes are
 already allowed. An inactive object (`{}` or empty path lists with false flags)
@@ -205,8 +222,10 @@ not a grant path, and `/` requests access to the whole filesystem.
 
 In the interactive root TUI, file tools, bash, service start, and sudo can request a
 `sandbox` exception with `read_paths`, `write_paths`, `network`, or `unsandboxed`, plus a
-`reason`. The user sees the command and access request before launch. Use
-PageUp/PageDown to read long approval details. Choose "Allow this call only"
+`reason`. The prompt puts requested access and paths before the caller's reason
+and command. It uses the available terminal size and keeps choices visible while
+you scroll details with PageUp/PageDown. Shift-PageUp/Shift-PageDown scrolls a
+long answer without changing the selected choice. Choose "Allow this call only"
 or "Allow for this session" for read paths, write paths, and network. Session
 grants apply to later file-tool, bash, service start, and sudo calls without asking again,
 including calls that omit the `sandbox` argument. Read grants do not add writes.

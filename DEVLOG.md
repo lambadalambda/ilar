@@ -1,5 +1,32 @@
 # DEVLOG
 
+## Coding inside the sandbox without repeated prompts
+
+Ran the imgsearch random-library task through ilar in isolated checkouts, with
+copied Node dependencies and no permission exceptions. The first run passed
+frontend checks but could not start Go: using the repo itself as TMPDIR makes
+Go ignore its go.mod. Mise also needed private config/shared state, and linked
+skill references were unreadable.
+
+Defaults now put scratch files and tool state below workspace `.ilar-cache`;
+Go dependencies and trusted installed skill trees are read-only. Skill targets
+are frozen at runtime setup, not resolved into new grants on each call. Cache
+creation rejects symlinks through descriptor-relative operations. The file
+worker uses the same environment and policy as shell tools. Project-aware mise
+shims keep inherited version precedence. Native Apple tools avoid the xcrun
+cache launcher; Homebrew SDK pkg-config data is a narrow read-only default.
+
+The full retest passed 91 frontend tests, Svelte checks, and build validation.
+A final ilar verification passed linked INDEX reads, pkg-config, Go library tests,
+and Go database tests without extra grants. Private Git config remained denied;
+config-free inspection worked. Local-server tests still need network approval.
+No broad home/config/temp grants or shared-cache writes were added. The
+experimental feature patch is not merged into the user's imgsearch checkout.
+
+Independent review found no remaining blockers. The final all-features workspace
+suite passes (2,111 tests, 27 ignored), with Clippy and real macOS confinement
+checks. See `experiments/sandbox/README.md` for the runs and remaining limits.
+
 ## Readable approval questions
 
 The imgsearch screenshot showed a fixed 76-column, 24-row question window in
