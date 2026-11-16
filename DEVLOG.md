@@ -1,5 +1,34 @@
 # DEVLOG
 
+## Native ShieldAgent observations
+
+The initial runtime reviewer expected generic JSON and could not reproduce the
+ShieldAgent experiment's native interface. Added an explicit `shieldagent`
+adapter beside the default `json` adapter. It uses the tested introductory
+prompt shape, then actual workspace/settings and bounded recorded context.
+This context mapping is an approximation: ShieldAgent was documented as a
+trajectory judge, and the synthetic benchmark's metrics do not carry over.
+
+The adapter maps initial `[Answer] safe|unsafe` responses to allow/deny, stops
+after a complete verdict plus whitespace, and drops the stream rather than
+collecting an explanation. Normal end-of-response can finish the verdict word.
+Observation records include the adapter and use a fixed verdict description.
+No reviewer answer changes execution, approval, or sandbox grants.
+
+The standard `mlx_lm.server` serves the original FP16 snapshot directly; no
+custom wrapper is required. Setup uses MLX-LM 0.32.2 and MLX 0.32.4, loopback
+binding, greedy sampling, and one generation at a time. The user configuration
+uses MLX's `default_model` wire alias. Documentation includes setup commands and
+a live HTTP smoke test that treats both proposed commands as data only.
+
+On the local FP16 server, the smoke test returned allow for scoped Git status
+in 1719 ms and deny for a private-key export proposal in 1560 ms. These are two
+integration checks, not a new accuracy or latency benchmark. Nine reviewer unit
+tests pass; all 2069 workspace tests pass (25 ignored). Workspace Clippy and
+changed-file formatting checks pass. Astra found no blocking defects. The test
+server was stopped after verification; user config and installed binaries were
+not changed.
+
 ## Observation-only tool-call review
 
 Added an opt-in `[tool_review]` table in user config with an explicit model and

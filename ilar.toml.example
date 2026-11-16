@@ -82,6 +82,19 @@ theme = "carbon"
 # # error at startup.
 # options = { temperature = 0.7, top_p = 0.9, min_p = 0.05 }
 
+# Optional local ShieldAgent tool-call observations. User config only;
+# records verdicts without changing execution or granting access.
+# Start its FP16 MLX server first; see docs/configuration.md.
+# [models.shieldagent]
+# base_url = "http://127.0.0.1:8766/v1"
+# model = "default_model"
+# context = 32768
+# output = 128
+# [tool_review]
+# model = "custom/shieldagent"
+# adapter = "shieldagent" # Default is "json" for general reviewer models.
+# timeout_ms = 30000
+
 # A server whose models are listed at /models, each reachable as
 # <name>/<id> — one section for all of them (docs/configuration.md).
 # [endpoints.lemonade]

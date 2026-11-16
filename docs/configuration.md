@@ -35,6 +35,7 @@ proposed tool calls:
 [tool_review]
 model = "custom/checker" # A model configured through [models] or a provider.
 timeout_ms = 10000
+adapter = "json" # Default. Use "shieldagent" for native ShieldAgent output.
 ```
 
 The table enables observation only. No reviewer model is selected by default.
@@ -45,8 +46,9 @@ A slow reviewer delays dispatch. The timeout is per review, not per tool batch:
 eight stalled reviews can take about two timeout periods. There are no retries.
 Total serialized input is limited to 128 KiB; oversized arguments produce an
 error rather than a partial review. Collected answer text is limited to 8 KiB.
-The request asks for at most 1024 output tokens, but some adapters, including
-ChatGPT authentication, omit that wire limit; timeout and cancellation still apply.
+JSON review requests ask for at most 1024 output tokens; native ShieldAgent uses
+128 and stops after its verdict. Some adapters, including ChatGPT authentication,
+omit the wire token limit; timeout and cancellation still apply.
 
 The reviewer receives exact proposed tool arguments, the working directory,
 current sandbox settings/grants, up to eight recent recorded user messages,
@@ -64,7 +66,12 @@ in their arguments are not sent to the reviewer and receive an error record.
 This is not general secret detection: other code, arguments, and tool output
 can be sent to the selected model. Choose its endpoint accordingly.
 
-The reviewer has no tools and returns `allow`, `ask`, or `deny` with a reason.
+The reviewer has no tools. The default `json` adapter expects `allow`, `ask`, or
+`deny` with a reason. The `shieldagent` adapter uses its native prompt and maps
+an initial `[Answer] safe` to allow and `[Answer] unsafe` to deny. It stops after
+the verdict word and following whitespace, or accepts the word at normal end of
+response. It records a fixed verdict description, not an analysis it did not
+collect. ShieldAgent has no native `ask` result; malformed output is an error.
 Timeouts, invalid output, and provider errors produce error records, not an
 allow verdict. None of these results changes tool execution, existing approval
 questions, or sandbox grants. Observation mode is not a safety control.
@@ -73,12 +80,71 @@ requests. It does not inspect commands later run inside scripts or services.
 The `question` tool is excluded because it requests user input.
 
 Results are `tool_review` events in session JSONL, linked by `tool_call_id`, with
-model, verdict or error, reason, and elapsed milliseconds. They do not enter the
+model, adapter, verdict or error, reason, and elapsed milliseconds. They do not enter the
 agent conversation or appear as approval prompts. Inspect a session file with:
 
 ```sh
 jq 'select(.type == "tool_review")' /path/to/session.jsonl
 ```
+
+### Local ShieldAgent on Apple Silicon
+
+Use the original FP16 `thu-coai/ShieldAgent` weights. They occupy about 15.2 GB;
+allow additional memory for model runtime and context. Do not select the 4-bit
+conversion if you want the FP16 baseline: our small experiment found two new
+unsafe approvals with that conversion.
+
+The following setup uses the MLX versions tested here. Download once, then run
+the server offline, bound to localhost only:
+
+```sh
+venv="$HOME/.local/share/ilar/shieldagent-venv"
+model="$HOME/.local/share/ilar/models/ShieldAgent"
+python3 -m venv "$venv"
+"$venv/bin/pip" install 'mlx-lm==0.32.2' 'mlx==0.32.4'
+"$venv/bin/hf" download thu-coai/ShieldAgent --local-dir "$model"
+HF_HUB_OFFLINE=1 "$venv/bin/mlx_lm.server" \
+  --model "$model" --host 127.0.0.1 --port 8766 \
+  --temp 0 --max-tokens 128 --decode-concurrency 1 --prompt-concurrency 1 \
+  --prompt-cache-size 2
+```
+
+Keep that terminal open. The server has no authentication; do not expose it to
+other hosts or add a public tunnel. Stop it with Ctrl-C. Requests are served one
+at a time with these settings, so queued reviews count against their timeouts.
+
+Add these tables to your user `ilar.toml`, not the project's file:
+
+```toml
+[models.shieldagent]
+base_url = "http://127.0.0.1:8766/v1"
+model = "default_model" # MLX server alias for its --model argument.
+context = 32768
+output = 128
+
+[tool_review]
+model = "custom/shieldagent"
+adapter = "shieldagent"
+timeout_ms = 30000
+```
+
+Keep your normal agent model in `[general]` unchanged. Use a binary built after
+the ShieldAgent adapter change (`scripts/install.sh` builds and installs it),
+then start a new ilar runtime. Do not add a second `[tool_review]` table if one
+already exists; change its fields instead.
+
+From the repository root, check the local server and adapter without executing
+any proposed command:
+
+```sh
+cargo test -p ilar --test smoke_tool_review -- --ignored --nocapture
+```
+
+The smoke test sends two synthetic proposals: a scoped Git-status read and a
+private-key export. It checks allow/deny and prints the observation records.
+Set `ILAR_SHIELDAGENT_URL` to test another endpoint. Actual runtime context is
+not the old synthetic benchmark, so its measured accuracy and latency do not
+carry over unchanged. This remains observation only, not automatic approval.
 
 ## Experimental process sandbox
 

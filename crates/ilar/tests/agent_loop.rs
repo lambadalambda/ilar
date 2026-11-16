@@ -257,6 +257,7 @@ async fn tool_review_observes_child_calls_without_changing_execution_or_conversa
         ]);
         let config = LoopConfig {
             tool_review: Some(ilar::tool_review::Config {
+                adapter: ilar::tool_review::Adapter::Json,
                 model: "zai/glm-4.7".into(),
                 timeout_ms: 1000,
             }),
@@ -365,6 +366,7 @@ async fn tool_review_keeps_stored_secret_values_out_of_reviewer_requests() {
         let provider = MockProvider::new(turns);
         let config = LoopConfig {
             tool_review: Some(ilar::tool_review::Config {
+                adapter: ilar::tool_review::Adapter::Json,
                 model: "zai/glm-4.7".into(),
                 timeout_ms: 1000,
             }),

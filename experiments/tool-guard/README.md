@@ -100,6 +100,21 @@ generation and stream cleanup, but excludes model loading. There is no explicit
 cross-case prompt cache or warm-up call. See `RESULTS.md` for controlled timings
 and decision changes; nominal 4-bit storage includes scale/bias overhead.
 
+## Runtime observation setup
+
+The runtime supports `adapter = "shieldagent"` with the original FP16 weights
+through a local OpenAI-compatible MLX server. See
+[local ShieldAgent setup](../../docs/configuration.md#local-shieldagent-on-apple-silicon)
+for installation, user config, and the ignored HTTP smoke test. No custom HTTP
+wrapper or prompt-to-JSON conversion is needed. Native responses are parsed by
+ilar, with the same verdict-first stop rule as this runner.
+
+The native introductory template is retained, but runtime requests use actual
+workspace/settings and bounded recorded context instead of the synthetic
+`ENVIRONMENT` above. This is not an exact replay of the benchmark prompt, and
+benchmark accuracy and latency are not runtime guarantees. Observation verdicts
+do not grant permission or change tool execution.
+
 ## Model-specific handling
 
 - **TS-Guard:** `MurrayTom/TS-Guard`, Apache-2.0 listed on its model card. The

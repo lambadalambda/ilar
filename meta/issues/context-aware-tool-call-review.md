@@ -154,6 +154,26 @@ on the first full run, then passed alone and on the full rerun. Astra reviewed
 the design and the locked-store fix with no remaining blockers. This issue
 remains open for policy evaluation and any future enforcement mode.
 
+## ShieldAgent runtime adapter
+
+Add an explicit `shieldagent` adapter that uses the tested native prompt shape
+and maps initial `[Answer] safe|unsafe` responses to allow/deny. Keep the generic
+JSON adapter as the default. During streaming, stop only after the complete
+verdict word and following whitespace; malformed or incomplete answers remain
+errors. Preserve bounded input, cancellation, no-tools requests, secret handling,
+and observation-only behavior. Provide and verify a local MLX server setup with
+the original FP16 weights, not the 4-bit model. Runtime context differs from the
+synthetic benchmark; do not claim the old accuracy or timings apply unchanged.
+
+Implemented with explicit adapter metadata, backwards-compatible JSON defaults,
+native parsing/early stream drop, and documented local setup. The final parser
+rejects punctuation suffixes such as `safe-ish`, which the benchmark's final
+word-boundary parser accepted. The live FP16 HTTP smoke returned allow for Git
+status (1719 ms) and deny for a private-key export proposal (1560 ms); neither
+proposal executed. Nine reviewer tests and all 2069 workspace tests pass (25
+ignored), with Clippy and changed-file formatting passing. Astra found no
+blocking defects. Policy evaluation and enforcement remain outside this change.
+
 ## Acceptance Criteria
 
 - Document intended authorization boundaries, especially legitimate credential

@@ -2869,6 +2869,7 @@ async fn run_turn_steps(
                         let mut observation = if let Some(error) = skip {
                             crate::tool_review::Observation {
                                 model: review.model.clone(),
+                                adapter: review.adapter,
                                 verdict: None,
                                 reason: String::new(),
                                 error: Some(error.into()),

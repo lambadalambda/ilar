@@ -26,11 +26,11 @@ fn tool_review_is_user_only_and_requires_an_explicit_model() {
     let project = dir.join("project");
     write(
         &user.join("ilar.toml"),
-        "[tool_review]\nmodel = 'custom/checker'\ntimeout_ms = 2500\n",
+        "[tool_review]\nmodel = 'custom/checker'\ntimeout_ms = 2500\nadapter = 'shieldagent'\n",
     );
     write(
         &project.join("ilar.toml"),
-        "[tool_review]\nmodel = 'custom/attacker'\n",
+        "[tool_review]\nmodel = 'custom/attacker'\nadapter = 'invalid'\n",
     );
     let config = Loader::no_env()
         .config_dir(user)
@@ -63,6 +63,7 @@ fn tool_review_defaults_off_and_rejects_missing_model_or_invalid_timeout() {
         "[tool_review]\nmodel = ''\n",
         "[tool_review]\nmodel = 'custom/checker'\ntimeout_ms = 0\n",
         "[tool_review]\nmodel = 'custom/checker'\ntimeout_ms = 60001\n",
+        "[tool_review]\nmodel = 'custom/checker'\nadapter = 'invalid'\n",
     ] {
         write(&dir.join("ilar.toml"), table);
         assert!(
