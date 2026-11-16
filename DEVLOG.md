@@ -1,5 +1,18 @@
 # DEVLOG
 
+## Sandbox approval review fixes
+
+Configured read/write roots now use canonical paths when checking whether a
+request already has access. Symlink aliases no longer cause another prompt or
+an unattended refusal for an already configured subtree. Read and write scopes
+remain separate. Invalid roots still fail when the launch policy is built.
+
+Approval text quotes and escapes paths, command, and reason so embedded newlines
+or tabs cannot appear as access fields. Caller text and host-generated access
+fields have separate headings. Both regressions were reproduced with failing
+tests before the fixes. Implicit workspace/profile coverage and filesystem
+check-to-launch races remain unchanged.
+
 ## Live-session process sandbox approvals
 
 Root TUI sandbox prompts now offer once-only or live-session approval for read

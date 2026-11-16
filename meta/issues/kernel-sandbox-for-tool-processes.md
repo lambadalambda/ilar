@@ -206,6 +206,15 @@ Focused tests cover reuse, isolation, separate read/write scopes, bypass refusal
 and canonical-target replacement. A host test confirms later bash reads are
 denied after once-only approval and allowed after session approval.
 
+## Approval review follow-up
+
+Astra's review found two small issues: configured aliases could cause repeated
+approval requests, and unescaped filenames could make approval text ambiguous.
+Compare configured read/write roots in canonical form, without combining their
+scopes. Quote and escape paths and caller text, and separate caller text from
+host-generated access fields. Keep implicit workspace/profile coverage and
+filesystem race limits outside this follow-up.
+
 ## Milestone
 
 13 — Guard rails

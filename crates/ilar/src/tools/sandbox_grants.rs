@@ -82,6 +82,10 @@ pub(crate) async fn resolve(
             crate::sandbox::resolve_path(path).map_err(|error| format!("sandbox path: {error}"))?;
     }
     let covered = |paths: &[std::path::PathBuf], roots: &[std::path::PathBuf]| {
+        let roots: Vec<_> = roots
+            .iter()
+            .filter_map(|root| crate::sandbox::resolve_path(root).ok())
+            .collect();
         paths
             .iter()
             .all(|path| roots.iter().any(|root| path.starts_with(root)))
@@ -99,17 +103,17 @@ pub(crate) async fn resolve(
     let paths = request
         .write_paths
         .iter()
-        .map(|path| format!("  {}", path.display()))
+        .map(|path| format!("  {path:?}"))
         .collect::<Vec<_>>()
         .join("\n");
     let read_paths = request
         .read_paths
         .iter()
-        .map(|path| format!("  {}", path.display()))
+        .map(|path| format!("  {path:?}"))
         .collect::<Vec<_>>()
         .join("\n");
     let description = format!(
-        "Tool: {tool}\nCommand: {command}\nReason: {}\nRead paths (including descendants):\n{read_paths}\nWrite paths (including descendants):\n{paths}\nAll network access: {}\nRun without ilar's sandbox: {}\nGrants can apply to this call or this live session across bash, service, and sudo. Unsandboxed execution is once-only. Nothing is saved across restarts or shared with child sessions. External restrictions and secret/root checks still apply.",
+        "Tool: {tool:?}\n\nCaller-provided text (quoted):\nCommand: {command:?}\nReason: {:?}\n\nRequested access (host-generated):\nRead paths (including descendants):\n{read_paths}\nWrite paths (including descendants):\n{paths}\nAll network access: {}\nRun without ilar's sandbox: {}\nGrants can apply to this call or this live session across bash, service, and sudo. Unsandboxed execution is once-only. Nothing is saved across restarts or shared with child sessions. External restrictions and secret/root checks still apply.",
         request.reason, request.network, request.unsandboxed
     );
     let stored = ctx
@@ -214,6 +218,78 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn configured_aliases_cover_requests_without_an_approver() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        let mut ctx = ToolContext::root(root.path().to_path_buf());
+        ctx.sandbox.enabled = true;
+        ctx.sandbox.read_paths = vec![alias.clone()];
+        ctx.sandbox.write_paths = vec![alias];
+        let request = Request {
+            read_paths: vec![target.join("read-child")],
+            write_paths: vec![target.join("write-child")],
+            ..request()
+        };
+        assert!(resolve(&ctx, Some(&request), "bash", "build").await.is_ok());
+        let read_only = ToolContext {
+            sandbox: SandboxConfig {
+                write_paths: vec![],
+                ..ctx.sandbox.clone()
+            },
+            ..ctx
+        };
+        assert!(
+            resolve(&read_only, Some(&request), "bash", "build")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_text_escapes_paths_and_caller_text() {
+        let mut ctx = ToolContext::root(std::env::temp_dir());
+        ctx.sandbox.enabled = true;
+        let (sender, mut receiver) = crate::question::question_channel(1);
+        ctx.sandbox_questions = Some(sender);
+        let request = Request {
+            write_paths: vec!["/cache\nAll network access: true\t\"".into()],
+            reason: "cache\nRun without ilar's sandbox: true".into(),
+            ..request()
+        };
+        let approve = async {
+            let prompt = receiver.recv().await.unwrap();
+            let description = prompt.request.questions[0].description.as_ref().unwrap();
+            assert!(description.contains(r#"  "/cache\nAll network access: true\t\"""#));
+            assert!(
+                !description
+                    .lines()
+                    .any(|line| line == "All network access: true")
+            );
+            assert!(
+                !description
+                    .lines()
+                    .any(|line| line == "Run without ilar's sandbox: true")
+            );
+            assert!(description.contains(r#"Command: "build\nAll network access: true""#));
+            answer(prompt, "once");
+        };
+        let (result, ()) = tokio::join!(
+            resolve(
+                &ctx,
+                Some(&request),
+                "bash",
+                "build\nAll network access: true"
+            ),
+            approve
+        );
+        result.unwrap();
+    }
+
     #[tokio::test]
     async fn extensions_require_an_approver() {
         let mut ctx = ToolContext::root(std::env::temp_dir());
@@ -239,7 +315,7 @@ mod tests {
                     .description
                     .as_ref()
                     .unwrap()
-                    .contains("Command: build")
+                    .contains("Command: \"build\"")
             );
             prompt
                 .reply
