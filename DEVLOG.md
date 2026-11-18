@@ -1,5 +1,22 @@
 # DEVLOG
 
+## GPT-6.2 Astra and Sol
+
+Added both models for OpenAI API/ChatGPT and OpenCode Zen. OpenAI's
+announcement confirms API and ChatGPT/Codex access; the full models.dev
+records supply the low-to-max effort ladder, vision, limits, and cache rates.
+The 272k working window stays below the higher long-context price tier.
+Astra's base input/output rates are $8/$40 per million tokens; Sol's are $2/$10.
+
+Message-phase replay follows the existing GPT-6 rows and is marked as an
+approximation until a live probe. Pro, Fast, and Ultrafast modes are not added.
+Sources: https://openai.com/index/introducing-gpt-6-2-astra-sol/ and
+https://models.dev/api.json.
+
+Validation on tenco: the focused test failed before the additions, then all
+27 catalog tests passed. The all-features workspace suite passed (2,099 tests,
+16 ignored), as did Clippy. Independent review found no blockers.
+
 ## Coding inside the sandbox without repeated prompts
 
 Ran the imgsearch random-library task through ilar in isolated checkouts, with

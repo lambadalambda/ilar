@@ -83,6 +83,27 @@ macro_rules! pricing {
 // OpenCode base text rates refreshed 2026-11-09. Rows absent from the
 // live catalogs retain their previous rates; context/time tiers are not applied.
 static PRICING: &[(&str, &str, ModelPricing)] = &[
+    // GPT-6.2 (2026-11-17), models.dev and OpenAI: base tier only.
+    (
+        "openai",
+        "gpt-6.2-astra",
+        pricing!(8.0, 40.0, Some(0.4), Some(10.0)),
+    ),
+    (
+        "opencode",
+        "gpt-6.2-astra",
+        pricing!(8.0, 40.0, Some(0.4), Some(10.0)),
+    ),
+    (
+        "openai",
+        "gpt-6.2-sol",
+        pricing!(2.0, 10.0, Some(0.1), Some(2.5)),
+    ),
+    (
+        "opencode",
+        "gpt-6.2-sol",
+        pricing!(2.0, 10.0, Some(0.1), Some(2.5)),
+    ),
     // GPT-6.1 Terra (2026-10-26): half of 5.6 Terra's input. Base tier
     // only; not on Zen yet.
     (
@@ -1213,6 +1234,35 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeChat
     ),
+    // GPT-6.2 Astra and Sol (2026-11-17): API and ChatGPT/Codex.
+    // models.dev gives both 1.05M context, 922k input, 128k output and
+    // low through max effort. Keep the working window at the 272k
+    // base-price boundary, as for the other GPT-6 rows.
+    // APPROXIMATION: phase replay follows GPT-6; not yet live-probed.
+    model!(
+        "openai",
+        "gpt-6.2-astra",
+        "GPT-6.2 Astra",
+        272_000,
+        128_000,
+        OpenAiBoth
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX)
+    .message_phase(),
+    model!(
+        "openai",
+        "gpt-6.2-sol",
+        "GPT-6.2 Sol",
+        272_000,
+        128_000,
+        OpenAiBoth
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX)
+    .message_phase(),
     // GPT-6.1 Terra (2026-10-26). Codex's models.json gives it a 500k
     // window, but the API price doubles past 272k as for the other rows,
     // so the working window stays there. The ladder from none is
@@ -1572,6 +1622,31 @@ static CATALOG: &[ModelInfo] = &[
     // opencode module). gpt-6-astra joined 2026-09-05, gpt-6-sol and
     // gpt-6-luna 2026-09-22 (Zen only; Go lists none of them),
     // gpt-6.1-sol 2026-09-30 (Zen only).
+    // GPT-6.2 twins use the same limits and effort ladder as OpenAI.
+    model!(
+        "opencode",
+        "gpt-6.2-astra",
+        "GPT-6.2 Astra",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX)
+    .message_phase(),
+    model!(
+        "opencode",
+        "gpt-6.2-sol",
+        "GPT-6.2 Sol",
+        272_000,
+        128_000,
+        OpenCodeResponses
+    )
+    .input(272_000)
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX)
+    .message_phase(),
     model!(
         "opencode",
         "gpt-6.1-sol",
@@ -3218,6 +3293,32 @@ mod tests {
     fn codex_spark_is_not_offered_to_a_chatgpt_login() {
         let row = find("openai/gpt-5.3-codex-spark").unwrap();
         assert_eq!(row.access, ModelAccess::OpenAi);
+    }
+
+    #[test]
+    fn gpt_6_2_is_available_on_openai_and_zen() {
+        for (id, rates) in [
+            ("gpt-6.2-sol", (2.0, 10.0, Some(0.1), Some(2.5))),
+            ("gpt-6.2-astra", (8.0, 40.0, Some(0.4), Some(10.0))),
+        ] {
+            for (provider, access) in [
+                ("openai", ModelAccess::OpenAiBoth),
+                ("opencode", ModelAccess::OpenCodeResponses),
+            ] {
+                let key = format!("{provider}/{id}");
+                let row = find(&key).expect("GPT-6.2 is cataloged");
+                assert_eq!(row.access, access);
+                assert_eq!(row.context_limit, 272_000);
+                assert_eq!(row.input_limit, 272_000);
+                assert_eq!(row.output_limit, 128_000);
+                assert!(row.vision);
+                assert!(row.message_phase);
+                let rungs: Vec<_> = row.variants().iter().map(|v| v.id).collect();
+                assert_eq!(rungs, ["low", "medium", "high", "xhigh", "max"]);
+                let p = pricing_for(&key).expect("GPT-6.2 is priced");
+                assert_eq!((p.input, p.output, p.cache_read, p.cache_write), rates);
+            }
+        }
     }
 
     /// GPT-6.1 Terra (2026-10-26): on ChatGPT and the API, not yet on
