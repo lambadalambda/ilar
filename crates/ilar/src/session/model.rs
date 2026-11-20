@@ -114,10 +114,8 @@ pub enum ContentBlock {
     Image { image: ImageContent },
     /// Raw thinking. Persisted only for a model whose chat wire takes
     /// it back; for every other model the same thought lands in
-    /// [`ContentBlock::Diagnostic`] as a local note. Nobody signs
-    /// these, so the block is the thought and the name it arrived
-    /// under; sessions written when one did carry a `signature` field,
-    /// which serde ignores on load.
+    /// [`ContentBlock::Diagnostic`] as a local note. Native signed
+    /// thinking uses [`ContentBlock::Reasoning`] instead.
     Thinking {
         text: String,
         /// The wire field the thought came in as, when it was not the

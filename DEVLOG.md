@@ -1,5 +1,17 @@
 # DEVLOG
 
+## Native Anthropic Messages API
+
+Added Fable 5.2, Opus 5.5, Sonnet 5.5, and Haiku 5.5 with native tool and
+thinking replay. Anthropic's five-minute prompt cache counts reads and writes
+separately from uncached input. The live Haiku test wrote 2,877 cache tokens
+and read 2,864 on the follow-up. A separate live Neon probe through Zen hit
+9,714 implicit cache tokens on the second request; the ilar fixture checks
+that those tokens are excluded from ordinary input charges.
+
+Known gap: after ilar repairs rejected thinking, reopening the session can
+retry that repair and drop newer signatures. Recovery state is in memory.
+
 ## Gemini 4 Neon on OpenCode Zen
 
 Added `opencode/gemini-4-neon` using Zen's native Gemini streaming API and

@@ -377,6 +377,24 @@ static PROVIDERS: &[ProviderKind] = &[
         build: openai_provider,
     },
     ProviderKind {
+        name: crate::provider::anthropic::PREFIX,
+        api_key_env: crate::provider::anthropic::API_KEY_ENV,
+        auth_values: &["api_key"],
+        fallback_context_limit: 200_000,
+        reaches: |settings, access| {
+            settings.api_key.is_some() && access == crate::model::ModelAccess::Anthropic
+        },
+        build: |config, settings| {
+            Some(Box::new(
+                crate::provider::anthropic::AnthropicProvider::new(
+                    settings.api_key.clone()?,
+                    settings.base_url.clone(),
+                )
+                .with_recovery(config.anthropic_recovery.clone()),
+            ))
+        },
+    },
+    ProviderKind {
         name: "zai",
         api_key_env: "ILAR_ZAI_API_KEY",
         auth_values: &[],
@@ -599,6 +617,7 @@ pub struct Config {
     /// Catalog rows for `models`, in name order — the listing side of
     /// what `models` describes.
     custom_models: Vec<&'static crate::model::ModelInfo>,
+    anthropic_recovery: crate::provider::anthropic::ReplayRecovery,
     user_dir: PathBuf,
     project_dir: PathBuf,
     state_dir: PathBuf,
@@ -917,6 +936,7 @@ impl Config {
             .context("validating general.reasoning")?;
 
         Ok(Config {
+            anthropic_recovery: Default::default(),
             general: GeneralConfigResolved {
                 model,
                 reasoning,
@@ -1250,6 +1270,7 @@ impl Config {
             },
         );
         Self {
+            anthropic_recovery: Default::default(),
             general: GeneralConfigResolved {
                 model: "zai/glm-4.7".into(),
                 reasoning: None,
@@ -1948,13 +1969,19 @@ fn validate_providers(
             anyhow::bail!("{}: unsupported provider {name:?}", origin.display());
         };
         if let Some(url) = &provider.base_url {
-            canonical_base_url(url).map_err(|why| {
-                anyhow::anyhow!(
-                    "{}: providers.{}.base_url {why}",
-                    origin.display(),
-                    kind.name
-                )
-            })?;
+            if kind.name == crate::provider::anthropic::PREFIX {
+                crate::provider::anthropic::validate_base_url(url).with_context(|| {
+                    format!("{}: providers.{}.base_url", origin.display(), kind.name)
+                })?;
+            } else {
+                canonical_base_url(url).map_err(|why| {
+                    anyhow::anyhow!(
+                        "{}: providers.{}.base_url {why}",
+                        origin.display(),
+                        kind.name
+                    )
+                })?;
+            }
         }
         validate_provider_value(origin, kind.name, "auth", &provider.auth, kind.auth_values)?;
         if provider.image_gen.is_some() && kind.name != "openai" {
@@ -2083,6 +2110,80 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_config_requires_https_except_on_loopback() {
+        for (base, allowed) in [
+            ("http://example.test/v1", false),
+            ("http://192.0.2.1/v1", false),
+            ("http://localhost.evil.test/v1", false),
+            ("http://localhost:8888/v1", true),
+            ("http://127.0.0.1:8888/v1", true),
+            ("http://[::1]:8888/v1", true),
+            ("https://example.test/v1", true),
+        ] {
+            let providers = provider_section([(
+                "anthropic",
+                ProviderConfig {
+                    base_url: Some(base.into()),
+                    ..ProviderConfig::default()
+                },
+            )]);
+            let result = validate_providers(&providers, Path::new("ilar.toml"), PROVIDERS);
+            assert_eq!(result.is_ok(), allowed, "{base}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn anthropic_uses_api_key_credentials_and_lists_only_current_models() {
+        let model = "anthropic/claude-haiku-5-5";
+        let mut config = Config::default_for_tests();
+        assert!(config.provider_result(model).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::secrets::SecretStore::open(dir.path());
+        store.set("ANTHROPIC_API_KEY", "", "stored-key").unwrap();
+        let empty = Loader::with_env(vec![]);
+        let env = Loader::with_env(vec![("ANTHROPIC_API_KEY", "env-key".into())]);
+        let file = FileConfig::default();
+        let settings = resolve_providers(&file, &empty, Some(&store), PROVIDERS);
+        assert_eq!(settings["anthropic"].api_key.as_deref(), Some("stored-key"));
+        let settings = resolve_providers(&file, &env, Some(&store), PROVIDERS);
+        assert_eq!(settings["anthropic"].api_key.as_deref(), Some("env-key"));
+        let mut file: FileConfig = toml::from_str("[providers.anthropic]\nauth = 'api_key'\napi_key = 'file-key'\nbase_url = 'https://example.test/v1/'").unwrap();
+        let origin = Path::new("ilar.toml");
+        validate_providers(file.providers.as_ref().unwrap(), origin, PROVIDERS).unwrap();
+        config.providers = resolve_providers(&file, &env, Some(&store), PROVIDERS);
+        assert_eq!(
+            config.providers["anthropic"].api_key.as_deref(),
+            Some("file-key")
+        );
+        assert_eq!(
+            config.provider_result(model).unwrap().provider_prefix(),
+            Some("anthropic")
+        );
+        let rows = available_models_in(&config.providers, PROVIDERS);
+        let ids: Vec<_> = rows.iter().map(|row| row.full_id()).collect();
+        assert_eq!(
+            ids,
+            [
+                "anthropic/claude-fable-5-2",
+                "anthropic/claude-opus-5-5",
+                "anthropic/claude-sonnet-5-5",
+                model
+            ]
+        );
+        assert_eq!(
+            crate::model::variant_options(model, Some("xhigh")).unwrap(),
+            serde_json::json!({"output_config":{"effort":"xhigh"}})
+        );
+        file.providers
+            .as_mut()
+            .unwrap()
+            .get_mut("anthropic")
+            .unwrap()
+            .auth = Some("chatgpt".into());
+        assert!(validate_providers(file.providers.as_ref().unwrap(), origin, PROVIDERS).is_err());
+    }
+
+    #[test]
     fn one_table_row_is_all_a_new_provider_needs() {
         let kinds = with_acme();
 
@@ -2183,8 +2284,11 @@ mod tests {
         assert!(error.contains("expected \"provider/model-id\""), "{error}");
 
         // A provider nobody knows, with the ones that are known named.
-        let error = refusal(&config, "anthropic/claude");
-        assert!(error.contains("no provider named \"anthropic\""), "{error}");
+        let error = refusal(&config, "unknown-provider/example");
+        assert!(
+            error.contains("no provider named \"unknown-provider\""),
+            "{error}"
+        );
         assert!(error.contains("zai"), "{error}");
 
         // A known provider, no credential: the variable, the file key,

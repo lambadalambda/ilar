@@ -84,6 +84,26 @@ macro_rules! pricing {
 // live catalogs retain their previous rates; context/time tiers are not applied.
 static PRICING: &[(&str, &str, ModelPricing)] = &[
     (
+        "anthropic",
+        "claude-fable-5-2",
+        pricing!(8.0, 40.0, Some(0.2), Some(10.0)),
+    ),
+    (
+        "anthropic",
+        "claude-opus-5-5",
+        pricing!(4.0, 20.0, Some(0.2), Some(5.0)),
+    ),
+    (
+        "anthropic",
+        "claude-sonnet-5-5",
+        pricing!(2.0, 10.0, Some(0.1), Some(2.5)),
+    ),
+    (
+        "anthropic",
+        "claude-haiku-5-5",
+        pricing!(0.1, 0.5, Some(0.01), Some(0.125)),
+    ),
+    (
         "opencode",
         "gemini-4-neon",
         pricing!(3.0, 15.0, Some(0.15), None),
@@ -1034,7 +1054,8 @@ impl ModelInfo {
             ModelAccess::OpenAi
             | ModelAccess::OpenAiBoth
             | ModelAccess::OpenCodeResponses
-            | ModelAccess::OpenCodeGemini => false,
+            | ModelAccess::OpenCodeGemini
+            | ModelAccess::Anthropic => false,
         }
     }
 
@@ -1059,6 +1080,8 @@ impl ModelInfo {
 pub(crate) enum ModelAccess {
     OpenAi,
     OpenAiBoth,
+    /// Direct Anthropic Messages API (not a gateway or OAuth).
+    Anthropic,
     ZaiCodingPlan,
     ZaiBoth,
     /// An OpenCode (Zen or Go) row served on `/chat/completions`. The
@@ -1122,6 +1145,48 @@ macro_rules! model {
 // the docs file under the Messages wire answer on chat-completions and
 // are cataloged there; the Claude and Gemini families do not.
 static CATALOG: &[ModelInfo] = &[
+    // Current direct Claude API lineup, verified against Anthropic's models
+    // overview and deprecation table (2026-11-20). No older snapshots.
+    model!(
+        "anthropic",
+        "claude-fable-5-2",
+        "Claude Fable 5.2",
+        1_000_000,
+        128_000,
+        Anthropic
+    )
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX),
+    model!(
+        "anthropic",
+        "claude-opus-5-5",
+        "Claude Opus 5.5",
+        1_000_000,
+        128_000,
+        Anthropic
+    )
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX),
+    model!(
+        "anthropic",
+        "claude-sonnet-5-5",
+        "Claude Sonnet 5.5",
+        1_000_000,
+        128_000,
+        Anthropic
+    )
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX),
+    model!(
+        "anthropic",
+        "claude-haiku-5-5",
+        "Claude Haiku 5.5",
+        1_000_000,
+        128_000,
+        Anthropic
+    )
+    .vision()
+    .reasoning(EFFORT_LOW_TO_MAX),
     // Live OpenCode additions, cross-checked with models.dev (2026-11-09).
     // Wires come from each record, not model families. New rows retain
     // published output caps; input defaults to context minus a full reply.
@@ -2494,6 +2559,7 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
         ModelAccess::OpenCodeGemini => Ok(serde_json::json!({
             "generationConfig": {"thinkingConfig": {"thinkingLevel": variant.to_ascii_uppercase()}},
         })),
+        ModelAccess::Anthropic => Ok(serde_json::json!({"output_config": {"effort": variant}})),
         ModelAccess::Custom => anyhow::bail!(
             "provider {} does not support reasoning variants",
             model.provider

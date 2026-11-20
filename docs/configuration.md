@@ -297,6 +297,8 @@ work. See [experiments and limits](../experiments/sandbox/README.md).
 | `providers.openai.api_key` | `ILAR_OPENAI_API_KEY` | OpenAI API key. |
 | `providers.openai.auth` | `api_key` | `api_key` or `chatgpt`; see [OpenAI ChatGPT OAuth](#openai-chatgpt-oauth). Either credential also enables the `image_gen` tool. |
 | `providers.openai.image_gen` | `true` | `false` leaves the `image_gen` tool out even with a credential. |
+| `providers.anthropic.api_key` | `ANTHROPIC_API_KEY` | Anthropic API key. See [Anthropic](#anthropic). |
+| `providers.anthropic.base_url` | `https://api.anthropic.com/v1` | Override the Messages API base URL. |
 | `providers.zai.base_url` | `https://api.z.ai/api/coding/paas/v4` | Override the z.ai OpenAI-compatible base URL. |
 | `providers.zai.api_key` | `ILAR_ZAI_API_KEY` | z.ai API key. |
 | `providers.opencode.base_url` | `https://opencode.ai/zen/v1` | Override the OpenCode Zen base URL. |
@@ -524,6 +526,22 @@ The listing is fetched with a three-second timeout and kept under
 still yields the models it listed last time, with a warning; one never
 reached yields none, also with a warning. Like `[models]`, the table
 is user configuration: a project file that declares it is ignored.
+
+## Anthropic
+
+Set `ANTHROPIC_API_KEY` in the environment that starts ilar, or set `api_key`
+in your user configuration under `[providers.anthropic]`. Select a Claude model
+in the picker or set it as the default:
+
+```toml
+[general]
+model = "anthropic/claude-sonnet-5-5"
+```
+
+This uses Anthropic's Messages API and API billing, not Zen or a Claude
+subscription. ilar uses Anthropic's five-minute prompt cache and counts cache
+writes, cache reads, and uncached input separately. Short prompts can fall below
+the model's cache minimum.
 
 ## OpenCode Zen and Go
 

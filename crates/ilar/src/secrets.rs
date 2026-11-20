@@ -1478,7 +1478,9 @@ pub fn shielded_env_from(
 }
 
 fn ilar_own_secret(name: &str) -> bool {
-    (name.starts_with("ILAR_") && name.ends_with("_API_KEY")) || name == "ILAR_SERVE_TOKEN"
+    (name.starts_with("ILAR_") && name.ends_with("_API_KEY"))
+        || name == "ILAR_SERVE_TOKEN"
+        || name == crate::provider::anthropic::API_KEY_ENV
 }
 
 /// How a prompt names who is asking for a secret.
@@ -2446,6 +2448,7 @@ mod tests {
     #[test]
     fn a_child_is_shielded_from_ilars_keys_and_stored_values() {
         let vars = [
+            ("ANTHROPIC_API_KEY", "claude-key"),
             ("ILAR_OPENAI_API_KEY", "sk-1"),
             ("ILAR_SERVE_TOKEN", "t"),
             ("ILAR_STATE_DIR", "/tmp"),
@@ -2468,6 +2471,7 @@ mod tests {
         assert_eq!(
             hidden,
             [
+                "ANTHROPIC_API_KEY",
                 "ILAR_OPENAI_API_KEY",
                 "ILAR_SERVE_TOKEN",
                 "MY_TOKEN",

@@ -30,7 +30,6 @@
 
 ## Milestone 7 — Unscheduled
 
-- [ ] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
 - [ ] [A channel prompt patch for GPT](issues/a-channel-prompt-patch-for-gpt.md) — *built; awaiting a live long run*
 - [ ] [Proportion prompts for GPT](issues/proportion-prompts-for-gpt.md) — *built; two comparisons in DEVLOG; stopping depends on the project definition of done*
 - [ ] [Server-side compaction for OpenAI](issues/server-side-compaction-for-openai.md)

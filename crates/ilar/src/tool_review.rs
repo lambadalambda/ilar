@@ -219,7 +219,11 @@ fn request(config: &Config, context: &Context, call: &ToolCall) -> anyhow::Resul
             serde_json::to_writer(&mut input, &context.untrusted_context)?;
             input.write_all(b"\n<Assistant calls the tool>: ")?;
             serde_json::to_writer(&mut input, &proposed)?;
-            (None, serde_json::json!({"temperature": 0}), 128)
+            let options = match crate::provider::resolve_model(&config.model) {
+                Ok((crate::provider::anthropic::PREFIX, _)) => serde_json::Value::Null,
+                _ => serde_json::json!({"temperature": 0}),
+            };
+            (None, options, 128)
         }
     };
     Ok(Request {
@@ -514,6 +518,17 @@ mod tests {
     fn native_config() -> Config {
         serde_json::from_value(json!({"model": "zai/shieldagent", "adapter": "shieldagent"}))
             .unwrap()
+    }
+
+    #[test]
+    fn anthropic_shieldagent_request_omits_removed_sampling_option() {
+        let config = Config {
+            model: "anthropic/claude-haiku-5-5".into(),
+            ..native_config()
+        };
+        let request = request(&config, &context(), &call()).unwrap();
+        assert!(request.options.get("temperature").is_none());
+        assert_eq!(request.options["max_tokens"], 128);
     }
 
     async fn native_review(provider: &dyn ProviderResolver) -> Observation {

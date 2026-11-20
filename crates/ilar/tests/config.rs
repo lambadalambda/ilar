@@ -143,7 +143,8 @@ fn defaults_when_no_config_exists() {
     // A tuned dark theme by default; `terminal` is opt-in for people who
     // want their own terminal colours instead.
     assert_eq!(config.general.theme, "carbon");
-    assert_eq!(config.providers.len(), 4); // openai + zai + the two opencode gateways
+    assert_eq!(config.providers.len(), 5); // openai, anthropic, zai, and two opencode gateways
+    assert_eq!(config.providers["anthropic"].api_key, None);
     assert!(config.providers.contains_key("zai"));
     assert_eq!(
         config.providers["zai"].api_key.as_deref(),

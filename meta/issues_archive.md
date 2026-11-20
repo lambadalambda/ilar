@@ -1,5 +1,7 @@
 # Completed issues
 
+- [x] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
+
 - [x] [Gemini 4 Neon on OpenCode Zen](issues/opencode-zen-gemini-neon.md)
 
 - [x] [Local tool-call security experiment](issues/local-tool-call-security-experiment.md)

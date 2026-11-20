@@ -259,8 +259,8 @@ fn wire_input_items(msg: &ChatMessage, message_phase: bool) -> Vec<serde_json::V
             ContentBlock::ReasoningSummary { .. } => {}
             ContentBlock::Diagnostic { .. } => {}
             ContentBlock::Reasoning { item } => {
-                // Native Gemini replay state is not a Responses item.
-                if !super::gemini::is_replay_item(item) {
+                // Other native wires' replay state is not a Responses item.
+                if !super::gemini::is_replay_item(item) && !super::anthropic::is_replay_item(item) {
                     flush_parts(&mut parts, &mut items, run_phase);
                     items.push(item.clone());
                 }

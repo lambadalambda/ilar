@@ -425,14 +425,13 @@ pub async fn compact_session(
 }
 
 /// One side response — a summary or a flush round — read to its end:
-/// its text, its thinking (which a chat-wire model needs back beside
-/// its tool calls), and the calls it made.
+/// its text, ordered replay blocks, and chat-wire thinking.
 #[derive(Default)]
 struct SideResponse {
     text: String,
     thinking: String,
     field: Option<crate::session::ReasoningField>,
-    calls: Vec<(String, String, serde_json::Value)>,
+    content: Vec<ContentBlock>,
     stop: Option<StopReason>,
 }
 
@@ -455,11 +454,27 @@ async fn respond_once(
             anyhow::bail!("stream ended before completion");
         };
         match event {
-            ProviderEvent::TextDelta(t) => response.text.push_str(&t),
+            ProviderEvent::TextDelta(t) => {
+                response.text.push_str(&t);
+                match response.content.last_mut() {
+                    Some(ContentBlock::Text { text, .. }) => text.push_str(&t),
+                    _ => response.content.push(ContentBlock::text(t)),
+                }
+            }
             ProviderEvent::ThinkingDelta(t) => response.thinking.push_str(&t),
             ProviderEvent::ThinkingField(field) => response.field = Some(field),
+            ProviderEvent::ReasoningItem { item }
+                if crate::provider::anthropic::is_replay_item(&item) =>
+            {
+                response.content.push(ContentBlock::Reasoning { item });
+            }
             ProviderEvent::ToolCallCompleted { id, name, input } => {
-                response.calls.push((id, name, input));
+                response.content.push(ContentBlock::ToolCall {
+                    id,
+                    name,
+                    input,
+                    item_id: None,
+                });
             }
             ProviderEvent::TurnComplete { stop_reason, .. } => {
                 response.stop = Some(stop_reason);
@@ -551,27 +566,25 @@ async fn flush_memory(
         // since a chat-wire model in thinking mode (Kimi, DeepSeek)
         // refuses a tool call without it, and the text too, since the
         // summary goes on from exactly this exchange.
-        let mut content = Vec::new();
+        let mut content = response.content;
         if !response.thinking.is_empty() {
-            content.push(ContentBlock::Thinking {
-                text: response.thinking,
-                field: response.field,
-            });
+            content.insert(
+                0,
+                ContentBlock::Thinking {
+                    text: response.thinking,
+                    field: response.field,
+                },
+            );
         }
-        if !response.text.is_empty() {
-            content.push(ContentBlock::text(response.text));
-        }
-        let calls = response.calls;
-        content.extend(
-            calls
-                .iter()
-                .map(|(id, name, input)| ContentBlock::ToolCall {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                    item_id: None,
-                }),
-        );
+        let calls: Vec<_> = content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolCall {
+                    id, name, input, ..
+                } => Some((id.clone(), name.clone(), input.clone())),
+                _ => None,
+            })
+            .collect();
         let answered = !content.is_empty();
         if answered {
             messages.push(ChatMessage {
@@ -776,6 +789,53 @@ mod tests {
                 images: Vec::new(),
             }],
         }
+    }
+
+    #[tokio::test]
+    async fn flush_keeps_signed_thinking_in_order_on_tool_followup() {
+        let temp = tempfile::tempdir().unwrap();
+        let memory = std::sync::Arc::new(crate::memory::MemoryStore::new(temp.path().into()));
+        let signature = serde_json::json!({"type":"anthropic_thinking","block":{"type":"thinking","thinking":"","signature":"opaque"}});
+        let done = |stop_reason| ProviderEvent::TurnComplete {
+            stop_reason,
+            usage: Default::default(),
+        };
+        let provider = crate::provider::MockProvider::new(vec![
+            vec![
+                ProviderEvent::TextDelta("First, ".into()),
+                ProviderEvent::TextDelta("check memory.".into()),
+                ProviderEvent::ReasoningItem {
+                    item: signature.clone(),
+                },
+                ProviderEvent::ToolCallCompleted {
+                    id: "toolu_1".into(),
+                    name: "memory_search".into(),
+                    input: serde_json::json!({"query":"conventions"}),
+                },
+                done(StopReason::ToolUse),
+            ],
+            vec![
+                ProviderEvent::TextDelta("nothing".into()),
+                done(StopReason::EndTurn),
+            ],
+        ]);
+        let (_, exchange) = flush_memory(
+            &provider,
+            &Request::with_model("anthropic/claude-haiku-5-5"),
+            &[user_text("Hi")],
+            &memory,
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(exchange.is_some());
+        let requests = provider.requests();
+        let messages = &requests[1].messages;
+        assert!(
+            matches!(&messages[2].content[..], [ContentBlock::Text { text, .. }, ContentBlock::Reasoning { item }, ContentBlock::ToolCall { id, .. }] if text == "First, check memory." && item == &signature && id == "toolu_1")
+        );
+        assert!(
+            matches!(&messages[3].content[..], [ContentBlock::ToolResult { tool_use_id, .. }] if tool_use_id == "toolu_1")
+        );
     }
 
     fn text_of(message: &ChatMessage) -> String {

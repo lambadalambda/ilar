@@ -44,9 +44,9 @@ pub enum ProviderEvent {
     TextPhase(crate::session::TextPhase),
     /// A chunk of extended thinking (providers may forward none).
     ThinkingDelta(String),
-    /// A thinking block completed. Nobody signs its thinking, so the
-    /// event carries nothing; what the block goes back as is settled
-    /// by [`ProviderEvent::ThinkingField`] where it matters.
+    /// A thinking block completed. The field for chat-style replay is
+    /// set by [`ProviderEvent::ThinkingField`]; native signed thinking is
+    /// carried separately in a [`ProviderEvent::ReasoningItem`].
     ThinkingCompleted,
     /// The field this response's thinking is arriving under, sent by
     /// the chat wire once per response and only when it is not the

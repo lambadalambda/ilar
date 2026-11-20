@@ -431,6 +431,11 @@ mod tests {
                 ("--token hunter2", "--token <redacted>"),
                 ("API_KEY=hunter2 make", "API_KEY=<redacted> make"),
                 (
+                    "ANTHROPIC_API_KEY=hunter2 make",
+                    "ANTHROPIC_API_KEY=<redacted> make",
+                ),
+                ("sk-ant-api03-fixture", "<redacted>"),
+                (
                     "-H 'Authorization: Bearer hunter2'",
                     "-H 'Authorization: Bearer <redacted>",
                 ),

@@ -9,6 +9,7 @@ mod request;
 mod sse;
 mod transport;
 
+pub mod anthropic;
 pub mod chat;
 pub mod openai;
 pub mod opencode;
