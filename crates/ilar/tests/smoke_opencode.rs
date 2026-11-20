@@ -122,6 +122,7 @@ struct Step {
     /// The field the thinking arrived under, when the wire said it was
     /// not the default: it goes back under the same one.
     field: Option<ilar::session::ReasoningField>,
+    reasoning_items: Vec<serde_json::Value>,
     call: Option<(String, String, serde_json::Value)>,
     text: String,
 }
@@ -131,6 +132,7 @@ async fn step(provider: &OpenCodeProvider, model: &str, request: Request) -> Ste
     let mut step = Step {
         thinking: String::new(),
         field: None,
+        reasoning_items: Vec::new(),
         call: None,
         text: String::new(),
     };
@@ -138,6 +140,7 @@ async fn step(provider: &OpenCodeProvider, model: &str, request: Request) -> Ste
         match event {
             ProviderEvent::ThinkingDelta(t) => step.thinking.push_str(&t),
             ProviderEvent::ThinkingField(field) => step.field = Some(field),
+            ProviderEvent::ReasoningItem { item } => step.reasoning_items.push(item),
             ProviderEvent::TextDelta(t) => step.text.push_str(&t),
             ProviderEvent::ToolCallCompleted { id, name, input } if step.call.is_none() => {
                 step.call = Some((id, name, input));
@@ -181,6 +184,11 @@ fn echo(step: Step, result: &str) -> Vec<ilar::session::ChatMessage> {
             content,
         }];
     };
+    content.extend(
+        step.reasoning_items
+            .into_iter()
+            .map(|item| ContentBlock::Reasoning { item }),
+    );
     content.push(ContentBlock::ToolCall {
         id: id.clone(),
         name,
@@ -202,6 +210,29 @@ fn echo(step: Step, result: &str) -> Vec<ilar::session::ChatMessage> {
             }],
         },
     ]
+}
+
+#[tokio::test]
+#[ignore]
+async fn live_zen_neon_replays_tool_signature() {
+    let provider = OpenCodeProvider::zen(key(), None);
+    let model = "opencode/gemini-4-neon";
+    let mut request = tool_request(model);
+    request.cache_key = Some(ilar::session::new_id());
+    let first = step(&provider, model, request.clone()).await;
+    assert_eq!(
+        first.call.as_ref().map(|call| call.1.as_str()),
+        Some("write")
+    );
+    assert!(
+        first
+            .reasoning_items
+            .iter()
+            .any(|item| item["signature"].is_string())
+    );
+    request.messages.extend(echo(first, "wrote /tmp/probe.txt"));
+    let answer = step(&provider, model, request).await;
+    assert!(answer.call.is_none() && !answer.text.is_empty());
 }
 
 /// The chat-wire rows are a proxy to upstreams nobody can read from

@@ -1,13 +1,6 @@
-//! OpenCode Zen and Go: one gateway, two wires.
-//!
-//! The gateway fronts every model on exactly one of the OpenAI wires —
-//! the GPT, Grok, Muse and Crouton rows on `/responses`, everything
-//! else on `/chat/completions`. The wrong wire can return a bare 500
-//! (probed live on 2026-09-03 across both catalogs). The catalog row
-//! records which ([`ModelAccess::OpenCodeResponses`] or
-//! [`ModelAccess::OpenCodeChat`]), and this provider holds one client
-//! per wire and routes by it. An id the catalog does not know goes to
-//! chat-completions, the wire most of the catalog is on.
+//! OpenCode Zen and Go. The catalog row picks Responses, Chat Completions,
+//! or (for Gemini 4 Neon on Zen) native Gemini GenerateContent. An unknown
+//! id goes to Chat Completions.
 //!
 //! Zen (`opencode/<id>`) is pay-as-you-go; Go (`opencode-go/<id>`) is a
 //! subscription with usage caps counted in dollars at the listed prices.
@@ -16,6 +9,7 @@
 //! and, from 2026-09-06, refuses requests that do not name one.
 
 use super::chat::{ChatDialect, ChatProvider, ThinkingReplay as ChatReplay};
+use super::gemini::GeminiProvider;
 use super::openai::OpenAIProvider;
 use super::request::Request;
 use super::transport::Affinity;
@@ -35,16 +29,21 @@ pub struct OpenCodeProvider {
     prefix: &'static str,
     chat: ChatProvider,
     responses: OpenAIProvider,
+    gemini: Option<GeminiProvider>,
 }
 
 impl OpenCodeProvider {
-    /// The Zen gateway; `base_url` overrides the published one.
+    /// The Zen gateway. `base_url` replaces the API root for the selected
+    /// wire, including Gemini; a configured proxy must expose that wire there.
     pub fn zen(api_key: String, base_url: Option<String>) -> Self {
-        Self::new(
+        let gemini = GeminiProvider::new(api_key.clone(), base_url.as_deref());
+        let mut provider = Self::new(
             ZEN_PREFIX,
             api_key,
             base_url.unwrap_or_else(|| ZEN_BASE_URL.into()),
-        )
+        );
+        provider.gemini = Some(gemini);
+        provider
     }
 
     /// The Go gateway; `base_url` overrides the published one.
@@ -68,6 +67,7 @@ impl OpenCodeProvider {
             responses: OpenAIProvider::new(api_key, Some(base_url))
                 .with_prefix(prefix)
                 .with_affinity(Affinity::OpenCode),
+            gemini: None,
         }
     }
 
@@ -93,6 +93,12 @@ impl Provider for OpenCodeProvider {
     }
 
     fn stream(&self, req: Request) -> anyhow::Result<EventStream> {
+        if let Some(gemini) = &self.gemini
+            && crate::model::find(&req.model)
+                .is_some_and(|row| row.access == ModelAccess::OpenCodeGemini)
+        {
+            return gemini.stream(req);
+        }
         self.wire(&req.model).stream(req)
     }
 }

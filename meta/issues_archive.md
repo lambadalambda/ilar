@@ -1,5 +1,7 @@
 # Completed issues
 
+- [x] [Gemini 4 Neon on OpenCode Zen](issues/opencode-zen-gemini-neon.md)
+
 - [x] [Local tool-call security experiment](issues/local-tool-call-security-experiment.md)
 
 - [x] [Refresh OpenCode model catalog and prices](issues/refresh-opencode-catalog-prices.md)

@@ -542,12 +542,12 @@ model = "opencode-go/glm-5.3"
 # api_key from ILAR_OPENCODE_API_KEY by default; can be set here.
 ```
 
-The catalog records each model's wire and ilar routes accordingly, so a
-model id is all you choose. GPT, Grok, Muse, and Crouton use the OpenAI
-Responses API; the other catalog rows use chat-completions. The Qwen and
-MiniMax rows the docs file under the Anthropic Messages wire answer on
-chat-completions too and are offered there; the Claude and Gemini families
-are not, since ilar speaks neither of their wires.
+Model IDs select the API. GPT, Grok, Muse, and Crouton use the OpenAI
+Responses API. `opencode/gemini-4-neon` uses Google's native Gemini API
+through Zen, with the same Zen key. It is not available in Go and does not
+use a Google AI Pro subscription. Other supported rows use chat completions,
+including the Qwen and MiniMax rows that OpenCode also lists under Anthropic
+Messages. Claude and other Gemini models are not in ilar's Zen catalog.
 
 Reasoning levels are per model, as opencode publishes them (models.dev
 `reasoning_options`): the GPT rows keep their `openai/` windows and ladders,

@@ -2,6 +2,7 @@
 
 mod error_body;
 mod event;
+mod gemini;
 mod mapper;
 mod mock;
 mod request;

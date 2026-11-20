@@ -1,5 +1,16 @@
 # DEVLOG
 
+## Gemini 4 Neon on OpenCode Zen
+
+Added `opencode/gemini-4-neon` using Zen's native Gemini streaming API and
+existing credentials. Tool calls keep their thought signatures in the session
+log. When switching to Neon, foreign tool calls and results become text so
+Gemini does not try to validate signatures from another provider.
+
+Focused tests, formatting, and Clippy passed. A live Zen smoke test replayed
+Neon's tool signature with a simulated result and received the final answer.
+The workspace run hit macOS sandbox and file-worker failures in this runner.
+
 ## GPT-6.2 Astra and Sol
 
 Added both models for OpenAI API/ChatGPT and OpenCode Zen. OpenAI's

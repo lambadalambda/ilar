@@ -83,6 +83,11 @@ macro_rules! pricing {
 // OpenCode base text rates refreshed 2026-11-09. Rows absent from the
 // live catalogs retain their previous rates; context/time tiers are not applied.
 static PRICING: &[(&str, &str, ModelPricing)] = &[
+    (
+        "opencode",
+        "gemini-4-neon",
+        pricing!(3.0, 15.0, Some(0.15), None),
+    ),
     // GPT-6.2 (2026-11-17), models.dev and OpenAI: base tier only.
     (
         "openai",
@@ -1026,7 +1031,10 @@ impl ModelInfo {
             | ModelAccess::ZaiBoth
             | ModelAccess::OpenCodeChat
             | ModelAccess::Custom => true,
-            ModelAccess::OpenAi | ModelAccess::OpenAiBoth | ModelAccess::OpenCodeResponses => false,
+            ModelAccess::OpenAi
+            | ModelAccess::OpenAiBoth
+            | ModelAccess::OpenCodeResponses
+            | ModelAccess::OpenCodeGemini => false,
         }
     }
 
@@ -1061,6 +1069,8 @@ pub(crate) enum ModelAccess {
     /// An OpenCode row served on `/responses`: the GPT, Grok and Muse
     /// Spark families.
     OpenCodeResponses,
+    /// Gemini 4 Neon on Zen's native GenerateContent wire.
+    OpenCodeGemini,
     /// A `[models.<name>]` entry. Its configuration *is* its route, so
     /// there is no reachability question to ask about it.
     Custom,
@@ -1617,6 +1627,17 @@ static CATALOG: &[ModelInfo] = &[
         ZaiBoth
     ),
     model!("zai", "glm-4.5", "GLM-4.5", 131_072, 98_304, ZaiBoth),
+    // Gemini 4 Neon (2026-11-18): Zen's models.dev row and native catalog.
+    model!(
+        "opencode",
+        "gemini-4-neon",
+        "Gemini 4 Neon",
+        1_048_576,
+        65_536,
+        OpenCodeGemini
+    )
+    .effort(EFFORT_LOW_TO_XHIGH)
+    .vision(),
     // OpenCode Zen: the models the docs place on the Responses wire, then
     // the chat-completions ones, live-probed 2026-09-03 (see the
     // opencode module). gpt-6-astra joined 2026-09-05, gpt-6-sol and
@@ -2403,9 +2424,7 @@ pub fn prompt_patch(full_id: &str) -> Option<&'static str> {
 }
 
 /// `options` with the wire's output cap added, spelled the way the
-/// model's access wants it — `max_output_tokens` on the Responses API,
-/// `max_tokens` on chat completions — unless the options already name
-/// one, which is the configuration's to decide.
+/// the model's access wants it, unless the options already set the cap.
 pub fn with_output_cap(
     options: serde_json::Value,
     full_id: &str,
@@ -2431,6 +2450,17 @@ pub fn with_output_cap(
         serde_json::Value::Object(table) => table,
         _ => serde_json::Map::new(),
     };
+    if model.is_some_and(|row| row.access == ModelAccess::OpenCodeGemini) {
+        let generation = table
+            .entry("generationConfig")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(generation) = generation.as_object_mut() {
+            generation
+                .entry("maxOutputTokens")
+                .or_insert_with(|| serde_json::json!(cap));
+        }
+        return serde_json::Value::Object(table);
+    }
     table.entry(key).or_insert_with(|| serde_json::json!(cap));
     serde_json::Value::Object(table)
 }
@@ -2461,6 +2491,9 @@ pub fn variant_options(full_id: &str, variant: Option<&str>) -> anyhow::Result<s
         // What opencode sends through its OpenAI-compatible SDK; z.ai's
         // `thinking` switch is not needed behind the gateway.
         ModelAccess::OpenCodeChat => Ok(serde_json::json!({"reasoning_effort": variant})),
+        ModelAccess::OpenCodeGemini => Ok(serde_json::json!({
+            "generationConfig": {"thinkingConfig": {"thinkingLevel": variant.to_ascii_uppercase()}},
+        })),
         ModelAccess::Custom => anyhow::bail!(
             "provider {} does not support reasoning variants",
             model.provider

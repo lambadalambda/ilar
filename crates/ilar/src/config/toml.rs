@@ -528,14 +528,16 @@ fn zai_provider(
     ))
 }
 
-/// Either OpenCode wire is reachable with a key; the row's provider name
+/// The OpenCode wires are reachable with a key; the row's provider name
 /// has already picked the gateway by the time this is asked.
 fn opencode_reaches(settings: &ProviderConfigResolved, access: crate::model::ModelAccess) -> bool {
     use crate::model::ModelAccess;
     settings.api_key.is_some()
         && matches!(
             access,
-            ModelAccess::OpenCodeChat | ModelAccess::OpenCodeResponses
+            ModelAccess::OpenCodeChat
+                | ModelAccess::OpenCodeResponses
+                | ModelAccess::OpenCodeGemini
         )
 }
 

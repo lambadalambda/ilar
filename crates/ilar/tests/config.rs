@@ -809,6 +809,34 @@ fn one_opencode_key_reaches_both_gateways() {
     );
     assert!(config.provider_result("opencode/glm-5.3").is_ok());
     assert!(config.provider_result("opencode-go/gpt-5.6-luna").is_ok());
+    let neon = "opencode/gemini-4-neon";
+    assert!(config.provider_result(neon).is_ok());
+    let row = config
+        .available_models()
+        .into_iter()
+        .find(|model| model.full_id() == neon)
+        .unwrap();
+    assert_eq!(
+        (row.context_limit, row.input_limit, row.output_limit),
+        (1_048_576, 983_040, 65_536)
+    );
+    assert!(row.supports_vision());
+    assert_eq!(
+        row.variants().iter().map(|v| v.id).collect::<Vec<_>>(),
+        ["low", "medium", "high", "xhigh"]
+    );
+    let price = ilar::model::pricing_for(neon).unwrap();
+    assert_eq!(
+        (
+            price.input,
+            price.output,
+            price.cache_read,
+            price.cache_write
+        ),
+        (3.0, 15.0, Some(0.15), None)
+    );
+    assert!(ilar::model::variant_options(neon, Some("max")).is_err());
+    assert!(ilar::model::find("opencode-go/gemini-4-neon").is_none());
 
     let models = config.available_models();
     for id in [
