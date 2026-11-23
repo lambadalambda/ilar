@@ -1,5 +1,13 @@
 # DEVLOG
 
+## GLM-5.4 on the Z.ai Coding Plan
+
+Added `zai/glm-5.4` with image input, `low`/`high`/`max` reasoning,
+and a 1M-token context window from models.dev. Z.ai lists the public API
+as coming soon, so ilar shows token usage without API prices. A live Coding
+Plan probe streamed reasoning and correctly identified two image colors in
+streamed tool arguments.
+
 ## Native Anthropic Messages API
 
 Added Fable 5.2, Opus 5.5, Sonnet 5.5, and Haiku 5.5 with native tool and

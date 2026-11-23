@@ -914,6 +914,7 @@ fn zai_lists_the_coding_plan_catalog() {
     // API-only (verified live 2026-08-26) alike — so a keyed config
     // lists the whole z.ai lineup and nothing is cataloged-but-dark.
     for id in [
+        "zai/glm-5.4",
         "zai/glm-5.3",
         "zai/glm-5.1",
         "zai/glm-4.6",
