@@ -140,8 +140,17 @@ impl DeltaChat {
                     "the Delta Chat account is not configured and [channels.deltachat] names neither setup_qr nor addr and password"
                 ),
             }
-            log("deltachat: configuring the account");
-            rpc.call("configure", json!([account])).await?;
+            // A 2.x server's QR adds a working transport already, and
+            // its `configure` then fails for want of an `addr`.
+            let configured = rpc
+                .call("is_configured", json!([account]))
+                .await?
+                .as_bool()
+                .unwrap_or(false);
+            if !configured {
+                log("deltachat: configuring the account");
+                rpc.call("configure", json!([account])).await?;
+            }
         }
         if let Some(name) = &self.config.display_name {
             rpc.call("set_config", json!([account, "displayname", name]))
@@ -151,12 +160,7 @@ impl DeltaChat {
         // ceremony expected of it.
         rpc.call("set_config", json!([account, "bot", "1"])).await?;
         rpc.call("start_io", json!([account])).await?;
-        let address = rpc
-            .call("get_config", json!([account, "configured_addr"]))
-            .await
-            .ok()
-            .and_then(|value| value.as_str().map(str::to_string))
-            .unwrap_or_else(|| "unknown".into());
+        let address = address(rpc, account).await;
         log(&format!("deltachat: {address} is listening"));
         // A chatmail address is not enough to start a chat with: a
         // contact is added from a secure-join invite. Say it every
@@ -487,6 +491,22 @@ const BUBBLE_LINE_CHARS: usize = 100;
 /// How Delta Chat should show a file: pictures as pictures, an `.xdc`
 /// — a zip with an `index.html` and a `manifest.toml` — as a webxdc
 /// app the person can open in the chat, anything else as a file.
+/// The account's address: `configured_addr` before 2.x, the first
+/// transport's since, "unknown" when neither answers.
+async fn address(rpc: &Rpc, account: u64) -> String {
+    if let Ok(Value::String(address)) = rpc
+        .call("get_config", json!([account, "configured_addr"]))
+        .await
+    {
+        return address;
+    }
+    rpc.call("list_transports", json!([account]))
+        .await
+        .ok()
+        .and_then(|list| list[0]["addr"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".into())
+}
+
 fn viewtype(path: &std::path::Path) -> &'static str {
     if crate::channel::is_image(path) {
         return "Image";
@@ -515,6 +535,27 @@ mod tests {
     /// them. An event poll is answered on its own task, since the real
     /// server keeps serving other calls while one waits.
     fn fake_server(
+        configured: bool,
+        messages: Vec<Value>,
+        chats: Vec<Value>,
+        events: mpsc::Receiver<Value>,
+    ) -> (Rpc, Calls) {
+        fake_server_of(Server::Old, configured, messages, chats, events)
+    }
+
+    /// Which rpc server the fake plays.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Server {
+        /// A `DCACCOUNT:` QR only sets the credentials; `configure`
+        /// logs in, and `configured_addr` names the address.
+        Old,
+        /// 2.x: the QR adds a working transport, `configure` without an
+        /// `addr` fails, and the address lives in `list_transports`.
+        Transports,
+    }
+
+    fn fake_server_of(
+        server: Server,
         configured: bool,
         messages: Vec<Value>,
         chats: Vec<Value>,
@@ -550,11 +591,29 @@ mod tests {
                     });
                     continue;
                 }
+                let qr_configured = server == Server::Transports
+                    && recorded
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(m, _)| m == "set_config_from_qr");
+                let refused = match method.as_str() {
+                    "configure" if server == Server::Transports => Some("Missing email address."),
+                    "get_config" if server == Server::Transports => {
+                        Some("unknown key \"configured_addr\"")
+                    }
+                    _ => None,
+                };
+                if let Some(message) = refused {
+                    reply_error(&writer, id, message).await;
+                    continue;
+                }
                 let result = match method.as_str() {
                     "get_all_accounts" => json!([]),
                     "add_account" => json!(1),
-                    "is_configured" => json!(configured),
+                    "is_configured" => json!(configured || qr_configured),
                     "get_config" => json!("bot@example.org"),
+                    "list_transports" => json!([{"addr": "bot@example.org"}]),
                     "get_message" => messages
                         .iter()
                         .find(|m| m["id"] == params[1])
@@ -582,6 +641,18 @@ mod tests {
         result: Value,
     ) {
         let response = json!({"jsonrpc": "2.0", "id": id, "result": result});
+        let mut line = serde_json::to_string(&response).unwrap();
+        line.push('\n');
+        let _ = writer.lock().await.write_all(line.as_bytes()).await;
+    }
+
+    async fn reply_error(
+        writer: &tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>,
+        id: Value,
+        message: &str,
+    ) {
+        let response =
+            json!({"jsonrpc": "2.0", "id": id, "error": {"code": -1, "message": message}});
         let mut line = serde_json::to_string(&response).unwrap();
         line.push('\n');
         let _ = writer.lock().await.write_all(line.as_bytes()).await;
@@ -662,7 +733,7 @@ mod tests {
         assert!(inbound.try_recv().is_err());
 
         let seen = methods(&calls);
-        let setup: Vec<&str> = seen.iter().map(String::as_str).take(8).collect();
+        let setup: Vec<&str> = seen.iter().map(String::as_str).take(9).collect();
         assert_eq!(
             setup,
             [
@@ -670,6 +741,7 @@ mod tests {
                 "add_account",
                 "is_configured",
                 "set_config_from_qr",
+                "is_configured",
                 "configure",
                 "set_config",
                 "set_config",
@@ -685,6 +757,34 @@ mod tests {
         assert!(seen.iter().any(|m| m == "markseen_msgs"), "{seen:?}");
         cancel.cancel();
         let _ = running.await;
+    }
+
+    #[tokio::test]
+    async fn a_qr_that_already_configured_the_account_is_not_configured_again() {
+        let (_events, events_rx) = mpsc::channel(1);
+        let (rpc, calls) = fake_server_of(Server::Transports, false, vec![], vec![], events_rx);
+        let channel = DeltaChat::over(
+            DeltaChatConfig {
+                setup_qr: Some("DCACCOUNT:https://nine.testrun.org/new".into()),
+                allow_from: vec!["alice@example.org".into()],
+                ..DeltaChatConfig::default()
+            },
+            rpc,
+        );
+        let rpc = channel.connect().unwrap();
+        channel.setup(&rpc).await.expect("set up without configure");
+        let seen = methods(&calls);
+        assert!(seen.iter().any(|m| m == "start_io"), "{seen:?}");
+        assert!(!seen.iter().any(|m| m == "configure"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn the_address_comes_from_the_transports_when_configured_addr_is_gone() {
+        for server in [Server::Old, Server::Transports] {
+            let (_events, events_rx) = mpsc::channel(1);
+            let (rpc, _calls) = fake_server_of(server, true, vec![], vec![], events_rx);
+            assert_eq!(address(&rpc, 1).await, "bot@example.org");
+        }
     }
 
     #[tokio::test]

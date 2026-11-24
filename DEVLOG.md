@@ -1,5 +1,15 @@
 # DEVLOG
 
+## Delta Chat rpc server 2.x accounts
+
+`deltachat-rpc-server` 2.69 keeps accounts as transports. A `DCACCOUNT:`
+QR now adds a working transport by itself, a following `configure` fails
+with "Missing email address.", and `configured_addr` is an unknown key
+(the address is in `list_transports`). First start on a fresh account
+failed once and then came up as "unknown is listening". The adapter now
+checks `is_configured` again after the QR and falls back to the
+transport list for the address; older servers take the old path.
+
 ## GLM-5.4 on the Z.ai Coding Plan
 
 Added `zai/glm-5.4` with image input, `low`/`high`/`max` reasoning,
