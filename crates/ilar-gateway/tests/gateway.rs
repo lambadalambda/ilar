@@ -877,6 +877,45 @@ async fn a_heartbeat_with_nothing_to_say_sends_nothing() {
     gateway.cancel();
 }
 
+/// A finished job's notification often needs no words: the model
+/// already said what there was to say. That silence is not a failure
+/// to report to the chat.
+#[tokio::test]
+async fn a_follow_up_with_nothing_to_say_stays_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let silent = vec![ProviderEvent::TurnComplete {
+        stop_reason: StopReason::EndTurn,
+        usage: Usage::default(),
+    }];
+    let (gateway, fake) = gateway(
+        dir.path(),
+        vec![delegates("look around"), says("ok"), says("ok"), silent],
+    );
+    fake.inject("survey the place", "chat-1", "alice").await;
+    fake.wait_for_sent(1, WAIT).await;
+    // The follow-up has run once its notification is in the log; the
+    // reply it would have caused goes out right after.
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    let session = session_of(dir.path(), "fake:chat-1");
+    let notified = || {
+        let events = store.load(&session).unwrap();
+        let prompts = events
+            .events()
+            .iter()
+            .filter(|event| matches!(event, ilar::session::SessionEvent::UserMessage { .. }));
+        prompts.count() >= 2
+    };
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while !notified() {
+        assert!(tokio::time::Instant::now() < deadline, "no follow-up ran");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let texts: Vec<String> = fake.sent().into_iter().map(|m| m.text).collect();
+    assert_eq!(texts, ["ok"], "{texts:?}");
+    gateway.cancel();
+}
+
 #[tokio::test]
 async fn a_scheduled_turn_refuses_an_ungranted_secret_rather_than_asking_the_chat() {
     let dir = tempfile::tempdir().unwrap();

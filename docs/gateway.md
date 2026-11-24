@@ -176,7 +176,10 @@ turns, so its background subagents keep running, and their completions
 come back to the chat as follow-up turns exactly as they would reach a
 TUI: as a prompt, retired from the outbox once the log holds it. A
 session open in a TUI refuses the gateway's turn and the chat is told
-so.
+so. A follow-up turn that ends with no message and no text says
+nothing: a finished job often needs no words, and the person did not
+ask anything. A turn the person started still gets "The model ended
+its turn without a reply" rather than silence.
 
 Turns on one chat are serialized; different chats run at once. Image
 attachments are handed to the model the way `read` attaches them.
