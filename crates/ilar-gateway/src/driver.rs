@@ -176,6 +176,8 @@ pub struct Wiring {
     /// The chats' status lines: a seat's own reply takes its own line
     /// down, and nobody else's.
     pub status: Arc<crate::status::StatusBoard>,
+    /// Messages chats got from other seats, for their next turn.
+    pub elsewhere: Arc<crate::message::SentElsewhere>,
 }
 
 pub struct Driver {
@@ -426,6 +428,7 @@ impl Driver {
                 .cloned()
                 .unwrap_or_default(),
             status: self.wiring.status.clone(),
+            elsewhere: self.wiring.elsewhere.clone(),
         });
         registry.add(tool)?;
         // The memory tools are not added here: they come in with the
@@ -500,7 +503,10 @@ impl Driver {
         // cannot be rewritten per turn without rewriting the cached
         // prefix under it.
         let prompt = &crate::situation::stamped(
-            &with_undelivered(seat, prompt),
+            &with_sent_elsewhere(
+                self.wiring.elsewhere.take(&seat.key),
+                &with_undelivered(seat, prompt),
+            ),
             chrono::Local::now().fixed_offset(),
         );
         let pending = seat.pending_model.lock().unwrap().take();
@@ -576,13 +582,15 @@ impl Driver {
         if seat.turn.try_lock().is_ok() {
             return false;
         }
-        let steer = Steer {
-            text: text.to_string(),
-            images: images.to_vec(),
-        };
         let sender = seat.steer.lock().unwrap().clone();
         let Some(sender) = sender else {
             return false;
+        };
+        // An answer to the heartbeat can land mid-turn too, and needs
+        // the heartbeat's words as much as a fresh turn does.
+        let steer = Steer {
+            text: with_sent_elsewhere(self.wiring.elsewhere.take(&seat.key), text),
+            images: images.to_vec(),
         };
         // Recorded before the send, so the loop's report of delivery
         // cannot arrive first and find nothing to clear.
@@ -705,6 +713,9 @@ impl Driver {
     /// can land in the fresh chat minutes later.
     pub async fn close(&self, key: &str) -> Result<()> {
         let seat = self.seats.lock().unwrap().remove(key);
+        // The fresh conversation did not see those either, but they
+        // belong to the one being left behind.
+        self.wiring.elsewhere.take(key);
         // The route goes before the wait: a message arriving while the
         // old turn winds down must open a fresh session, not resume the
         // one being left behind.
@@ -1051,6 +1062,20 @@ fn with_undelivered(seat: &Seat, prompt: &str) -> String {
         "<delivery-failure>\nThese messages never reached this chat, though the message tool \
          reported them sent:\n{}\n</delivery-failure>\n\n{prompt}",
         news.join("\n")
+    )
+}
+
+/// What other seats sent this chat since its last turn, ahead of the
+/// prompt: the person saw it, and may be answering it.
+fn with_sent_elsewhere(sent: Vec<String>, prompt: &str) -> String {
+    if sent.is_empty() {
+        return prompt.to_string();
+    }
+    format!(
+        "<sent-meanwhile>\nYour other sessions (scheduled turns, other chats) sent these to this \
+         chat since your last turn here; the person may be answering one:\n{}\n\
+         </sent-meanwhile>\n\n{prompt}",
+        sent.join("\n")
     )
 }
 

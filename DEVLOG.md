@@ -1,5 +1,17 @@
 # DEVLOG
 
+## A heartbeat's message belongs to the chat's conversation too
+
+Live on Rika: the heartbeat asked "Want a worker on the SDK option?",
+the person answered "that's Mikhel's, I'll let him work on it", and the
+chat session — which never saw the heartbeat's message — stopped the
+two workers it had last talked about. Messages a seat sends to another
+chat are now noted and handed to that chat's next turn as
+`<sent-meanwhile>`. In memory only: a restart loses at most one
+answer's context, which did not justify persisting them. The same run
+showed job notifications that rightly got no answer reported to the
+chat as "ended without a reply"; follow-up turns now stay quiet.
+
 ## Delta Chat rpc server 2.x accounts
 
 `deltachat-rpc-server` 2.69 keeps accounts as transports. A `DCACCOUNT:`

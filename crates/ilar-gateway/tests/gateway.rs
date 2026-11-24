@@ -877,6 +877,59 @@ async fn a_heartbeat_with_nothing_to_say_sends_nothing() {
     gateway.cancel();
 }
 
+/// The heartbeat speaks from a session of its own; the chat's session
+/// must still learn what it said, or the person's answer to it lands
+/// on whatever the chat talked about last.
+#[tokio::test]
+async fn what_the_heartbeat_said_reaches_the_chats_next_turn_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = GatewayConfig {
+        scheduler_tick_secs: 1,
+        heartbeat: ilar_gateway::config::Heartbeat {
+            every_secs: 1,
+            prompt: "anything?".into(),
+            chats: vec!["fake:chat-1".into()],
+        },
+        ..GatewayConfig::default()
+    };
+    let mut turns = vec![
+        says("workers are running"),
+        messages("PR #5 has comments. Want a worker on it?", None),
+        says("(the beat's final text)"),
+    ];
+    turns.extend((0..12).map(|_| says("quiet")));
+    let (gateway, fake) = gateway_with(dir.path(), turns, settings);
+    fake.inject("start the workers", "chat-1", "alice").await;
+    fake.wait_for_sent(2, WAIT).await;
+    fake.inject("no, Mikhel has that one", "chat-1", "alice")
+        .await;
+    fake.wait_for_sent(3, WAIT).await;
+    fake.inject("and the other one?", "chat-1", "alice").await;
+    fake.wait_for_sent(4, WAIT).await;
+    let store = ilar::runtime::session_store(&config(dir.path()));
+    let prompts: Vec<String> = store
+        .load(&session_of(dir.path(), "fake:chat-1"))
+        .unwrap()
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            ilar::session::SessionEvent::UserMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prompts.len(), 3, "{prompts:?}");
+    assert!(!prompts[0].contains("PR #5"), "{prompts:?}");
+    assert!(
+        prompts[1].contains("<sent-meanwhile>")
+            && prompts[1].contains("PR #5 has comments. Want a worker on it?")
+            && prompts[1].ends_with("no, Mikhel has that one"),
+        "{}",
+        prompts[1]
+    );
+    assert!(!prompts[2].contains("PR #5"), "{}", prompts[2]);
+    gateway.cancel();
+}
+
 /// A finished job's notification often needs no words: the model
 /// already said what there was to say. That silence is not a failure
 /// to report to the chat.

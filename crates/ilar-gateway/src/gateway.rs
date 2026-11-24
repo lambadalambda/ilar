@@ -378,6 +378,7 @@ impl Gateway {
                 memory: memory.clone(),
                 skills: skills.clone(),
                 status: status.clone(),
+                elsewhere: Default::default(),
             },
             cancel.clone(),
         ));
