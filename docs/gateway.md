@@ -176,7 +176,10 @@ turns, so its background subagents keep running, and their completions
 come back to the chat as follow-up turns exactly as they would reach a
 TUI: as a prompt, retired from the outbox once the log holds it. A
 session open in a TUI refuses the gateway's turn and the chat is told
-so.
+so. A follow-up turn that ends with no message and no text says
+nothing: a finished job often needs no words, and the person did not
+ask anything. A turn the person started still gets "The model ended
+its turn without a reply" rather than silence.
 
 Turns on one chat are serialized; different chats run at once. Image
 attachments are handed to the model the way `read` attaches them.
@@ -409,6 +412,14 @@ each configured chat.
 Neither kind of turn delivers its final text. A scheduled turn reaches
 the chat only through the message tool, so a job or a heartbeat with
 nothing to say says nothing.
+
+What a scheduled turn — or another chat's turn — sends to a chat is
+not in that chat's session, yet the person reads it there and answers
+it. So the chat's next turn is handed those messages first, in a
+`<sent-meanwhile>` block with the time and the sending session, and
+"no, leave it" is read as the answer to the heartbeat's question, not
+to whatever the chat talked about last. The block is kept in memory
+until that turn; a restart in between drops it.
 
 Nobody is watching a scheduled turn, so it is never the one to ask for
 a [secret](secrets.md): an ungranted one is refused on the spot, with

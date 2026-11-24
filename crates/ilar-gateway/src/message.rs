@@ -25,6 +25,38 @@ use crate::routes::RouteStore;
 /// returns is not.
 const CLEAR_STATUS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Messages a chat received from another seat — a heartbeat, a cron
+/// job, another chat's turn — that the chat's own session never saw.
+/// Its next turn is handed them, so "no, leave it" answers the message
+/// the person was looking at. Kept in memory: a restart loses them,
+/// and the worst that costs is one answer read out of context.
+const SENT_ELSEWHERE_KEPT: usize = 10;
+
+#[derive(Default)]
+pub struct SentElsewhere(std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>);
+
+impl SentElsewhere {
+    fn record(&self, chat_key: &str, from_key: &str, text: &str) {
+        let line = format!(
+            "[{} from {from_key}] {text}",
+            chrono::Utc::now().format("%H:%M UTC")
+        );
+        let mut map = self.0.lock().unwrap();
+        let lines = map.entry(chat_key.to_string()).or_default();
+        lines.push(line);
+        // A chat that never writes back must not get weeks of reports
+        // in one block; the latest few are what an answer refers to.
+        if lines.len() > SENT_ELSEWHERE_KEPT {
+            lines.remove(0);
+        }
+    }
+
+    /// What reached `chat_key` from elsewhere since its last turn.
+    pub fn take(&self, chat_key: &str) -> Vec<String> {
+        self.0.lock().unwrap().remove(chat_key).unwrap_or_default()
+    }
+}
+
 #[derive(Deserialize)]
 struct Input {
     text: String,
@@ -58,6 +90,8 @@ pub struct Sending {
     /// What the model is told about sending here.
     pub constraints: String,
     pub status: Arc<crate::status::StatusBoard>,
+    /// Where a send to a chat that is not this seat's is noted.
+    pub elsewhere: Arc<SentElsewhere>,
 }
 
 pub struct MessageTool {
@@ -195,6 +229,7 @@ impl Tool for MessageTool {
         let status = self.sending.status.clone();
         let routes = self.sending.routes.clone();
         let workspace = self.sending.workspace.clone();
+        let elsewhere = self.sending.elsewhere.clone();
         let sent = self.sent.clone();
         Box::pin(async move {
             let input: Input = match parse_input(input, "message") {
@@ -270,8 +305,12 @@ impl Tool for MessageTool {
                     "{home_key}: status line not cleared in time; sending anyway"
                 ));
             }
+            let text = message.text.clone();
             if outbound.send(message).await.is_err() {
                 return ToolOutput::error("message: the gateway is not delivering");
+            }
+            if key != home_key {
+                elsewhere.record(&key, &home_key, &text);
             }
             sent.fetch_add(1, Ordering::AcqRel);
             ToolOutput::text(format!(
@@ -318,6 +357,7 @@ mod tests {
             workspace: dir.to_path_buf(),
             constraints: String::new(),
             status,
+            elsewhere: Default::default(),
         });
         (tool, rx)
     }

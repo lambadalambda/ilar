@@ -378,6 +378,7 @@ impl Gateway {
                 memory: memory.clone(),
                 skills: skills.clone(),
                 status: status.clone(),
+                elsewhere: Default::default(),
             },
             cancel.clone(),
         ));
@@ -778,7 +779,7 @@ impl Gateway {
             }
             Ok(report) => {
                 self.keep_handovers(seat, &report);
-                self.deliver_unless_sent(seat, &report).await;
+                self.deliver_unless_sent(seat, &report, false).await;
                 self.schedule_review(seat.clone());
             }
             Err(TurnError::Busy(why)) => {
@@ -1471,7 +1472,7 @@ impl Gateway {
             Ok(report) => {
                 ilar::outbox::retire(&self.driver.outbox_dir(), &follow_up.retire);
                 self.keep_handovers(&seat, &report);
-                self.deliver_unless_sent(&seat, &report).await;
+                self.deliver_unless_sent(&seat, &report, true).await;
                 self.schedule_review(seat.clone());
             }
             // A background seat's troubles stay in the log: the chat
@@ -1813,8 +1814,14 @@ impl Gateway {
     /// The final text of a turn goes out only when the model sent
     /// nothing itself; a model that used the message tool has said
     /// what it wanted to say. A background seat has no final text to
-    /// deliver at all.
-    async fn deliver_unless_sent(&self, seat: &crate::driver::Seat, report: &TurnReport) {
+    /// deliver at all. `follow_up`: the turn answered a notification,
+    /// not the person, and may rightly have nothing to add.
+    async fn deliver_unless_sent(
+        &self,
+        seat: &crate::driver::Seat,
+        report: &TurnReport,
+        follow_up: bool,
+    ) {
         if report.sent > 0 {
             log(&format!(
                 "{}: {} message(s) sent by the model",
@@ -1833,8 +1840,10 @@ impl Gateway {
                 "{}: the turn ended without a reply ({:?})",
                 seat.key, report.outcome
             ));
-            self.deliver(&seat.channel, &seat.chat_id, EMPTY_REPLY)
-                .await;
+            if !follow_up {
+                self.deliver(&seat.channel, &seat.chat_id, EMPTY_REPLY)
+                    .await;
+            }
             return;
         }
         self.deliver(&seat.channel, &seat.chat_id, &report.text)
