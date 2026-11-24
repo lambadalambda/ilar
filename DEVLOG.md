@@ -299,6 +299,21 @@ a like-for-like speed comparison. See `experiments/tool-guard/RESULTS.md` and
 saved raw responses for results and limits. This is not a runtime permission
 boundary.
 
+## Muse Spark long-history rejection
+
+The millenia session began returning an opaque 400 immediately after a
+screenshot read. Controlled requests reconstructed from its post-compaction
+history reproduce the failure. Omitting either the oldest or newest image
+makes the same history succeed. The newest image works alone; all 51 active
+images also work in isolated requests. Synthetic histories with 51 image tool
+results work, so a simple image-count cap is not supported by the probes.
+
+The exact server constraint is still unknown. No speculative limit or session
+rewrite was applied. Recovery is to switch models, compact, then return to
+Muse; compaction on Muse itself can replay the same rejected history. The
+open issue records the comparisons. These were live diagnostic requests,
+not unit tests; no runtime source changed.
+
 ## Proportion prompts for GPT: first comparison
 
 An audit of gpt-6.1-sol sessions in four game-port repos found as many
