@@ -594,6 +594,11 @@ static PRICING: &[(&str, &str, ModelPricing)] = &[
         "iceman-contributor-free",
         pricing!(0.0, 0.0, Some(0.0), None),
     ),
+    (
+        "opencode-go",
+        "hungerg-free",
+        pricing!(0.0, 0.0, Some(0.0), None),
+    ),
 ];
 
 /// Models billed by subscription (coding plan) rather than per token.
@@ -1306,6 +1311,17 @@ static CATALOG: &[ModelInfo] = &[
         131_072,
         OpenCodeChat
     ),
+    // HungerG (2026-11-24): an unnamed stealth model, free for a limited
+    // time. models.dev lists reasoning with no effort options, so no ladder.
+    model!(
+        "opencode-go",
+        "hungerg-free",
+        "HungerG Free",
+        1_000_000,
+        65_536,
+        OpenCodeChat
+    )
+    .vision(),
     // GPT-6.2 Astra and Sol (2026-11-17): API and ChatGPT/Codex.
     // models.dev gives both 1.05M context, 922k input, 128k output and
     // low through max effort. Keep the working window at the 272k
@@ -2771,8 +2787,18 @@ mod tests {
                 Chat,
                 &[],
             ),
+            (
+                "opencode-go/hungerg-free",
+                "HungerG Free",
+                1_000_000,
+                934_464,
+                65_536,
+                true,
+                Chat,
+                &[],
+            ),
         ];
-        assert_eq!(rows.len(), 12);
+        assert_eq!(rows.len(), 13);
         for &(id, name, context, input, output, vision, wire, efforts) in rows {
             let row = find(id).unwrap_or_else(|| panic!("{id} is cataloged"));
             assert_eq!(
@@ -3058,6 +3084,10 @@ mod tests {
             ),
             (
                 "opencode-go/iceman-contributor-free",
+                pricing!(0.0, 0.0, Some(0.0), None),
+            ),
+            (
+                "opencode-go/hungerg-free",
                 pricing!(0.0, 0.0, Some(0.0), None),
             ),
         ];

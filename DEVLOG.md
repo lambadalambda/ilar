@@ -1,5 +1,14 @@
 # DEVLOG
 
+## HungerG on OpenCode Go
+
+Added `opencode-go/hungerg-free`, the unnamed stealth model that OpenCode
+Go serves free until about 2026-11-30. models.dev gives 1M context, 65,536
+output tokens and image input. It lists reasoning but no effort options, so
+the row has no effort ladder. A live probe on the chat wire made one
+`write` tool call and stopped with `ToolUse`. The probe reported zero usage
+and streamed no reasoning text. Remove the row when the free window ends.
+
 ## A heartbeat's message belongs to the chat's conversation too
 
 Live on Rika: the heartbeat asked "Want a worker on the SDK option?",
