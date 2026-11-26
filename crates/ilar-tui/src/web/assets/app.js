@@ -44,6 +44,17 @@ const token = bootToken();
 // sources — the alternative was a second renderer to keep in step.
 const SHARE = window.__ILAR_SHARE__ || null;
 
+// A paired phone: the session arrives over iroh, through
+// web/remote/remote.js, which sets this before it loads the page. Reads
+// answer from the session's last snapshot, the live stream is the
+// wire's frames, and the two writes (a message, an abort) go back over
+// the wire. A third source behind the same renderer, like the share.
+const REMOTE = window.__ILAR_REMOTE__ || null;
+
+// No server routes behind the page: thumbnails, child transcripts and
+// new sessions have nowhere to come from.
+const DETACHED = SHARE || REMOTE;
+
 // What a shared page would have fetched, by the path it would have
 // used. Built once so `api` stays a lookup rather than a branch per
 // call site.
@@ -78,6 +89,7 @@ let SHARE_ROUTES = null;
 // real absence — a result body the writer left out, say — and reads as
 // the failure it is rather than as an empty success.
 const api = (path) => {
+  if (REMOTE) return REMOTE.api(path);
   if (!SHARE) return fetchPath(path).then((response) => response.json());
   if (!SHARE_ROUTES) SHARE_ROUTES = shareRoutes();
   const body = SHARE_ROUTES.get(path);
@@ -87,6 +99,7 @@ const api = (path) => {
 };
 
 const apiText = (path) => {
+  if (REMOTE) return REMOTE.api(path).then((body) => (typeof body === "string" ? body : JSON.stringify(body)));
   if (!SHARE) return fetchPath(path).then((response) => response.text());
   if (!SHARE_ROUTES) SHARE_ROUTES = shareRoutes();
   const body = SHARE_ROUTES.get(path);
@@ -105,6 +118,7 @@ async function post(path, body) {
   // send to. Refused here rather than at each call site, so a control
   // that slips through still fails honestly.
   if (SHARE) throw new Error("this is a shared transcript — it cannot be written to");
+  if (REMOTE) return REMOTE.post(path, body);
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = "Bearer " + token;
   const response = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
@@ -639,7 +653,7 @@ function Images({ sessionId, eventId, descriptors }) {
   // behind it. The picture's own marker — kind and size — is already
   // in the text beside this, which is what the terminal shows too, so
   // the row says what was there rather than showing a broken frame.
-  if (SHARE) {
+  if (DETACHED) {
     return descriptors.map(
       (image) => html`
         <span class="thumb thumb-absent"
@@ -782,7 +796,7 @@ function TaskRow({ call, result, sessionId, cwd, live }) {
     };
     // Only while the call could still be running: a finished task with no
     // child in its result, or a swept one, has nothing more to find.
-    const timer = SHARE || result || dead ? null : setInterval(look, CHILD_POLL_MS);
+    const timer = DETACHED || result || dead ? null : setInterval(look, CHILD_POLL_MS);
     look();
     return () => {
       alive = false;
@@ -818,7 +832,9 @@ function TaskRow({ call, result, sessionId, cwd, live }) {
             // looking for — the reader has no server to point at.
             SHARE
               ? "this delegation's own transcript is not in this file"
-              : message(failure),
+              : REMOTE
+                ? "a delegation's own transcript is not sent to the phone"
+                : message(failure),
           ),
       );
     return () => {
@@ -831,7 +847,7 @@ function TaskRow({ call, result, sessionId, cwd, live }) {
   // — the next one is three seconds away and the rows on screen are
   // still true.
   useEffect(() => {
-    if (SHARE || !open || !child || result || dead) return undefined;
+    if (DETACHED || !open || !child || result || dead) return undefined;
     let alive = true;
     const timer = setInterval(() => {
       slice(child)
@@ -904,7 +920,7 @@ function TaskRow({ call, result, sessionId, cwd, live }) {
                 </div>
               `}
               ${pageRows(page.events, page.cursor, child, cwd, sessionLive(page.session))}
-              ${!SHARE &&
+              ${!DETACHED &&
               html`<a class="link" href=${"#/s/" + encodeURIComponent(child)}>open the child session</a>`}
             </div>
           `}
@@ -1308,7 +1324,10 @@ function useTranscript(id) {
       // A shared session is finished by definition: the file is what
       // it was, and there is no server to stream from.
       if (SHARE) return;
-      const stream = new EventSource(withToken(apiPath(id, "/events?from=" + view.line)));
+      // Remote: the wire's frames, behind the same three methods.
+      const stream = REMOTE
+        ? REMOTE.stream()
+        : new EventSource(withToken(apiPath(id, "/events?from=" + view.line)));
       source = stream;
       const on = (name, handler) =>
         stream.addEventListener(name, (frame) => {
@@ -1569,7 +1588,7 @@ function NewSession({ cwds, onCreated }) {
   };
 
   // Nothing to start a session on: there is no server here.
-  if (SHARE) return null;
+  if (DETACHED) return null;
   if (!open) {
     return html`
       <button class="new-toggle" type="button" onClick=${() => setOpen(true)}>+ new session</button>
@@ -1683,6 +1702,7 @@ function StatusPill({ view, session, onAbort, aborting }) {
       </span>
       ${session &&
       session.driven &&
+      state === "working" &&
       html`
         <button class="abort" type="button" disabled=${aborting} onClick=${onAbort} title="stop this turn">
           ${aborting ? "stopping…" : "stop"}
@@ -1714,6 +1734,149 @@ function StatusPill({ view, session, onAbort, aborting }) {
 // in-flight POST resolves into the instance that started it — a dead one
 // whose `setText("")` reaches nobody — rather than clearing the draft
 // someone has just typed into the session they moved to.
+// ------------------------------------------------------------ remote
+
+// What the paired session waits on, and the last thing it told this
+// phone ("queued until the current turn ends", "that grant prompt is
+// gone"). Both live in remote.js; this subscribes to them.
+function useRemote() {
+  const [state, setState] = useState(() => (REMOTE ? REMOTE.state() : {}));
+  useEffect(() => (REMOTE ? REMOTE.subscribe(() => setState(REMOTE.state())) : undefined), []);
+  return state;
+}
+
+const GRANT_ANSWERS = [
+  ["once", "allow once"],
+  ["session", "for this session"],
+  ["always", "always"],
+];
+
+// A tool wants a secret or a command approved. The detail is what it is
+// about to run, verbatim: the same words the terminal's prompt shows,
+// and the whole of the safety, so it is shown whole.
+function GrantCard({ prompt, onAnswer }) {
+  return html`
+    <section class="ask">
+      <h2>${prompt.tool} wants ${prompt.secret}${prompt.agent ? " (" + prompt.agent + ")" : ""}</h2>
+      ${prompt.description && html`<p class="ask-note">${prompt.description}</p>`}
+      ${prompt.detail && html`<${Preformatted} text=${prompt.detail} className="ask-detail" />`}
+      <div class="ask-actions">
+        ${GRANT_ANSWERS.map(
+          ([answer, label]) => html`
+            <button type="button" class="ask-yes" onClick=${() => onAnswer({ type: "grant", secret: prompt.secret, answer })}>
+              ${label}
+            </button>
+          `,
+        )}
+        <button type="button" class="ask-no" onClick=${() => onAnswer({ type: "grant", secret: prompt.secret, answer: null })}>
+          deny
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+// The question tool's form. Answers are built in the shape
+// `QuestionResponse` deserializes; the session validates them against
+// the request and says so when they do not fit.
+function QuestionCard({ request, onAnswer }) {
+  const questions = request.questions || [];
+  const [drafts, setDrafts] = useState({});
+  const set = (id, value) => setDrafts((current) => ({ ...current, [id]: { ...current[id], ...value } }));
+
+  const answers = () =>
+    questions.flatMap((question) => {
+      const draft = drafts[question.id] || {};
+      const other = draft.other && draft.other.trim() ? draft.other.trim() : undefined;
+      if (question.type === "free_text") {
+        const text = (draft.text || "").trim();
+        return text ? [{ type: "free_text", question_id: question.id, text }] : [];
+      }
+      if (question.type === "single_choice") {
+        return draft.option || other
+          ? [{ type: "single_choice", question_id: question.id, option_id: draft.option, other }]
+          : [];
+      }
+      const picked = Object.keys(draft.options || {}).filter((id) => draft.options[id]);
+      return picked.length || other
+        ? [{ type: "multiple_choice", question_id: question.id, option_ids: picked, other }]
+        : [];
+    });
+
+  return html`
+    <section class="ask">
+      ${questions.map(
+        (question) => html`
+          <fieldset class="ask-question" key=${question.id}>
+            <legend>${question.prompt}${question.required ? "" : " (optional)"}</legend>
+            ${question.description && html`<p class="ask-note">${question.description}</p>`}
+            ${question.type === "free_text"
+              ? html`<textarea
+                  class="prompt"
+                  rows="2"
+                  onInput=${(event) => set(question.id, { text: event.target.value })}
+                ></textarea>`
+              : (question.options || []).map(
+                  (option) => html`
+                    <label class="ask-option" key=${option.id}>
+                      <input
+                        type=${question.type === "single_choice" ? "radio" : "checkbox"}
+                        name=${question.id}
+                        onChange=${(event) =>
+                          question.type === "single_choice"
+                            ? set(question.id, { option: option.id })
+                            : set(question.id, {
+                                options: { ...((drafts[question.id] || {}).options || {}), [option.id]: event.target.checked },
+                              })}
+                      />
+                      <span>${option.label}</span>
+                      ${option.description && html`<small>${option.description}</small>`}
+                    </label>
+                  `,
+                )}
+            ${question.allow_other &&
+            html`<input
+              class="ask-other"
+              placeholder="other"
+              onInput=${(event) => set(question.id, { other: event.target.value })}
+            />`}
+          </fieldset>
+        `,
+      )}
+      <div class="ask-actions">
+        <button type="button" class="ask-yes" onClick=${() => onAnswer({ type: "question", response: { status: "answered", answers: answers() } })}>
+          answer
+        </button>
+        <button type="button" class="ask-no" onClick=${() => onAnswer({ type: "question", response: { status: "cancelled" } })}>
+          dismiss
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function RemotePrompt() {
+  const { prompt, notice } = useRemote();
+  // An answer that did not leave (the link is reconnecting) says so,
+  // rather than a tap that did nothing.
+  const [failure, setFailure] = useState("");
+  const answer = (command) => {
+    setFailure("");
+    REMOTE.send(command).catch((error) => setFailure(message(error)));
+  };
+  return html`
+    ${prompt && prompt.kind === "grant" && html`<${GrantCard} prompt=${prompt} onAnswer=${answer} />`}
+    ${prompt &&
+    prompt.kind === "question" &&
+    // Keyed by the request: a new question starts with a blank form.
+    html`<${QuestionCard} key=${JSON.stringify(prompt.request)} request=${prompt.request} onAnswer=${answer} />`}
+    ${prompt &&
+    prompt.kind === "terminal" &&
+    html`<section class="ask"><p class="ask-note">waiting at the terminal: ${prompt.detail}</p></section>`}
+    ${(failure || notice) && html`<p class="fate">${failure || notice}</p>`}
+  `;
+}
+
 function Composer({ id, session, view }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1786,12 +1949,13 @@ function Composer({ id, session, view }) {
     html`<p class="watching">
       This session is open in another process — watching only. Send again to try once it lets go.
     </p>`}
+    ${REMOTE && html`<${RemotePrompt} />`}
     <${StatusPill} view=${view} session=${session} onAbort=${abort} aborting=${aborting} />
     <div class="input">
       <textarea
         class="prompt"
         rows="1"
-        placeholder="message this session — Enter sends, Shift-Enter for a new line"
+        placeholder=${REMOTE ? "message this session" : "message this session — Enter sends, Shift-Enter for a new line"}
         value=${text}
         onInput=${(event) => setText(event.target.value)}
         onKeyDown=${onKeyDown}
@@ -1913,7 +2077,7 @@ function DetailPanel({ id, view }) {
         ${!children.length && html`<p class="note">none</p>`}
         ${children.map(
           (child) => html`
-            <${SHARE ? "div" : "a"} class="subagent" key=${child.id} href=${SHARE ? undefined : "#/s/" + encodeURIComponent(child.id)}>
+            <${DETACHED ? "div" : "a"} class="subagent" key=${child.id} href=${DETACHED ? undefined : "#/s/" + encodeURIComponent(child.id)}>
               <span class="subagent-name">${preview(child.title || child.agent || child.id, 44)}</span>
               <span class=${"subagent-state " + (child.state || "idle")}>
                 ${child.state === "working" ? "is working" : child.state === "stalled" ? "stalled" : "done"}
@@ -2012,6 +2176,7 @@ function routeId() {
   // A shared file is one session and opens on it. There is no listing
   // worth a route here, and no URL to have been given a hash.
   if (SHARE) return SHARE.id;
+  if (REMOTE) return REMOTE.id;
   const hash = location.hash.replace(/^#/, "");
   return hash.startsWith("/s/") ? decodeURIComponent(hash.slice(3)) : null;
 }
