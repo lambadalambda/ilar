@@ -1,0 +1,24 @@
+[package]
+name = "ilar-remote-web"
+description = "The browser side of ilar remote control, as WebAssembly"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Everything is wasm-only: on a native build this is an empty library,
+# so the workspace gate builds it without a browser toolchain.
+[target.'cfg(target_family = "wasm")'.dependencies]
+ilar-remote = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+# Pinned: the wasm-bindgen CLI that generates the JS glue must be this
+# exact version (scripts/build-remote-web.sh installs it).
+wasm-bindgen = "=0.2.127"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
