@@ -1,5 +1,20 @@
 # DEVLOG
 
+## iroh reaches a browser
+
+Spike in `experiments/iroh-remote/` for remote control from a phone. iroh
+1.4.1 with `default-features = false, features = ["tls-ring"]` built for
+`wasm32-unknown-unknown` with no patches and no extra cfg flags. A page
+in headless Chrome 153 on tenco dialed a native host through n0's public
+relay and got JSON echoes back: host online in 0.9-1.1 s, browser
+connect 782 ms, first request 357 ms, then about 230 ms per request (one
+new bi-stream each, both ends on tenco, so this is mostly the relay round
+trip). The WASM is 5.1 MB, 1.6 MB gzipped, with no `wasm-opt` and no
+size profile yet. The link with the full `EndpointAddr` as JSON in the
+fragment is 390 characters, which gives a dense QR code; a compact
+ticket (id + relay URL, binary) or an id-only ticket resolved through
+pkarr would shrink it.
+
 ## HungerG on OpenCode Go
 
 Added `opencode-go/hungerg-free`, the unnamed stealth model that OpenCode

@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iroh remote spike</title>
+<style>
+  body { font: 15px system-ui, sans-serif; margin: 1rem; }
+  textarea { width: 100%; height: 4rem; }
+  pre { white-space: pre-wrap; background: #f3f3f3; padding: .5rem; }
+</style>
+<p>Ticket (taken from the link's #fragment when present):</p>
+<textarea id="ticket"></textarea>
+<p><button id="go">Connect and send</button></p>
+<pre id="log"></pre>
+<script type="module">
+  import init, { Client } from "./pkg/iroh_remote_spike.js";
+
+  const log = (line) => { document.getElementById("log").textContent += line + "\n"; };
+  const ticket = document.getElementById("ticket");
+  ticket.value = location.hash.slice(1);
+
+  async function run() {
+    const t0 = performance.now();
+    await init();
+    log(`wasm ready in ${Math.round(performance.now() - t0)} ms`);
+    const t1 = performance.now();
+    const client = await Client.connect(ticket.value);
+    log(`connected in ${Math.round(performance.now() - t1)} ms`);
+    for (let i = 0; i < 3; i++) {
+      const t2 = performance.now();
+      const reply = await client.request(JSON.stringify({ hello: "from the browser", n: i }));
+      log(`reply ${i} in ${Math.round(performance.now() - t2)} ms: ${reply}`);
+    }
+    log("DONE");
+  }
+
+  document.getElementById("go").onclick = () => run().catch((e) => log("ERROR " + e));
+  if (ticket.value) run().catch((e) => log("ERROR " + e));
+</script>

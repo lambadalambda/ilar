@@ -507,3 +507,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Allow image attachments while a turn runs](issues/allow-image-attachments-while-a-turn-runs.md)
 - [x] [Submit image-only messages](issues/submit-image-only-messages.md)
 - [x] [Keep clipboard images with the submitted message](issues/keep-clipboard-images-with-the-submitted-message.md)
+- [x] [iroh reaches a browser](issues/iroh-reaches-a-browser.md)
