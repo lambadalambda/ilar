@@ -12,6 +12,7 @@ pub mod pairing;
 pub mod ticket;
 pub mod wire;
 
+pub use iroh;
 pub use iroh::{EndpointId, SecretKey};
 pub use pairing::{Pairing, Secret, Verdict};
 pub use ticket::Ticket;
