@@ -5,7 +5,8 @@
 use crate::app::App;
 use crate::{NoticeLevel, theme};
 use futures::FutureExt;
-use ilar_remote::host::{HostEvent, RemoteHost};
+use ilar_remote::EndpointId;
+use ilar_remote::host::{HostEvent, Link, RemoteHost};
 use ratatui::Frame;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -62,20 +63,20 @@ impl RemoteView {
         }
     }
 
-    /// Applies a host event; returns the notice worth showing, if any.
-    pub(crate) fn apply(&mut self, event: &HostEvent) -> Option<String> {
-        let (status, notice) = match event {
-            HostEvent::Paired(id) => (
-                RemoteStatus::Connected(short(id)),
-                Some(format!("remote: device {} paired", short(id))),
+    /// Applies a change; returns the notice worth showing, if any.
+    pub(crate) fn apply(&mut self, change: Change) -> Option<String> {
+        let (status, notice) = match change {
+            Change::Paired(id) => (
+                RemoteStatus::Connected(short(&id)),
+                Some(format!("remote: device {} paired", short(&id))),
             ),
-            HostEvent::Welcome(id) => (RemoteStatus::Connected(short(id)), None),
-            HostEvent::Disconnected(id) => (
-                RemoteStatus::Away(short(id)),
-                Some(format!("remote: device {} disconnected", short(id))),
+            Change::Back(id) => (RemoteStatus::Connected(short(&id)), None),
+            Change::Away(id) => (
+                RemoteStatus::Away(short(&id)),
+                Some(format!("remote: device {} disconnected", short(&id))),
             ),
-            HostEvent::Refused(id) => {
-                return Some(format!("remote: refused device {}", short(id)));
+            Change::Refused(id) => {
+                return Some(format!("remote: refused device {}", short(&id)));
             }
         };
         self.status = status;
@@ -97,6 +98,15 @@ impl RemoteView {
     }
 }
 
+/// What happened to the device, as the modal tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Change {
+    Paired(EndpointId),
+    Back(EndpointId),
+    Away(EndpointId),
+    Refused(EndpointId),
+}
+
 /// The host and its plumbing, owned by `run_app`: dropping it (the
 /// session ends or switches) stops the host and any start in flight.
 #[derive(Default)]
@@ -104,6 +114,8 @@ pub(crate) struct RemoteControl {
     host: Option<RemoteHost>,
     starting: Option<JoinHandle<anyhow::Result<RemoteHost>>>,
     events: Option<UnboundedReceiver<HostEvent>>,
+    /// The device's link while one is connected.
+    link: Option<Link>,
 }
 
 impl Drop for RemoteControl {
@@ -163,11 +175,37 @@ impl RemoteControl {
             }
         }
         while let Some(event) = self.events.as_mut().and_then(|rx| rx.try_recv().ok()) {
+            let Some(change) = self.take_event(event) else {
+                continue;
+            };
             if let Some(view) = app.remote.as_mut()
-                && let Some(notice) = view.apply(&event)
+                && let Some(notice) = view.apply(change)
             {
                 app.set_notice(notice, NoticeLevel::Info);
             }
+        }
+    }
+
+    /// Keeps the newest link; a disconnect of one already replaced is
+    /// old news and changes nothing.
+    fn take_event(&mut self, event: HostEvent) -> Option<Change> {
+        match event {
+            HostEvent::Paired { peer, link } => {
+                self.link = Some(link);
+                Some(Change::Paired(peer))
+            }
+            HostEvent::Welcome { peer, link } => {
+                self.link = Some(link);
+                Some(Change::Back(peer))
+            }
+            HostEvent::Disconnected { peer, serial } => {
+                let current = self.link.as_ref().is_some_and(|l| l.serial == serial);
+                current.then(|| {
+                    self.link = None;
+                    Change::Away(peer)
+                })
+            }
+            HostEvent::Refused(peer) => Some(Change::Refused(peer)),
         }
     }
 
@@ -183,6 +221,7 @@ impl RemoteControl {
             starting.abort();
         }
         self.events = None;
+        self.link = None;
         if let Some(host) = self.host.take() {
             tokio::spawn(host.stop());
         }
@@ -302,19 +341,56 @@ mod tests {
     fn pairing_connects_and_a_drop_leaves_the_device_away() {
         let mut view = RemoteView::ready("https://x/#t".into());
         let phone = device();
-        assert!(view.apply(&HostEvent::Paired(phone)).is_some());
+        assert!(view.apply(Change::Paired(phone)).is_some());
         assert_eq!(view.status, RemoteStatus::Connected(short(&phone)));
-        view.apply(&HostEvent::Disconnected(phone));
+        view.apply(Change::Away(phone));
         assert_eq!(view.status, RemoteStatus::Away(short(&phone)));
-        assert_eq!(view.apply(&HostEvent::Welcome(phone)), None);
+        assert_eq!(view.apply(Change::Back(phone)), None);
         assert_eq!(view.status, RemoteStatus::Connected(short(&phone)));
     }
 
     #[test]
     fn a_refused_device_is_a_notice_not_a_status() {
         let mut view = RemoteView::ready("https://x/#t".into());
-        assert!(view.apply(&HostEvent::Refused(device())).is_some());
+        assert!(view.apply(Change::Refused(device())).is_some());
         assert_eq!(view.status, RemoteStatus::Waiting);
+    }
+
+    fn link(serial: u64) -> Link {
+        let (to_device, _) = tokio::sync::mpsc::unbounded_channel();
+        let (_, from_device) = tokio::sync::mpsc::unbounded_channel();
+        Link {
+            serial,
+            to_device,
+            from_device,
+        }
+    }
+
+    #[test]
+    fn the_replaced_link_going_away_is_old_news() {
+        let mut control = RemoteControl::default();
+        let phone = device();
+        let paired = HostEvent::Paired {
+            peer: phone,
+            link: link(0),
+        };
+        assert_eq!(control.take_event(paired), Some(Change::Paired(phone)));
+        let back = HostEvent::Welcome {
+            peer: phone,
+            link: link(1),
+        };
+        assert_eq!(control.take_event(back), Some(Change::Back(phone)));
+        let stale = HostEvent::Disconnected {
+            peer: phone,
+            serial: 0,
+        };
+        assert_eq!(control.take_event(stale), None);
+        let current = HostEvent::Disconnected {
+            peer: phone,
+            serial: 1,
+        };
+        assert_eq!(control.take_event(current), Some(Change::Away(phone)));
+        assert!(control.link.is_none());
     }
 
     fn screen(view: &RemoteView, width: u16, height: u16) -> String {

@@ -14,14 +14,17 @@ connection: session events out, user input in.
 - A reconnect resumes from the snapshot; no event log on the phone.
 - Versioned ALPN (`ilar/remote/1`).
 
-- `HostEvent::Paired`/`Welcome` hand the `Connection` to the session,
-  which runs the wire; `serve` in `ilar-remote/src/host.rs` then ends
-  after the handshake.
+- One bi-stream per connection, newline-delimited JSON: `Hello` and
+  `Welcome` first, then `ToDevice` / `FromDevice` (`ilar-remote/src/wire.rs`).
+  `HostEvent::Paired`/`Welcome` hand the TUI a `Link` (two channels and
+  a serial).
 - The pinned peer's newest connection wins; the older one is closed (a
   phone that changes network reconnects before the old one times out).
-- Bound unpaired handshakes (a semaphore of about 8) and report at most
-  one `Refused` per peer, so a peer that knows the id cannot flood the
-  TUI.
+- Bound unpaired handshakes (a semaphore of 8; over it, close code 503
+  BUSY, not 403) and report at most one `Refused` per 10 s, so a peer
+  that knows the id cannot flood the TUI.
+- Events are the web projection of the log (`web::view`, as share and
+  serve use), plus `LiveDelta`s from the `.live` scratch.
 
 ## Acceptance Criteria
 

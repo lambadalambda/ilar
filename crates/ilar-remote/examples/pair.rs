@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     let endpoint = Endpoint::bind(presets::N0).await?;
     let started = std::time::Instant::now();
     let conn = endpoint.connect(ticket.addr(), ALPN).await?;
-    client::hello(&conn, Some(&ticket.secret)).await?;
+    let _session = client::hello(&conn, Some(&ticket.secret)).await?;
     println!("paired as {} in {:?}", endpoint.id(), started.elapsed());
     tokio::signal::ctrl_c().await?;
     conn.close(0u32.into(), b"bye");

@@ -10,6 +10,7 @@ pub mod client;
 pub mod host;
 pub mod pairing;
 pub mod ticket;
+pub mod wire;
 
 pub use iroh::{EndpointId, SecretKey};
 pub use pairing::{Pairing, Secret, Verdict};
@@ -22,5 +23,8 @@ pub const ALPN: &[u8] = b"ilar/remote/1";
 /// it never reaches the web server.
 pub const DEFAULT_WEB_BASE: &str = "https://lambadalambda.github.io/ilar/";
 
-/// Close code a refused peer sees.
+/// Close code a refused peer sees: final, scan a new code.
 pub const REFUSED: u32 = 403;
+/// Close code for a handshake the host could not take now (too many
+/// at once, or a hello that never came): try again.
+pub const BUSY: u32 = 503;
