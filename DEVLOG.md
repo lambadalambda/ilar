@@ -1,5 +1,20 @@
 # DEVLOG
 
+## The remote wire
+
+After the handshake the same bi-stream carries newline-delimited JSON
+both ways, so a device needs one stream, not two. The device sees the
+log through the web projection share and serve already use, plus the
+`.live` scratch; `LiveTail` moved from serve to the core for it. Three
+traps the reviews found: a second prompt in the same loop pass saw the
+loop as idle (the first turn was only queued in `intents`) and would
+have started a second root turn; a phone prompt took the terminal's
+pending images, because every turn intent takes them; and a late grant
+answer could land on a newer prompt, so the answer now names its
+secret. The phone's prompts wait for a quiet terminal (the same rule as
+synthetic submits). A handshake the host cannot take now closes with
+503, a refusal with 403, so the phone can tell retry from final.
+
 ## /remote pairs a device
 
 `/remote` starts an iroh endpoint with a fresh key for the session and

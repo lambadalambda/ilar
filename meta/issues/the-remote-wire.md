@@ -30,3 +30,21 @@ connection: session events out, user input in.
 
 - Wire round trips are tested in-process (two native endpoints).
 - The events come from the same fold the TUI uses where one exists.
+
+## Outcome
+
+Done 2026-11-26. `ilar-remote/src/wire.rs` has the frames; the host
+hands the TUI a `Link`, and `remote.rs` feeds it a snapshot (the
+`web::view` projection share and serve use), log appends, `.live`
+deltas (serve's `LiveTail`, moved to the core), busy and the open
+prompt. Phone commands go through `apply_remote_command` in `main.rs`,
+which shares `decide::submit`, `answer_grant` and `abort_turn` with the
+keys. Live on tenco through n0's relay: a phone prompt started a real
+turn, a second one queued, `/sessions` was refused, cancel answered.
+Streaming text deltas were not seen live (the OpenCode key was
+expired); the core `LiveTail` test covers them.
+
+Known gaps, each marked in the code: the snapshot is the whole log in
+one message (no paging); a question restored from the log is answered
+at the terminal only; an unknown `/command` from the phone is refused
+by `prepare_prompt` without telling the phone.

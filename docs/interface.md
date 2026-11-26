@@ -313,11 +313,24 @@ through n0's public relay, encrypted end to end; no server of ours is
 involved. Esc closes the modal and leaves remote control on; `/remote`
 opens it again, and `/remote stop` ends it. Switching session or
 quitting ends it too, and every start makes a new key, so an old code
-reaches nothing.
+reaches nothing. The status line ends in `⇄ remote` while it is on and
+`⇄ phone` while a device is connected.
 
-The phone side (a web app on GitHub Pages) is not built yet; for now
-`cargo run -p ilar-remote --example pair -- <link>` pairs from a
-terminal.
+A paired device sees the session as the web share renders it, with
+the running step streaming, and whether a tool waits on a grant or a
+question. It can send what you would type (a new turn, a steer, or a
+queued message), answer a grant or a question, and cancel the running
+turn. Two limits keep it from stepping on the terminal: a prompt waits
+until the terminal has no draft, attachment or menu open, and the
+commands that only the terminal can show (`/sessions`, `/rewind`,
+`/fork`, `/btw`, `/memory`, `/context`, `/remote` except `/remote stop`)
+are refused. Passwords are only ever typed at the terminal.
+
+The phone side (a web app on GitHub Pages) is not built yet. For now
+`cargo run -p ilar-remote --example pair -- <link>` is a terminal
+stand-in: it prints what the session sends and sends each line you
+type (`/cancel`, `/grant <secret> once|session|always|deny`, or a
+prompt).
 
 ## Switching sessions: `/sessions`
 
