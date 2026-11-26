@@ -134,6 +134,14 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [Import Claude Code's memories](issues/import-claude-codes-memories.md)
 
+## Milestone 28 — Remote control
+
+- [ ] [Remote control over iroh — index](issues/remote-control-over-iroh-index.md) — index
+- [ ] [iroh reaches a browser](issues/iroh-reaches-a-browser.md)
+- [ ] [A session pairs by QR](issues/a-session-pairs-by-qr.md)
+- [ ] [The remote wire](issues/the-remote-wire.md)
+- [ ] [The remote PWA](issues/the-remote-pwa.md)
+
 ## Review follow-ups
 
 - [ ] [Muse Spark rejects a long image session](issues/muse-spark-rejects-a-long-image-session.md)
