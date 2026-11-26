@@ -1,0 +1,49 @@
+/* The pairing screen, in the app's own tokens (app.css loads first). */
+.pair {
+  max-width: 32rem;
+  margin: 0 auto;
+  padding: calc(32px + env(safe-area-inset-top)) 18px 24px;
+}
+.pair h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+.pair p {
+  color: var(--dim);
+}
+.pair-row {
+  display: flex;
+  gap: 8px;
+  margin: 16px 0;
+}
+.pair-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+  font-size: 16px;
+}
+.pair button {
+  min-height: 44px;
+  padding: 8px 16px;
+  color: var(--fg);
+  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font: inherit;
+}
+.pair video {
+  width: 100%;
+  margin-top: 12px;
+  border-radius: var(--radius);
+}
+.pair-error {
+  color: var(--err) !important;
+}
+.pair-status {
+  font-size: 13px;
+}

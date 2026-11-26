@@ -79,7 +79,7 @@ pub(crate) fn payload(
                     urlish(&child.id),
                     urlish(call)
                 ),
-                page_of(&child.id, slice, Value::Null),
+                super::view::page(&child.id, slice, Value::Null, false, slice.len()),
             );
             cut_results(&child_events, slice, &child.id, &mut extra);
         }
@@ -90,25 +90,8 @@ pub(crate) fn payload(
         "session": session,
         "children": children,
         "extra": extra,
-        "page": page_of(session_id, &events, session),
+        "page": super::view::page(session_id, &events, session, false, events.len()),
     }))
-}
-
-/// One transcript page in the shape `/api/sessions/{id}` answers —
-/// the whole of `events` as a single page, since a file has nothing
-/// left to scroll back to. `session` is the listing row, or null for a
-/// child slice, which the server does not summarise either.
-fn page_of(id: &str, events: &[SessionEvent], session: Value) -> Value {
-    json!({
-        "id": id,
-        "session": session,
-        "events": super::view::project_page(events, events, false),
-        "cursor": 0,
-        "has_more": false,
-        "count": events.len(),
-        "line": events.len(),
-        "usage": super::view::usage_totals(events),
-    })
 }
 
 /// The full text behind every result in `page` the projection had to

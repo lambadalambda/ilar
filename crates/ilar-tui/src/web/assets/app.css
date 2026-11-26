@@ -994,6 +994,109 @@ pre.diff .ctx {
   }
 }
 
+/* ----------------------------------------------------------- asks */
+
+/* What a paired phone answers for the session: a grant or a question,
+   above the pill, in the composer's width. */
+.ask {
+  max-width: 52rem;
+  margin: 0 auto 10px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.ask h2 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+.ask-note {
+  margin: 0 0 8px;
+  color: var(--dim);
+  font-size: 13px;
+}
+.ask-detail {
+  max-height: 30vh;
+  overflow: auto;
+}
+.ask-question {
+  margin: 0 0 10px;
+  padding: 0;
+  border: none;
+}
+.ask-question legend {
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+.ask-option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+}
+.ask-option small {
+  color: var(--dim);
+}
+.ask-other {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  color: var(--fg);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font: inherit;
+}
+.ask-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ask-yes,
+.ask-no {
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.ask-yes {
+  background: var(--accent-soft);
+}
+.ask-no {
+  color: var(--err);
+}
+
+/* ---------------------------------------------------------- phones */
+
+/* Touch: every control a finger can hit, text the browser will not zoom
+   into on focus (iOS zooms anything under 16px), and room for the home
+   indicator. */
+@media (max-width: 820px) {
+  .composer {
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
+  }
+  .prompt,
+  .ask-other,
+  .ask textarea {
+    font-size: 16px;
+  }
+  .send,
+  .abort {
+    min-height: 40px;
+    padding: 8px 16px;
+  }
+  .drawer-toggle {
+    min-width: 40px;
+    min-height: 40px;
+  }
+}
+@media (max-width: 520px) {
+  .pill-facts {
+    display: none;
+  }
+}
+
 /* ------------------------------------------------------------ light */
 
 /* The same page in daylight: surfaces lift, chrome stays damped, and the

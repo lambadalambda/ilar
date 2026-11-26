@@ -23,3 +23,15 @@ the remote wire.
 
 - Installed on a phone, it pairs with a session on another network and
   passes the index issue's acceptance run.
+
+## Status 2026-11-27
+
+Built: `web/remote` (shell, pairing, service worker), the wasm client in
+`crates/ilar-remote-web`, a `REMOTE` source in the shared `app.js` with
+grant and question cards, `scripts/build-remote-web.sh`, and the Pages
+workflow. Checked in headless Chrome at phone size against a live TUI
+over n0's relay (paired in 1.8 s, a message started a turn) and with
+`scripts/remote-web-checks/cards.*`. Open: a real phone on another
+network; iOS has no in-app scanner (the system camera opens the link);
+the app shares `lambadalambda.github.io`'s storage with other Pages
+sites of that account.

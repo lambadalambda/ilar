@@ -1,5 +1,18 @@
 # DEVLOG
 
+## The phone app reuses the share renderer
+
+`web/remote` is a shell around the same `app.js` that `ilar serve` and
+share files use, with a third source beside them: `REMOTE`, set by
+`remote.js` from the wire. The snapshot is serve's page shape, and each
+append carries its log line, so `fold` and the status pill work
+unchanged; a new snapshot is a `resync`. The browser client is iroh in
+WebAssembly (4.0 MB, no size tuning yet), with the device key kept in
+`localStorage`: pairing pins it, so a new key after a reload would be
+refused for good. A review caught appends lost while `app.js` was still
+loading; `remote.js` now folds every frame into its own copy of the
+page and hands the renderer a copy.
+
 ## The remote wire
 
 After the handshake the same bi-stream carries newline-delimited JSON

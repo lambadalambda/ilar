@@ -137,7 +137,7 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 28 — Remote control
 
 - [ ] [Remote control over iroh — index](issues/remote-control-over-iroh-index.md) — index
-- [ ] [The remote PWA](issues/the-remote-pwa.md)
+- [ ] [The remote PWA](issues/the-remote-pwa.md) — *built and deployed; awaiting a real phone*
 
 ## Review follow-ups
 

@@ -70,13 +70,14 @@ fn command(line: &str) -> Option<FromDevice> {
 fn summary(message: &ToDevice) -> String {
     let text = match message {
         ToDevice::Snapshot {
-            events,
+            page,
             live,
             busy,
             prompt,
         } => format!(
-            "snapshot: {} events, {} live, busy {busy}, prompt {}",
-            events.len(),
+            "snapshot: {} events at line {}, {} live, busy {busy}, prompt {}",
+            page["events"].as_array().map_or(0, Vec::len),
+            page["line"],
             live.len(),
             prompt.is_some()
         ),

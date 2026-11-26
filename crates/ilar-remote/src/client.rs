@@ -59,16 +59,43 @@ impl std::error::Error for Refused {}
 
 /// A paired session, from the device's side.
 pub struct Session {
-    send: SendStream,
-    reader: Reader,
+    sender: Sender,
+    receiver: Receiver,
 }
 
 impl Session {
     pub async fn send(&mut self, message: &FromDevice) -> Result<()> {
-        wire::write(&mut self.send, message).await
+        self.sender.send(message).await
     }
 
     /// `None` when the session closed the stream.
+    pub async fn next(&mut self) -> Result<Option<ToDevice>> {
+        self.receiver.next().await
+    }
+
+    /// The two halves, for a caller that reads and sends at once.
+    pub fn split(self) -> (Sender, Receiver) {
+        (self.sender, self.receiver)
+    }
+}
+
+pub struct Sender {
+    send: SendStream,
+}
+
+impl Sender {
+    /// Not cancel-safe: a send dropped halfway leaves half a line.
+    pub async fn send(&mut self, message: &FromDevice) -> Result<()> {
+        wire::write(&mut self.send, message).await
+    }
+}
+
+pub struct Receiver {
+    reader: Reader,
+}
+
+impl Receiver {
+    /// `None` when the session closed the stream. Cancel-safe.
     pub async fn next(&mut self) -> Result<Option<ToDevice>> {
         self.reader.next().await
     }
@@ -87,7 +114,10 @@ pub async fn hello(conn: &Connection, secret: Option<&Secret>) -> Result<Session
         .map_err(refused_or)?;
     let mut reader = Reader::new(recv, MAX_TO_DEVICE);
     match reader.next::<Welcome>().await.map_err(refused_or)? {
-        Some(Welcome { ok: true }) => Ok(Session { send, reader }),
+        Some(Welcome { ok: true }) => Ok(Session {
+            sender: Sender { send },
+            receiver: Receiver { reader },
+        }),
         _ => Err(refused_or(anyhow::anyhow!(
             "the session closed the handshake"
         ))),

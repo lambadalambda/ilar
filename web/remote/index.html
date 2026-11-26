@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- ilar remote: a phone's window on one TUI session. remote.js pairs
+     over iroh (WebAssembly in ./pkg) and then loads the same app.js that
+     `ilar serve` and share files use, with the session as its source.
+     Every path is relative: GitHub Pages serves this under /ilar/. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="theme-color" content="#16181c" />
+    <title>ilar remote</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="remote.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "preact": "./vendor/preact.module.js",
+          "preact/hooks": "./vendor/hooks.module.js",
+          "htm": "./vendor/htm.module.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <main id="pair" class="pair" hidden>
+      <h1>ilar remote</h1>
+      <p>Run <code>/remote</code> in an ilar session, then scan its code or paste its link.</p>
+      <p id="pair-error" class="pair-error" hidden></p>
+      <div class="pair-row">
+        <input id="pair-link" type="url" placeholder="https://…/ilar/#…" autocomplete="off" />
+        <button id="pair-go" type="button">connect</button>
+      </div>
+      <button id="pair-scan" type="button" hidden>scan the code</button>
+      <video id="pair-video" playsinline muted hidden></video>
+      <p id="pair-status" class="pair-status"></p>
+    </main>
+    <script type="module" src="remote.js"></script>
+  </body>
+</html>

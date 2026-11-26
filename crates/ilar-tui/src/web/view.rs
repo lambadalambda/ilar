@@ -580,6 +580,31 @@ pub(crate) fn session_summary(
     })
 }
 
+/// One transcript page in the shape `/api/sessions/{id}` answers: the
+/// whole of `events` as one page. `live` says a turn is running (a tool
+/// without a result is working, not abandoned), and `line` is the
+/// physical log line the page stands on, so a client folding appends
+/// after it refuses the ones it already has. Share and remote build
+/// their pages here.
+pub(crate) fn page(
+    id: &str,
+    events: &[SessionEvent],
+    session: Value,
+    live: bool,
+    line: usize,
+) -> Value {
+    json!({
+        "id": id,
+        "session": session,
+        "events": project_page(events, events, live),
+        "cursor": 0,
+        "has_more": false,
+        "count": events.len(),
+        "line": line,
+        "usage": usage_totals(events),
+    })
+}
+
 /// Session totals for a header: tokens always, dollars when every turn's
 /// model has a published price. An unpriced model poisons the dollar
 /// figure (the fold lives in `session_view`, shared with the TUI status

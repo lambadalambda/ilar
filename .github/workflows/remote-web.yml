@@ -1,0 +1,54 @@
+# Builds the /remote phone app (web/remote, the wasm client, the shared
+# renderer) and publishes it on GitHub Pages, where the QR code's link
+# points (ilar_remote::DEFAULT_WEB_BASE).
+name: remote web app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - web/remote/**
+      - crates/ilar-remote/**
+      - crates/ilar-remote-web/**
+      - crates/ilar-tui/src/web/assets/**
+      - scripts/build-remote-web.sh
+      - Cargo.lock
+      - .github/workflows/remote-web.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned wasm-bindgen
+        run: |
+          version=$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' crates/ilar-remote-web/Cargo.toml)
+          cargo install wasm-bindgen-cli --version "$version" --locked
+      - run: scripts/build-remote-web.sh _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
