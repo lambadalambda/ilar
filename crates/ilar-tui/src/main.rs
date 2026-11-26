@@ -1136,7 +1136,7 @@ fn deliver_answer<T>(
     answer: T,
     line: String,
     status: &str,
-) {
+) -> bool {
     let delivered = reply.take().is_some_and(|reply| reply.send(answer).is_ok());
     if delivered {
         app.push_transcript_line(Line_::System(line));
@@ -1147,6 +1147,7 @@ fn deliver_answer<T>(
             "{line} — but the tool had stopped waiting"
         )));
     }
+    delivered
 }
 
 /// The frontmatter a command carries into its invocation — see
@@ -3416,6 +3417,127 @@ fn detached_clause(detached: usize) -> &'static str {
     }
 }
 
+/// Esc's abort of the running turn, also the phone's cancel. `false`
+/// when nothing cancellable runs.
+fn abort_turn(
+    app: &mut App,
+    cancel: Option<&CancellationToken>,
+    notifications_paused: &mut bool,
+) -> bool {
+    let Some(cancel) = cancel.filter(|_| app.busy) else {
+        return false;
+    };
+    cancel.cancel();
+    app.status = "aborting…".into();
+    let detached = pause_for_detached(app, notifications_paused);
+    app.set_notice(abort_notice(detached), NoticeLevel::Warning);
+    app.set_activity(Activity::Aborting);
+    true
+}
+
+/// The open grant prompt's answer, from a key or from the phone.
+/// `false` when the tool had stopped waiting.
+fn answer_grant(
+    app: &mut App,
+    grant_reply: &mut Option<tokio::sync::oneshot::Sender<Option<ilar::secrets::Grant>>>,
+    answer: Option<ilar::secrets::Grant>,
+) -> bool {
+    let Some(modal) = app.grant_modal.take() else {
+        return false;
+    };
+    let line = modal.outcome_line(answer);
+    deliver_answer(app, grant_reply, answer, line, "processing grant")
+}
+
+/// A command from the paired phone, done the way the keys do it. A
+/// prompt goes through `decide::submit` like typed text, but never
+/// touches the draft. Returns what the phone should be told, if the
+/// command could not be done.
+#[allow(clippy::too_many_arguments)]
+fn apply_remote_command(
+    app: &mut App,
+    command: ilar_remote::wire::FromDevice,
+    state: &LoopState,
+    intents: &mut Vec<Intent>,
+    steer: Option<&ilar::agent::SteerSender>,
+    grant_reply: &mut Option<tokio::sync::oneshot::Sender<Option<ilar::secrets::Grant>>>,
+    question_reply: &mut Option<tokio::sync::oneshot::Sender<ilar::question::QuestionResponse>>,
+    pending_question_id: &mut Option<String>,
+    cancel: Option<&CancellationToken>,
+    notifications_paused: &mut bool,
+) -> Option<String> {
+    use ilar_remote::wire::{FromDevice, GrantAnswer};
+    match command {
+        FromDevice::Prompt { text } => {
+            // A turn this pass already decided to start is running as far
+            // as the next prompt is concerned: two starts in one pass
+            // would orphan the first turn. So the second one queues.
+            let starting = intents.iter().any(|intent| {
+                matches!(
+                    intent,
+                    Intent::StartTurn(_) | Intent::ResumeTurn | Intent::SendQueued
+                )
+            });
+            let state = LoopState {
+                turn_running: state.turn_running || starting,
+                steerable: state.steerable && !starting,
+                ..*state
+            };
+            let decided = decide::remote_submit(&state, app.busy || starting, text);
+            let told = decided.iter().find_map(|intent| match intent {
+                Intent::Notice(text, NoticeLevel::Warning | NoticeLevel::Error) => {
+                    Some(text.clone())
+                }
+                Intent::Queue(_) => Some("queued until the current turn ends".into()),
+                _ => None,
+            });
+            apply_event_intents(app, decided, intents, steer);
+            told
+        }
+        FromDevice::Grant { secret, answer } => {
+            // The phone names the prompt it answers: a late answer must
+            // not land on a newer grant for something else.
+            if app.grant_modal.as_ref().map(|m| m.secret()) != Some(secret.as_str()) {
+                return Some("that grant prompt is gone".into());
+            }
+            let answer = answer.map(|answer| match answer {
+                GrantAnswer::Once => ilar::secrets::Grant::Once,
+                GrantAnswer::Session => ilar::secrets::Grant::Session,
+                GrantAnswer::Always => ilar::secrets::Grant::Always,
+            });
+            (!answer_grant(app, grant_reply, answer)).then(|| "the tool had stopped waiting".into())
+        }
+        FromDevice::Question { response } => {
+            let Some(modal) = &app.question_modal else {
+                return Some("no question is open now".into());
+            };
+            let response: ilar::question::QuestionResponse = match serde_json::from_value(response)
+            {
+                Ok(response) => response,
+                Err(error) => return Some(format!("a malformed answer: {error}")),
+            };
+            if let Err(error) = response.validate(modal.request()) {
+                return Some(format!("the answer does not fit the question: {error}"));
+            }
+            // APPROXIMATION: a question restored from the log has no
+            // live reply channel; answering it starts a turn, which
+            // needs the key handler's turn slots. Rare (only after a
+            // resume), so the phone defers to the terminal for now.
+            let Some(reply) = question_reply.take() else {
+                return Some("answer this question at the terminal".into());
+            };
+            app.question_modal = None;
+            app.status = "processing answer".into();
+            app.set_activity(Activity::Tools);
+            let _ = reply.send(response);
+            *pending_question_id = None;
+            None
+        }
+        FromDevice::Cancel => (!abort_turn(app, cancel, notifications_paused))
+            .then(|| "nothing is running to cancel".into()),
+    }
+}
+
 /// Every abort of a turn pauses notifications when something is
 /// detached: its completions would otherwise start a fresh turn nobody
 /// asked for, right after the person stopped one.
@@ -4206,6 +4328,30 @@ async fn run_app(
             }
         }
         remote_control.tick(app, store, session_id);
+        // The phone's commands, done as the keys would do them.
+        for command in remote_control.commands() {
+            let state = observe(
+                app,
+                &turn_handle,
+                &pending_terminal_event,
+                &steer_tx,
+                notifications_paused,
+            );
+            if let Some(text) = apply_remote_command(
+                app,
+                command,
+                &state,
+                &mut intents,
+                steer_tx.as_ref(),
+                &mut grant_reply,
+                &mut question_reply,
+                &mut pending_question_id,
+                cancel.as_ref(),
+                &mut notifications_paused,
+            ) {
+                remote_control.notify(text);
+            }
+        }
         // The memory menu reads the store and this session's recalls.
         if let Some(filter) = app.memory_menu_requested.take() {
             let menu = match &app.memory {
@@ -4769,15 +4915,7 @@ async fn run_app(
                         Modal::Grant => {
                             let modal = app.grant_modal.as_mut().expect("grant modal");
                             if let GrantAction::Answer(answer) = modal.handle_key(key) {
-                                let line = modal.outcome_line(answer);
-                                app.grant_modal = None;
-                                deliver_answer(
-                                    app,
-                                    &mut grant_reply,
-                                    answer,
-                                    line,
-                                    "processing grant",
-                                );
+                                answer_grant(app, &mut grant_reply, answer);
                             }
                         }
                         Modal::PendingManager => match app.pending_manager_key(code, control) {
@@ -5736,13 +5874,7 @@ async fn run_app(
                                 "a rewind cannot be aborted — it finishes in seconds",
                                 NoticeLevel::Warning,
                             );
-                        } else if let Some(cancel) = cancel.as_ref().filter(|_| app.busy) {
-                            cancel.cancel();
-                            app.status = "aborting…".into();
-                            let detached = pause_for_detached(app, &mut notifications_paused);
-                            app.set_notice(abort_notice(detached), NoticeLevel::Warning);
-                            app.set_activity(Activity::Aborting);
-                        } else {
+                        } else if !abort_turn(app, cancel.as_ref(), &mut notifications_paused) {
                             // Busy with nothing to cancel — the restore
                             // holds `busy` for itself — still answers:
                             // the draft is the user's either way, and a
@@ -5996,6 +6128,110 @@ async fn run_app(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The run_app state a phone command reaches, with nothing open.
+    #[derive(Default)]
+    struct Slots {
+        intents: Vec<super::Intent>,
+        grant_reply: Option<tokio::sync::oneshot::Sender<Option<ilar::secrets::Grant>>>,
+        question_reply: Option<tokio::sync::oneshot::Sender<ilar::question::QuestionResponse>>,
+        pending_question_id: Option<String>,
+        cancel: Option<super::CancellationToken>,
+        paused: bool,
+    }
+
+    fn remote(
+        app: &mut super::App,
+        slots: &mut Slots,
+        command: ilar_remote::wire::FromDevice,
+    ) -> Option<String> {
+        let state = super::LoopState {
+            input_blank: true,
+            turn_running: app.busy,
+            ..Default::default()
+        };
+        super::apply_remote_command(
+            app,
+            command,
+            &state,
+            &mut slots.intents,
+            None,
+            &mut slots.grant_reply,
+            &mut slots.question_reply,
+            &mut slots.pending_question_id,
+            slots.cancel.as_ref(),
+            &mut slots.paused,
+        )
+    }
+
+    #[test]
+    fn a_phone_prompt_starts_a_turn_like_typed_text_and_a_refusal_goes_back() {
+        use ilar_remote::wire::FromDevice;
+        let prompt = |text: &str| FromDevice::Prompt { text: text.into() };
+        let (mut app, mut slots) = (super::App::new(), Slots::default());
+        assert_eq!(remote(&mut app, &mut slots, prompt("hi")), None);
+        assert_eq!(slots.intents, vec![super::Intent::StartTurn("hi".into())]);
+
+        let refused = remote(&mut app, &mut slots, prompt("/sessions"));
+        assert!(refused.is_some_and(|text| text.contains("at the terminal")));
+    }
+
+    /// Two prompts in one pass of the loop: the first starts a turn, so
+    /// the second must queue behind it, not start a second turn.
+    #[test]
+    fn a_second_phone_prompt_in_one_pass_queues() {
+        use ilar_remote::wire::FromDevice;
+        let prompt = |text: &str| FromDevice::Prompt { text: text.into() };
+        let (mut app, mut slots) = (super::App::new(), Slots::default());
+        remote(&mut app, &mut slots, prompt("one"));
+        let told = remote(&mut app, &mut slots, prompt("two"));
+        assert_eq!(told.as_deref(), Some("queued until the current turn ends"));
+        assert_eq!(slots.intents, vec![super::Intent::StartTurn("one".into())]);
+        assert_eq!(app.queued_messages.len(), 1);
+    }
+
+    #[test]
+    fn a_phone_grant_reaches_the_waiting_tool_and_a_stale_one_does_not() {
+        use ilar_remote::wire::{FromDevice, GrantAnswer};
+        let answer = |secret: &str| FromDevice::Grant {
+            secret: secret.into(),
+            answer: Some(GrantAnswer::Once),
+        };
+        let (mut app, mut slots) = (super::App::new(), Slots::default());
+        let nothing = remote(&mut app, &mut slots, answer("GH_TOKEN"));
+        assert!(nothing.is_some(), "nothing asks");
+
+        let (reply, mut waiting) = tokio::sync::oneshot::channel();
+        let prompt = ilar::secrets::GrantPrompt {
+            session_id: "s".into(),
+            agent: None,
+            tool_call_id: None,
+            tool: "bash".into(),
+            secret: "GH_TOKEN".into(),
+            description: "a token".into(),
+            detail: "gh pr list".into(),
+            reply,
+        };
+        app.grant_modal = Some(crate::grants::GrantModal::new(&prompt, false));
+        slots.grant_reply = Some(prompt.reply);
+        let stale = remote(&mut app, &mut slots, answer("OTHER_TOKEN"));
+        assert_eq!(stale.as_deref(), Some("that grant prompt is gone"));
+        assert_eq!(remote(&mut app, &mut slots, answer("GH_TOKEN")), None);
+        assert_eq!(waiting.try_recv(), Ok(Some(ilar::secrets::Grant::Once)));
+        assert!(app.grant_modal.is_none());
+    }
+
+    #[test]
+    fn a_phone_cancel_aborts_the_running_turn_only() {
+        use ilar_remote::wire::FromDevice;
+        let (mut app, mut slots) = (super::App::new(), Slots::default());
+        assert!(remote(&mut app, &mut slots, FromDevice::Cancel).is_some());
+        let token = super::CancellationToken::new();
+        slots.cancel = Some(token.clone());
+        app.busy = true;
+        assert_eq!(remote(&mut app, &mut slots, FromDevice::Cancel), None);
+        assert!(token.is_cancelled());
+    }
 
     #[test]
     fn exec_accepts_a_reasoning_level() {

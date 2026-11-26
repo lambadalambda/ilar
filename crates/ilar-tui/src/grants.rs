@@ -49,6 +49,10 @@ pub(crate) struct GrantModal {
 }
 
 impl GrantModal {
+    pub(crate) fn secret(&self) -> &str {
+        &self.secret
+    }
+
     /// The ask, as a paired phone sees it.
     pub(crate) fn remote_prompt(&self) -> ilar_remote::wire::Prompt {
         ilar_remote::wire::Prompt::Grant {

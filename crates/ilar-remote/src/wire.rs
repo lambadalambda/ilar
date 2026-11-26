@@ -77,8 +77,10 @@ pub enum FromDevice {
     Prompt {
         text: String,
     },
-    /// `None` refuses.
+    /// `secret` names the prompt answered (from `Prompt::Grant`), so a
+    /// late answer cannot land on a newer prompt. `None` refuses.
     Grant {
+        secret: String,
         answer: Option<GrantAnswer>,
     },
     /// An `ilar::question::QuestionResponse`.
@@ -207,9 +209,13 @@ mod tests {
     #[test]
     fn messages_have_a_stable_json_shape() {
         let line = encode(&FromDevice::Grant {
+            secret: "GH_TOKEN".into(),
             answer: Some(GrantAnswer::Once),
         });
-        assert_eq!(line, b"{\"type\":\"grant\",\"answer\":\"once\"}\n");
+        assert_eq!(
+            line,
+            b"{\"type\":\"grant\",\"secret\":\"GH_TOKEN\",\"answer\":\"once\"}\n"
+        );
         let prompt = ToDevice::Prompt {
             prompt: Some(Prompt::Terminal {
                 detail: "sudo".into(),

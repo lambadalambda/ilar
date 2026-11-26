@@ -9,7 +9,7 @@ use futures::FutureExt;
 use ilar::session::{LiveMessage, LiveTail, SessionStore, SessionTail, TailUpdate, live_path};
 use ilar_remote::EndpointId;
 use ilar_remote::host::{HostEvent, Link, RemoteHost};
-use ilar_remote::wire::{Prompt, ToDevice};
+use ilar_remote::wire::{FromDevice, Prompt, ToDevice};
 use ratatui::Frame;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -192,18 +192,40 @@ impl RemoteControl {
                 app.set_notice(notice, NoticeLevel::Info);
             }
         }
-        if let Some(link) = &self.link {
-            match &mut self.feed {
-                Some(feed) => feed.pump(link, app),
-                None => match Feed::open(link, store, session_id, app) {
-                    Ok(feed) => self.feed = Some(feed),
-                    Err(error) => {
-                        let text = format!("cannot read this session: {error}");
-                        let _ = link.to_device.send(ToDevice::Notice { text });
-                        self.link = None;
-                    }
-                },
+        let Some(link) = &self.link else {
+            return;
+        };
+        let followed = match &mut self.feed {
+            Some(feed) => feed.pump(link, app),
+            None => Feed::open(link, store, session_id, app).map(|feed| self.feed = Some(feed)),
+        };
+        // The log cannot be followed: say so and hang up, rather than
+        // leave the device looking at a log that silently stopped.
+        if let Err(error) = followed {
+            let text = format!("cannot follow this session: {error}");
+            let _ = link.to_device.send(ToDevice::Notice { text });
+            (self.link, self.feed) = (None, None);
+            if let Some(view) = app.remote.as_mut()
+                && let RemoteStatus::Connected(id) = &view.status
+            {
+                view.status = RemoteStatus::Away(id.clone());
             }
+        }
+    }
+
+    /// What the device sent since the last call; `run_app` does them,
+    /// because the reply channels and the turn are its own.
+    pub(crate) fn commands(&mut self) -> Vec<FromDevice> {
+        let Some(link) = self.link.as_mut() else {
+            return Vec::new();
+        };
+        std::iter::from_fn(|| link.from_device.try_recv().ok()).collect()
+    }
+
+    /// Tells the device why its last command did nothing.
+    pub(crate) fn notify(&self, text: String) {
+        if let Some(link) = &self.link {
+            let _ = link.to_device.send(ToDevice::Notice { text });
         }
     }
 
@@ -263,6 +285,12 @@ pub(crate) struct Feed {
 
 impl Feed {
     /// Starts following the session and sends the snapshot.
+    ///
+    /// APPROXIMATION: the snapshot is the whole projected log in one
+    /// message, folded on the TUI's thread, at every (re)connect. Serve
+    /// pages 200 events at a time; a long session may want the same
+    /// (the last N events and a "more" marker). Open question: how long
+    /// do real sessions get before this is felt on a phone?
     pub(crate) fn open(
         link: &Link,
         store: &SessionStore,
@@ -302,11 +330,39 @@ impl Feed {
         });
     }
 
-    /// Sends what changed since the last call.
-    pub(crate) fn pump(&mut self, link: &Link, app: &App) {
+    /// Sends what changed since the last call: committed lines first,
+    /// then the live step, then busy and the prompt, so the device never
+    /// sees "idle" before the turn's last line (serve's order too). An
+    /// error means the log can no longer be followed.
+    pub(crate) fn pump(&mut self, link: &Link, app: &App) -> std::io::Result<()> {
         let send = |message| {
             let _ = link.to_device.send(message);
         };
+        let updates = self.tail.poll()?;
+        // A rewind or a rewritten file: resending is simpler than
+        // explaining.
+        if updates
+            .iter()
+            .any(|u| matches!(u, TailUpdate::Rewound { .. } | TailUpdate::Resync))
+        {
+            (self.busy, self.prompt) = (app.busy, current_prompt(app));
+            self.snapshot(link);
+            return Ok(());
+        }
+        for update in updates {
+            if let TailUpdate::Appended { event, .. } = update {
+                view::harvest_call_inputs(std::slice::from_ref(&event), &mut self.inputs);
+                let event = view::project_event_with(&event, Some(&self.inputs));
+                send(ToDevice::Append { event });
+            }
+        }
+        for message in self.live.poll() {
+            let delta = match message {
+                LiveMessage::Reset => view::live_reset(),
+                LiveMessage::Delta(delta) => view::project_live_delta(&delta),
+            };
+            send(ToDevice::Live { delta });
+        }
         if self.busy != app.busy {
             self.busy = app.busy;
             send(ToDevice::Busy { busy: self.busy });
@@ -316,30 +372,7 @@ impl Feed {
             self.prompt = prompt.clone();
             send(ToDevice::Prompt { prompt });
         }
-        let mut stale = false;
-        for update in self.tail.poll().unwrap_or_default() {
-            match update {
-                TailUpdate::Appended { event, .. } => {
-                    view::harvest_call_inputs(std::slice::from_ref(&event), &mut self.inputs);
-                    let event = view::project_event_with(&event, Some(&self.inputs));
-                    send(ToDevice::Append { event });
-                }
-                // A rewind or a rewritten file: resending is simpler
-                // than explaining.
-                TailUpdate::Rewound { .. } | TailUpdate::Resync => stale = true,
-                TailUpdate::Deleted => {}
-            }
-        }
-        if stale {
-            return self.snapshot(link);
-        }
-        for message in self.live.poll() {
-            let delta = match message {
-                LiveMessage::Reset => view::live_reset(),
-                LiveMessage::Delta(delta) => view::project_live_delta(&delta),
-            };
-            send(ToDevice::Live { delta });
-        }
+        Ok(())
     }
 }
 
@@ -542,7 +575,7 @@ mod tests {
 
         session.append(user("second")).unwrap();
         app.busy = true;
-        feed.pump(&link, &app);
+        feed.pump(&link, &app).unwrap();
         let sent = drain(&mut device);
         assert!(sent.contains(&ToDevice::Busy { busy: true }), "{sent:?}");
         assert!(
@@ -551,7 +584,7 @@ mod tests {
             ),
             "{sent:?}"
         );
-        feed.pump(&link, &app);
+        feed.pump(&link, &app).unwrap();
         assert!(drain(&mut device).is_empty(), "nothing new, nothing sent");
     }
 

@@ -157,6 +157,37 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
     }
 }
 
+pub(crate) const TERMINAL_BUSY: &str =
+    "the terminal has a draft or a menu open; send again when it is clear";
+
+/// Commands whose answer is terminal UI the phone cannot see, or that
+/// leave the session (and so drop the phone).
+const TERMINAL_ONLY: &[&str] = &[
+    "btw", "memory", "context", "sessions", "rewind", "fork", "remote",
+];
+
+/// A prompt from the paired phone. It is typed text for [`submit`],
+/// with two rules typing does not need: it waits for a quiet terminal
+/// (no draft or attachment to take, no menu that a turn would slip
+/// under), and commands that only the terminal can show are refused.
+/// `/remote stop` is the exception: hanging up is the phone's to do.
+pub(crate) fn remote_submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent> {
+    let modal_ok = matches!(state.modal, None | Some(Modal::Remote));
+    if !(modal_ok && state.input_blank && !state.pending_event) {
+        return vec![Intent::Notice(TERMINAL_BUSY.into(), NoticeLevel::Warning)];
+    }
+    if let Some((name, args)) = crate::parse_slash_invocation(&text)
+        && TERMINAL_ONLY.contains(&name)
+        && !(name == "remote" && args == "stop")
+    {
+        return vec![Intent::Notice(
+            format!("/{name} works at the terminal only"),
+            NoticeLevel::Warning,
+        )];
+    }
+    submit(state, busy, text)
+}
+
 /// What submitting the prompt does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubmitTarget {
@@ -745,6 +776,60 @@ mod tests {
         }
         // ×1024² on a count near u64::MAX must fail rather than wrap.
         assert_eq!(parse_context_size("18446744073709551615m"), None);
+    }
+
+    #[test]
+    fn a_phone_prompt_waits_for_a_quiet_terminal() {
+        let drafting = LoopState {
+            input_blank: false,
+            ..idle()
+        };
+        let picking = LoopState {
+            modal: Some(Modal::ModelPicker),
+            ..idle()
+        };
+        for state in [drafting, picking] {
+            assert_eq!(
+                remote_submit(&state, false, "hi".into()),
+                vec![Intent::Notice(TERMINAL_BUSY.into(), NoticeLevel::Warning)],
+                "{state:?}"
+            );
+        }
+        // The QR modal is open while a phone pairs: no reason to wait.
+        let pairing = LoopState {
+            modal: Some(Modal::Remote),
+            ..idle()
+        };
+        assert_eq!(
+            remote_submit(&pairing, false, "hi".into()),
+            vec![Intent::StartTurn("hi".into())]
+        );
+    }
+
+    #[test]
+    fn a_phone_cannot_open_what_only_the_terminal_shows() {
+        for text in [
+            "/sessions",
+            "/btw why",
+            "/rewind",
+            "/fork",
+            "/memory",
+            "/remote",
+        ] {
+            let decided = remote_submit(&idle(), false, text.into());
+            assert!(
+                matches!(&decided[..], [Intent::Notice(n, NoticeLevel::Warning)] if n.contains("at the terminal")),
+                "{text}: {decided:?}"
+            );
+        }
+        assert_eq!(
+            remote_submit(&idle(), false, "/remote stop".into()),
+            vec![Intent::Remote(crate::remote::RemoteCommand::Stop)]
+        );
+        assert_eq!(
+            remote_submit(&idle(), false, "/goal ship it".into()),
+            vec![Intent::StartTurn("/goal ship it".into())]
+        );
     }
 
     #[test]
