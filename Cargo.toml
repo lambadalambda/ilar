@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ilar", "crates/ilar-tui", "crates/ilar-gateway"]
+members = ["crates/ilar", "crates/ilar-tui", "crates/ilar-gateway", "crates/ilar-remote"]
 
 [workspace.package]
 version = "0.3.0"

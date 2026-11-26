@@ -1,0 +1,23 @@
+[package]
+name = "ilar-remote"
+description = "Remote control of one ilar session over iroh: tickets, pairing, host"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The browser client builds this crate for wasm32 too, so iroh stays
+# without default features (no portmapper); ring is the TLS provider.
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+base64 = "0.23"
+getrandom = "0.4"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
