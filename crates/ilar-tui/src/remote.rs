@@ -3,13 +3,18 @@
 //! shows and how host events change it.
 
 use crate::app::App;
+use crate::web::view;
 use crate::{NoticeLevel, theme};
 use futures::FutureExt;
+use ilar::session::{LiveMessage, LiveTail, SessionStore, SessionTail, TailUpdate, live_path};
 use ilar_remote::EndpointId;
 use ilar_remote::host::{HostEvent, Link, RemoteHost};
+use ilar_remote::wire::{Prompt, ToDevice};
 use ratatui::Frame;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+use serde_json::Value;
+use std::collections::HashMap;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 
@@ -116,6 +121,9 @@ pub(crate) struct RemoteControl {
     events: Option<UnboundedReceiver<HostEvent>>,
     /// The device's link while one is connected.
     link: Option<Link>,
+    /// What the device has been told; reopened (with a snapshot) for
+    /// every new link.
+    feed: Option<Feed>,
 }
 
 impl Drop for RemoteControl {
@@ -127,7 +135,7 @@ impl Drop for RemoteControl {
 impl RemoteControl {
     /// Once per frame: takes the request, picks up a finished start and
     /// drains host events into the view.
-    pub(crate) fn tick(&mut self, app: &mut App) {
+    pub(crate) fn tick(&mut self, app: &mut App, store: &SessionStore, session_id: &str) {
         match app.remote_requested.take() {
             Some(RemoteCommand::Open) => {
                 app.remote_visible = true;
@@ -184,6 +192,19 @@ impl RemoteControl {
                 app.set_notice(notice, NoticeLevel::Info);
             }
         }
+        if let Some(link) = &self.link {
+            match &mut self.feed {
+                Some(feed) => feed.pump(link, app),
+                None => match Feed::open(link, store, session_id, app) {
+                    Ok(feed) => self.feed = Some(feed),
+                    Err(error) => {
+                        let text = format!("cannot read this session: {error}");
+                        let _ = link.to_device.send(ToDevice::Notice { text });
+                        self.link = None;
+                    }
+                },
+            }
+        }
     }
 
     /// Keeps the newest link; a disconnect of one already replaced is
@@ -191,17 +212,17 @@ impl RemoteControl {
     fn take_event(&mut self, event: HostEvent) -> Option<Change> {
         match event {
             HostEvent::Paired { peer, link } => {
-                self.link = Some(link);
+                (self.link, self.feed) = (Some(link), None);
                 Some(Change::Paired(peer))
             }
             HostEvent::Welcome { peer, link } => {
-                self.link = Some(link);
+                (self.link, self.feed) = (Some(link), None);
                 Some(Change::Back(peer))
             }
             HostEvent::Disconnected { peer, serial } => {
                 let current = self.link.as_ref().is_some_and(|l| l.serial == serial);
                 current.then(|| {
-                    self.link = None;
+                    (self.link, self.feed) = (None, None);
                     Change::Away(peer)
                 })
             }
@@ -221,10 +242,115 @@ impl RemoteControl {
             starting.abort();
         }
         self.events = None;
-        self.link = None;
+        (self.link, self.feed) = (None, None);
         if let Some(host) = self.host.take() {
             tokio::spawn(host.stop());
         }
+    }
+}
+
+/// What a paired device is told: the session log's web projection (the
+/// same one share and serve use), the running step's deltas from the
+/// `.live` scratch, and the TUI's busy state and open prompt.
+pub(crate) struct Feed {
+    tail: SessionTail,
+    live: LiveTail,
+    /// Tool call inputs by id, so a result projects with its call.
+    inputs: HashMap<String, Value>,
+    busy: bool,
+    prompt: Option<Prompt>,
+}
+
+impl Feed {
+    /// Starts following the session and sends the snapshot.
+    pub(crate) fn open(
+        link: &Link,
+        store: &SessionStore,
+        session_id: &str,
+        app: &App,
+    ) -> std::io::Result<Self> {
+        let mut tail = SessionTail::open(store, session_id)?;
+        // The first poll reads the whole log into the view; the snapshot
+        // carries it, so the updates themselves are not sent.
+        tail.poll()?;
+        let mut feed = Self {
+            tail,
+            live: LiveTail::open(live_path(&store.session_path(session_id)?)),
+            inputs: HashMap::new(),
+            busy: app.busy,
+            prompt: current_prompt(app),
+        };
+        feed.snapshot(link);
+        Ok(feed)
+    }
+
+    fn snapshot(&mut self, link: &Link) {
+        self.live.poll();
+        let events = self.tail.events();
+        self.inputs.clear();
+        view::harvest_call_inputs(events, &mut self.inputs);
+        let _ = link.to_device.send(ToDevice::Snapshot {
+            events: view::project_page(events, events, self.busy),
+            live: self
+                .live
+                .current()
+                .iter()
+                .map(view::project_live_delta)
+                .collect(),
+            busy: self.busy,
+            prompt: self.prompt.clone(),
+        });
+    }
+
+    /// Sends what changed since the last call.
+    pub(crate) fn pump(&mut self, link: &Link, app: &App) {
+        let send = |message| {
+            let _ = link.to_device.send(message);
+        };
+        if self.busy != app.busy {
+            self.busy = app.busy;
+            send(ToDevice::Busy { busy: self.busy });
+        }
+        let prompt = current_prompt(app);
+        if prompt != self.prompt {
+            self.prompt = prompt.clone();
+            send(ToDevice::Prompt { prompt });
+        }
+        let mut stale = false;
+        for update in self.tail.poll().unwrap_or_default() {
+            match update {
+                TailUpdate::Appended { event, .. } => {
+                    view::harvest_call_inputs(std::slice::from_ref(&event), &mut self.inputs);
+                    let event = view::project_event_with(&event, Some(&self.inputs));
+                    send(ToDevice::Append { event });
+                }
+                // A rewind or a rewritten file: resending is simpler
+                // than explaining.
+                TailUpdate::Rewound { .. } | TailUpdate::Resync => stale = true,
+                TailUpdate::Deleted => {}
+            }
+        }
+        if stale {
+            return self.snapshot(link);
+        }
+        for message in self.live.poll() {
+            let delta = match message {
+                LiveMessage::Reset => view::live_reset(),
+                LiveMessage::Delta(delta) => view::project_live_delta(&delta),
+            };
+            send(ToDevice::Live { delta });
+        }
+    }
+}
+
+/// What the session waits on, in the order the modals stack.
+fn current_prompt(app: &App) -> Option<Prompt> {
+    if let Some(modal) = &app.question_modal {
+        Some(modal.remote_prompt())
+    } else if let Some(modal) = &app.grant_modal {
+        Some(modal.remote_prompt())
+    } else {
+        app.password_modal.as_ref().map(|m| m.remote_prompt())
     }
 }
 
@@ -357,13 +483,76 @@ mod tests {
     }
 
     fn link(serial: u64) -> Link {
-        let (to_device, _) = tokio::sync::mpsc::unbounded_channel();
+        linked(serial).0
+    }
+
+    /// A link and the device's end of it.
+    fn linked(serial: u64) -> (Link, UnboundedReceiver<ToDevice>) {
+        let (to_device, device) = tokio::sync::mpsc::unbounded_channel();
         let (_, from_device) = tokio::sync::mpsc::unbounded_channel();
-        Link {
+        let link = Link {
             serial,
             to_device,
             from_device,
+        };
+        (link, device)
+    }
+
+    fn user(text: &str) -> ilar::session::SessionEvent {
+        ilar::session::SessionEvent::UserMessage {
+            id: ilar::session::new_id(),
+            text: text.into(),
+            images: Vec::new(),
+            ts: chrono::Utc::now(),
         }
+    }
+
+    fn drain(device: &mut UnboundedReceiver<ToDevice>) -> Vec<ToDevice> {
+        std::iter::from_fn(|| device.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn the_device_gets_a_snapshot_then_what_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let id = ilar::session::new_id();
+        let mut session = store
+            .create(ilar::session::SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        session.append(user("first")).unwrap();
+        let (link, mut device) = linked(0);
+        let mut app = App::new();
+
+        let mut feed = Feed::open(&link, &store, &id, &app).unwrap();
+        let [ToDevice::Snapshot { events, busy, .. }] = &drain(&mut device)[..] else {
+            panic!("one snapshot first");
+        };
+        assert!(!busy);
+        assert!(
+            events.iter().any(|e| e.to_string().contains("first")),
+            "{events:?}"
+        );
+
+        session.append(user("second")).unwrap();
+        app.busy = true;
+        feed.pump(&link, &app);
+        let sent = drain(&mut device);
+        assert!(sent.contains(&ToDevice::Busy { busy: true }), "{sent:?}");
+        assert!(
+            sent.iter().any(
+                |m| matches!(m, ToDevice::Append { event } if event.to_string().contains("second"))
+            ),
+            "{sent:?}"
+        );
+        feed.pump(&link, &app);
+        assert!(drain(&mut device).is_empty(), "nothing new, nothing sent");
     }
 
     #[test]

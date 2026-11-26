@@ -4205,7 +4205,7 @@ async fn run_app(
                 }
             }
         }
-        remote_control.tick(app);
+        remote_control.tick(app, store, session_id);
         // The memory menu reads the store and this session's recalls.
         if let Some(filter) = app.memory_menu_requested.take() {
             let menu = match &app.memory {

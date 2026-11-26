@@ -98,6 +98,12 @@ pub(crate) struct QuestionModal {
 }
 
 impl QuestionModal {
+    pub(crate) fn remote_prompt(&self) -> ilar_remote::wire::Prompt {
+        ilar_remote::wire::Prompt::Question {
+            request: serde_json::to_value(&self.request).expect("requests serialize"),
+        }
+    }
+
     pub(crate) fn new(request: QuestionRequest) -> Self {
         let drafts = request
             .questions

@@ -112,9 +112,7 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 
-#[cfg(feature = "serve")]
-use ilar::session::LiveDelta;
-use ilar::session::{ContentBlock, ImageContent, SessionEvent, Usage};
+use ilar::session::{ContentBlock, ImageContent, LiveDelta, SessionEvent, Usage};
 
 use crate::diff::{DiffKind, DiffLine};
 
@@ -463,7 +461,6 @@ pub(crate) fn context_limit(model: &str) -> Value {
     })
 }
 
-#[cfg(feature = "serve")]
 /// One line of a running turn's scratch, for the ephemeral `delta`
 /// frame. Same contract as above and the same `type` spelling as the
 /// core enum's serde tag — but nothing here is a canonical event, so it
@@ -509,7 +506,6 @@ pub(crate) fn project_live_delta(delta: &LiveDelta) -> Value {
     }
 }
 
-#[cfg(feature = "serve")]
 /// The frame that retires a client's streaming row: the step committed,
 /// or the turn ended.
 pub(crate) fn live_reset() -> Value {
@@ -1199,8 +1195,7 @@ mod tests {
 
     /// The live frames, with the core enum's own serde spelling — a
     /// client switches on `type` across both halves of the wire.
-    // The live stream is the server's; a share file has no deltas.
-    #[cfg(feature = "serve")]
+    // The live stream is serve's and remote's; a share file has none.
     #[test]
     fn live_deltas_project_with_the_core_spelling() {
         let deltas = [
