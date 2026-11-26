@@ -275,6 +275,9 @@ impl RemoteControl {
 /// same one share and serve use), the running step's deltas from the
 /// `.live` scratch, and the TUI's busy state and open prompt.
 pub(crate) struct Feed {
+    id: String,
+    /// The listing row, as serve and share send it.
+    session: Value,
     tail: SessionTail,
     live: LiveTail,
     /// Tool call inputs by id, so a result projects with its call.
@@ -301,7 +304,10 @@ impl Feed {
         // The first poll reads the whole log into the view; the snapshot
         // carries it, so the updates themselves are not sent.
         tail.poll()?;
+        let head = store.head(session_id)?;
         let mut feed = Self {
+            id: session_id.to_string(),
+            session: view::session_summary(&head, true, "idle", Value::Null),
             tail,
             live: LiveTail::open(live_path(&store.session_path(session_id)?)),
             inputs: HashMap::new(),
@@ -317,8 +323,15 @@ impl Feed {
         let events = self.tail.events();
         self.inputs.clear();
         view::harvest_call_inputs(events, &mut self.inputs);
+        let page = view::page(
+            &self.id,
+            events,
+            self.session.clone(),
+            self.busy,
+            self.tail.line(),
+        );
         let _ = link.to_device.send(ToDevice::Snapshot {
-            events: view::project_page(events, events, self.busy),
+            page,
             live: self
                 .live
                 .current()
@@ -350,10 +363,10 @@ impl Feed {
             return Ok(());
         }
         for update in updates {
-            if let TailUpdate::Appended { event, .. } = update {
+            if let TailUpdate::Appended { line, event } = update {
                 view::harvest_call_inputs(std::slice::from_ref(&event), &mut self.inputs);
                 let event = view::project_event_with(&event, Some(&self.inputs));
-                send(ToDevice::Append { event });
+                send(ToDevice::Append { line, event });
             }
         }
         for message in self.live.poll() {
@@ -564,14 +577,12 @@ mod tests {
         let mut app = App::new();
 
         let mut feed = Feed::open(&link, &store, &id, &app).unwrap();
-        let [ToDevice::Snapshot { events, busy, .. }] = &drain(&mut device)[..] else {
+        let [ToDevice::Snapshot { page, busy, .. }] = &drain(&mut device)[..] else {
             panic!("one snapshot first");
         };
         assert!(!busy);
-        assert!(
-            events.iter().any(|e| e.to_string().contains("first")),
-            "{events:?}"
-        );
+        assert!(page["events"].to_string().contains("first"), "{page}");
+        assert_eq!(page["line"], 2, "meta and one message: {page}");
 
         session.append(user("second")).unwrap();
         app.busy = true;
@@ -580,7 +591,7 @@ mod tests {
         assert!(sent.contains(&ToDevice::Busy { busy: true }), "{sent:?}");
         assert!(
             sent.iter().any(
-                |m| matches!(m, ToDevice::Append { event } if event.to_string().contains("second"))
+                |m| matches!(m, ToDevice::Append { line: 3, event } if event.to_string().contains("second"))
             ),
             "{sent:?}"
         );

@@ -22,15 +22,19 @@ pub enum ToDevice {
     /// The whole picture: on connect, and whenever the log is rewound or
     /// resynced (cheaper to resend than to explain).
     Snapshot {
-        /// Projected log events, oldest first.
-        events: Vec<Value>,
+        /// The whole log as one page, in the shape `ilar serve` answers
+        /// `/api/sessions/{id}` with (`events`, `line`, `session`,
+        /// `usage`, ...), so the same renderer folds it.
+        page: Value,
         /// The running step's deltas so far (`LiveDelta`s).
         live: Vec<Value>,
         busy: bool,
         prompt: Option<Prompt>,
     },
-    /// One event appended to the log.
+    /// One event appended to the log at physical line `line`; a
+    /// client at or past it already has the event.
     Append {
+        line: usize,
         event: Value,
     },
     /// A streaming delta of the running step, or `{"type":"reset"}`
