@@ -49,6 +49,21 @@ pub(crate) struct GrantModal {
 }
 
 impl GrantModal {
+    pub(crate) fn secret(&self) -> &str {
+        &self.secret
+    }
+
+    /// The ask, as a paired phone sees it.
+    pub(crate) fn remote_prompt(&self) -> ilar_remote::wire::Prompt {
+        ilar_remote::wire::Prompt::Grant {
+            tool: self.tool.clone(),
+            secret: self.secret.clone(),
+            description: self.description.clone(),
+            detail: self.detail.clone(),
+            agent: self.agent.clone(),
+        }
+    }
+
     pub(crate) fn new(prompt: &GrantPrompt, from_subagent: bool) -> Self {
         Self {
             tool: prompt.tool.clone(),
@@ -284,6 +299,18 @@ pub(crate) struct PasswordModal {
 }
 
 impl PasswordModal {
+    /// A password is typed at the terminal only; the phone is told that
+    /// something waits there, and for what.
+    pub(crate) fn remote_prompt(&self) -> ilar_remote::wire::Prompt {
+        let what = match &self.wants {
+            Wants::Sudo => "sudo password".to_string(),
+            Wants::Unlock { tool } => format!("master password for {tool}"),
+        };
+        ilar_remote::wire::Prompt::Terminal {
+            detail: format!("{what}: {}", self.detail),
+        }
+    }
+
     pub(crate) fn new(prompt: &PasswordPrompt, from_subagent: bool) -> Self {
         Self::of(
             Wants::Sudo,

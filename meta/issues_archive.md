@@ -509,3 +509,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Keep clipboard images with the submitted message](issues/keep-clipboard-images-with-the-submitted-message.md)
 - [x] [iroh reaches a browser](issues/iroh-reaches-a-browser.md)
 - [x] [A session pairs by QR](issues/a-session-pairs-by-qr.md)
+- [x] [The remote wire](issues/the-remote-wire.md)

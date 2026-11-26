@@ -354,6 +354,110 @@ fn remove_scratches_before(dir: &Path, cutoff: SystemTime) {
     }
 }
 
+/// A scratch larger than this is not one this reader will try to hold in
+/// memory. One step's deltas cannot honestly reach it.
+const SCRATCH_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The scratch half of a tail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveMessage {
+    /// Everything the scratch had said is void: the step committed (so
+    /// the real event is on the main stream), or the turn ended. A
+    /// client drops whatever stand-in it was showing.
+    Reset,
+    Delta(LiveDelta),
+}
+
+/// The scratch half of a tailer: the same "see each line once"
+/// discipline the log tail has, for a file that is allowed to vanish and
+/// start over at any moment.
+///
+/// It reads the whole file each poll rather than a suffix from an
+/// offset, and for one reason: a step commit truncates the scratch and
+/// opens a new generation, and the generation lives in the first line.
+/// Between two polls a new generation can already be *longer* than the
+/// one it replaced, so a length comparison would splice one
+/// generation's lines onto another's. The file holds one step's deltas,
+/// so reading it whole costs nothing.
+#[derive(Debug)]
+pub struct LiveTail {
+    path: PathBuf,
+    /// The current generation's deltas, in the order they were fanned
+    /// out. Kept, not just counted, so a subscriber arriving in the
+    /// middle of a step starts with the row every other client is
+    /// already looking at rather than with whatever comes next.
+    current: Vec<LiveDelta>,
+    /// The `(turn, step)` those deltas belong to; `None` when no scratch
+    /// is open. Both halves, because a turn that never committed leaves
+    /// the next turn starting at step 0 again.
+    generation: Option<(String, u64)>,
+}
+
+impl LiveTail {
+    pub fn open(path: PathBuf) -> Self {
+        Self {
+            path,
+            current: Vec::new(),
+            generation: None,
+        }
+    }
+
+    /// What the running step has said so far — the snapshot a new
+    /// subscriber is handed.
+    pub fn current(&self) -> &[LiveDelta] {
+        &self.current
+    }
+
+    pub fn poll(&mut self) -> Vec<LiveMessage> {
+        let Some(deltas) = self.read() else {
+            // Gone: the turn ended, so whatever a client was showing on
+            // its behalf goes with it.
+            return if self.forget() {
+                vec![LiveMessage::Reset]
+            } else {
+                Vec::new()
+            };
+        };
+        // A head that has not landed yet, or a file this build cannot
+        // read: nothing to fan out, and nothing to forget either.
+        let Some(LiveDelta::TurnStarted { turn, step }) = deltas.first() else {
+            return Vec::new();
+        };
+        let generation = (turn.clone(), *step);
+        // Everything after the generation's own opening line.
+        let content = &deltas[1..];
+        let mut messages = Vec::new();
+        if self.generation.as_ref() != Some(&generation) || content.len() < self.current.len() {
+            if self.forget() {
+                messages.push(LiveMessage::Reset);
+            }
+            self.generation = Some(generation);
+        }
+        messages.extend(
+            content[self.current.len()..]
+                .iter()
+                .cloned()
+                .map(LiveMessage::Delta),
+        );
+        self.current = content.to_vec();
+        messages
+    }
+
+    /// Drop the current generation; `true` when there was one to drop.
+    fn forget(&mut self) -> bool {
+        self.current.clear();
+        self.generation.take().is_some()
+    }
+
+    fn read(&self) -> Option<Vec<LiveDelta>> {
+        let metadata = std::fs::metadata(&self.path).ok()?;
+        if metadata.len() > SCRATCH_MAX_BYTES {
+            return Some(Vec::new());
+        }
+        Some(parse_scratch(&std::fs::read(&self.path).ok()?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +482,41 @@ mod tests {
             live_path(Path::new("/state/sessions/abc-123.jsonl")),
             Path::new("/state/sessions/abc-123.live")
         );
+    }
+
+    /// A reader sees each delta once, a reset at every commit, and a
+    /// reset when the scratch goes away with its turn.
+    #[test]
+    fn a_tail_follows_a_scratch_across_commits_and_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turn.live");
+        let mut tail = LiveTail::open(path.clone());
+        assert!(tail.poll().is_empty(), "no scratch, nothing to say");
+
+        let mut scratch = LiveScratch::create(path.clone());
+        scratch.tool_started("call-1", "bash", "ls");
+        let started = LiveDelta::ToolStarted {
+            id: "call-1".into(),
+            name: "bash".into(),
+            summary: "ls".into(),
+        };
+        assert_eq!(tail.poll(), vec![LiveMessage::Delta(started.clone())]);
+        assert!(tail.poll().is_empty(), "seen once");
+        assert_eq!(tail.current(), [started]);
+
+        scratch.commit();
+        scratch.tool_finished("call-1", true);
+        let finished = LiveDelta::ToolFinished {
+            id: "call-1".into(),
+            ok: true,
+        };
+        assert_eq!(
+            tail.poll(),
+            vec![LiveMessage::Reset, LiveMessage::Delta(finished)]
+        );
+
+        drop(scratch);
+        assert_eq!(tail.poll(), vec![LiveMessage::Reset]);
     }
 
     /// The lifecycle in one test: written, truncated at a commit, gone

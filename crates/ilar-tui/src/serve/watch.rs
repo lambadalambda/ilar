@@ -55,8 +55,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use ilar::session::{
-    LIVE_SUFFIX, LiveDelta, SessionEvent, SessionHead, SessionId, SessionStore, SessionTail,
-    TailUpdate, live_path, parse_scratch,
+    LIVE_SUFFIX, LiveDelta, LiveMessage, LiveTail, SessionEvent, SessionHead, SessionId,
+    SessionStore, SessionTail, TailUpdate, live_path, parse_scratch,
 };
 use tokio::sync::broadcast;
 
@@ -83,9 +83,6 @@ pub(crate) const STALE_SCRATCH: Duration = Duration::from_secs(60);
 /// tool's marker is written the moment it starts, so the newest lines
 /// are the only ones that matter.
 const ACTIVITY_SCAN_BYTES: u64 = 64 * 1024;
-/// A scratch larger than this is not one this reader will try to hold in
-/// memory. One step's deltas cannot honestly reach it.
-const SCRATCH_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// How much of a tool marker rides on a listing row.
 const ACTIVITY_CHARS: usize = 80;
 /// Escape hatch for both intervals; `--poll-ms` outranks it.
@@ -152,16 +149,6 @@ pub(crate) enum TailMessage {
     /// replayed, never resumed, and superseded by the committed line
     /// that follows it.
     Live(LiveMessage),
-}
-
-/// The scratch half of a tail.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LiveMessage {
-    /// Everything the scratch had said is void: the step committed (so
-    /// the real event is on the main stream), or the turn ended. A
-    /// client drops whatever stand-in it was showing.
-    Reset,
-    Delta(LiveDelta),
 }
 
 /// Why a tail is over. Carried on a [`Subscription`] as well as on the
@@ -317,96 +304,6 @@ struct TailState {
     tail: SessionTail,
     live: LiveTail,
     ended: Option<TailEnd>,
-}
-
-/// The scratch half of a tailer: the same "see each line once"
-/// discipline the log tail has, for a file that is allowed to vanish and
-/// start over at any moment.
-///
-/// It reads the whole file each poll rather than a suffix from an
-/// offset, and for one reason: a step commit truncates the scratch and
-/// opens a new generation, and the generation lives in the first line.
-/// Between two polls a new generation can already be *longer* than the
-/// one it replaced, so a length comparison would splice one
-/// generation's lines onto another's. The file holds one step's deltas,
-/// so reading it whole costs nothing.
-#[derive(Debug)]
-struct LiveTail {
-    path: PathBuf,
-    /// The current generation's deltas, in the order they were fanned
-    /// out. Kept, not just counted, so a subscriber arriving in the
-    /// middle of a step starts with the row every other client is
-    /// already looking at rather than with whatever comes next.
-    current: Vec<LiveDelta>,
-    /// The `(turn, step)` those deltas belong to; `None` when no scratch
-    /// is open. Both halves, because a turn that never committed leaves
-    /// the next turn starting at step 0 again.
-    generation: Option<(String, u64)>,
-}
-
-impl LiveTail {
-    fn open(path: PathBuf) -> Self {
-        Self {
-            path,
-            current: Vec::new(),
-            generation: None,
-        }
-    }
-
-    /// What the running step has said so far — the snapshot a new
-    /// subscriber is handed.
-    fn current(&self) -> &[LiveDelta] {
-        &self.current
-    }
-
-    fn poll(&mut self) -> Vec<LiveMessage> {
-        let Some(deltas) = self.read() else {
-            // Gone: the turn ended, so whatever a client was showing on
-            // its behalf goes with it.
-            return if self.forget() {
-                vec![LiveMessage::Reset]
-            } else {
-                Vec::new()
-            };
-        };
-        // A head that has not landed yet, or a file this build cannot
-        // read: nothing to fan out, and nothing to forget either.
-        let Some(LiveDelta::TurnStarted { turn, step }) = deltas.first() else {
-            return Vec::new();
-        };
-        let generation = (turn.clone(), *step);
-        // Everything after the generation's own opening line.
-        let content = &deltas[1..];
-        let mut messages = Vec::new();
-        if self.generation.as_ref() != Some(&generation) || content.len() < self.current.len() {
-            if self.forget() {
-                messages.push(LiveMessage::Reset);
-            }
-            self.generation = Some(generation);
-        }
-        messages.extend(
-            content[self.current.len()..]
-                .iter()
-                .cloned()
-                .map(LiveMessage::Delta),
-        );
-        self.current = content.to_vec();
-        messages
-    }
-
-    /// Drop the current generation; `true` when there was one to drop.
-    fn forget(&mut self) -> bool {
-        self.current.clear();
-        self.generation.take().is_some()
-    }
-
-    fn read(&self) -> Option<Vec<LiveDelta>> {
-        let metadata = std::fs::metadata(&self.path).ok()?;
-        if metadata.len() > SCRATCH_MAX_BYTES {
-            return Some(Vec::new());
-        }
-        Some(parse_scratch(&std::fs::read(&self.path).ok()?))
-    }
 }
 
 /// The tool a scratch says is running: the last one started that nothing

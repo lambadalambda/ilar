@@ -11,8 +11,8 @@ mod tail;
 
 pub use event::{SessionEvent, SessionMeta, SessionState, TurnEnding, TurnFinish, new_id};
 pub use live::{
-    LIVE_SUFFIX, LiveDelta, LiveScratch, SCRATCH_HEARTBEAT, live_path, parse_scratch,
-    sweep_live_scratches,
+    LIVE_SUFFIX, LiveDelta, LiveMessage, LiveScratch, LiveTail, SCRATCH_HEARTBEAT, live_path,
+    parse_scratch, sweep_live_scratches,
 };
 pub use model::{
     ChatMessage, ContentBlock, DiagnosticKind, ImageContent, InputTokenAccounting, ReasoningField,

@@ -1,10 +1,13 @@
-//! The handshake between two local endpoints, with no relay and no
-//! network beyond this machine.
+//! The handshake and the wire between two local endpoints, with no
+//! relay and no network beyond this machine.
 
-use ilar_remote::host::{HostEvent, RemoteHost};
-use ilar_remote::{ALPN, Secret, client};
+use ilar_remote::client::{self, Refused, Session};
+use ilar_remote::host::{HostEvent, Link, RemoteHost};
+use ilar_remote::wire::{FromDevice, ToDevice};
+use ilar_remote::{ALPN, EndpointId, Secret};
 use iroh::endpoint::{Builder, Connection, presets};
 use iroh::{Endpoint, RelayMode};
+use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 fn local() -> Builder {
@@ -23,57 +26,97 @@ async fn dial(host: &RemoteHost) -> (Endpoint, Connection) {
     (device, conn)
 }
 
-#[tokio::test]
-async fn the_ticket_secret_pairs_a_device() {
-    let (host, mut events) = host().await;
-    let (device, conn) = dial(&host).await;
-    client::hello(&conn, Some(&host.ticket().secret))
+async fn paired(host: &RemoteHost) -> (Endpoint, Connection, Session) {
+    let (device, conn) = dial(host).await;
+    let session = client::hello(&conn, Some(&host.ticket().secret))
         .await
         .unwrap();
-    assert_eq!(events.recv().await, Some(HostEvent::Paired(device.id())));
+    (device, conn, session)
+}
+
+/// The next event, which must be a link for `peer`.
+async fn link_for(events: &mut UnboundedReceiver<HostEvent>, peer: EndpointId) -> Link {
+    match events.recv().await {
+        Some(HostEvent::Paired { peer: p, link } | HostEvent::Welcome { peer: p, link })
+            if p == peer =>
+        {
+            link
+        }
+        other => panic!("expected a link for {peer}, got {other:?}"),
+    }
+}
+
+fn is_refused(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Refused>().is_some()
 }
 
 #[tokio::test]
-async fn a_wrong_secret_is_refused() {
+async fn the_ticket_secret_pairs_a_device() {
+    let (host, mut events) = host().await;
+    let (device, _conn, _session) = paired(&host).await;
+    assert!(matches!(
+        events.recv().await,
+        Some(HostEvent::Paired { peer, .. }) if peer == device.id()
+    ));
+}
+
+#[tokio::test]
+async fn a_wrong_secret_is_refused_as_such() {
     let (host, mut events) = host().await;
     let (device, conn) = dial(&host).await;
-    assert!(
-        client::hello(&conn, Some(&Secret::generate()))
-            .await
-            .is_err()
-    );
-    assert_eq!(events.recv().await, Some(HostEvent::Refused(device.id())));
+    let error = client::hello(&conn, Some(&Secret::generate()))
+        .await
+        .err()
+        .expect("refused");
+    assert!(is_refused(&error), "{error:#}");
+    assert!(matches!(
+        events.recv().await,
+        Some(HostEvent::Refused(peer)) if peer == device.id()
+    ));
 }
 
 #[tokio::test]
 async fn a_second_device_is_refused_after_pairing() {
     let (host, mut events) = host().await;
     let secret = host.ticket().secret;
-    let (_phone, first) = dial(&host).await;
-    client::hello(&first, Some(&secret)).await.unwrap();
+    let (_phone, _first, _session) = paired(&host).await;
     events.recv().await;
-    let (other, second) = dial(&host).await;
-    assert!(client::hello(&second, Some(&secret)).await.is_err());
-    assert_eq!(events.recv().await, Some(HostEvent::Refused(other.id())));
+    let (_other, second) = dial(&host).await;
+    let error = client::hello(&second, Some(&secret)).await.err().unwrap();
+    assert!(is_refused(&error), "{error:#}");
 }
 
 #[tokio::test]
-async fn the_paired_device_comes_back_without_the_secret() {
+async fn messages_cross_the_link_both_ways() {
     let (host, mut events) = host().await;
-    let (phone, conn) = dial(&host).await;
-    client::hello(&conn, Some(&host.ticket().secret))
-        .await
-        .unwrap();
-    conn.close(0u32.into(), b"bye");
-    assert_eq!(events.recv().await, Some(HostEvent::Paired(phone.id())));
+    let (device, _conn, mut session) = paired(&host).await;
+    let mut link = link_for(&mut events, device.id()).await;
+
+    link.to_device.send(ToDevice::Busy { busy: true }).unwrap();
     assert_eq!(
-        events.recv().await,
-        Some(HostEvent::Disconnected(phone.id()))
+        session.next().await.unwrap(),
+        Some(ToDevice::Busy { busy: true })
     );
+    session.send(&FromDevice::Cancel).await.unwrap();
+    assert_eq!(link.from_device.recv().await, Some(FromDevice::Cancel));
+}
+
+#[tokio::test]
+async fn the_paired_device_comes_back_and_the_newest_connection_wins() {
+    let (host, mut events) = host().await;
+    let (phone, _old_conn, mut old) = paired(&host).await;
+    let first = link_for(&mut events, phone.id()).await;
 
     let again = phone.connect(host.endpoint().addr(), ALPN).await.unwrap();
-    client::hello(&again, None).await.unwrap();
-    assert_eq!(events.recv().await, Some(HostEvent::Welcome(phone.id())));
+    let _new = client::hello(&again, None).await.unwrap();
+    let second = link_for(&mut events, phone.id()).await;
+    assert_ne!(first.serial, second.serial);
+    assert!(matches!(
+        events.recv().await,
+        Some(HostEvent::Disconnected { serial, .. }) if serial == first.serial
+    ));
+    let ended = tokio::time::timeout(Duration::from_secs(2), old.next()).await;
+    assert!(matches!(ended, Ok(Ok(None)) | Ok(Err(_))), "{ended:?}");
 }
 
 #[tokio::test]
@@ -82,12 +125,12 @@ async fn a_dropped_host_admits_nobody() {
     let (addr, secret) = (host.endpoint().addr(), host.ticket().secret);
     drop(host);
     let device = local().bind().await.unwrap();
-    let attempt = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let attempt = tokio::time::timeout(Duration::from_secs(2), async {
         let conn = device.connect(addr, ALPN).await?;
         client::hello(&conn, Some(&secret)).await
     })
     .await;
-    assert!(!matches!(attempt, Ok(Ok(()))), "a dropped host paired");
+    assert!(!matches!(attempt, Ok(Ok(_))), "a dropped host paired");
 }
 
 #[tokio::test]

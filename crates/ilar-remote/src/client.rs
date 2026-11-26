@@ -1,14 +1,14 @@
-//! The handshake, from the side that dials: one bi-stream with a JSON
-//! `Hello`, answered by `{"ok":true}` or by the host closing the
-//! connection with [`crate::REFUSED`]. Builds for wasm32 too.
+//! The side that dials. It opens one bi-stream, sends a `Hello` line,
+//! and gets a `Welcome` line back, or the host closes the connection
+//! with [`crate::REFUSED`]. The same stream then carries the session
+//! (see [`crate::wire`]). This file builds for wasm32 too.
 
 use crate::pairing::Secret;
-use anyhow::{Context, Result, bail};
+use crate::wire::{self, FromDevice, MAX_TO_DEVICE, Reader, ToDevice};
+use anyhow::Result;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, ConnectionError, SendStream};
 use serde::{Deserialize, Serialize};
-
-pub(crate) const MAX_HELLO: usize = 1024;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Hello {
@@ -44,19 +44,62 @@ pub(crate) struct Welcome {
     pub ok: bool,
 }
 
-/// Presents `secret` (or nothing, as a pinned peer) on `conn`.
-pub async fn hello(conn: &Connection, secret: Option<&Secret>) -> Result<()> {
-    let (mut send, mut recv) = conn.open_bi().await?;
-    send.write_all(&serde_json::to_vec(&Hello::new(secret))?)
-        .await?;
-    send.finish()?;
-    let reply = recv
-        .read_to_end(MAX_HELLO)
-        .await
-        .context("the session refused this device")?;
-    let welcome: Welcome = serde_json::from_slice(&reply).context("the session's reply")?;
-    if !welcome.ok {
-        bail!("the session refused this device");
+/// The session refused this device: wrong or spent secret, or another
+/// device is paired. Distinct from a network error, which may be retried.
+#[derive(Debug)]
+pub struct Refused;
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the session refused this device")
     }
-    Ok(())
+}
+
+impl std::error::Error for Refused {}
+
+/// A paired session, from the device's side.
+pub struct Session {
+    send: SendStream,
+    reader: Reader,
+}
+
+impl Session {
+    pub async fn send(&mut self, message: &FromDevice) -> Result<()> {
+        wire::write(&mut self.send, message).await
+    }
+
+    /// `None` when the session closed the stream.
+    pub async fn next(&mut self) -> Result<Option<ToDevice>> {
+        self.reader.next().await
+    }
+}
+
+/// Presents `secret` (or nothing, as a pinned peer) on `conn`.
+pub async fn hello(conn: &Connection, secret: Option<&Secret>) -> Result<Session> {
+    let refused_or = |error: anyhow::Error| match close_code(conn) {
+        Some(code) if code == crate::REFUSED => anyhow::Error::new(Refused),
+        Some(code) if code == crate::BUSY => anyhow::anyhow!("the session is busy; try again"),
+        _ => error,
+    };
+    let (mut send, recv) = conn.open_bi().await.map_err(|e| refused_or(e.into()))?;
+    wire::write(&mut send, &Hello::new(secret))
+        .await
+        .map_err(refused_or)?;
+    let mut reader = Reader::new(recv, MAX_TO_DEVICE);
+    match reader.next::<Welcome>().await.map_err(refused_or)? {
+        Some(Welcome { ok: true }) => Ok(Session { send, reader }),
+        _ => Err(refused_or(anyhow::anyhow!(
+            "the session closed the handshake"
+        ))),
+    }
+}
+
+/// The application close code, once the host has closed `conn`.
+fn close_code(conn: &Connection) -> Option<u32> {
+    match conn.close_reason()? {
+        ConnectionError::ApplicationClosed(close) => {
+            u32::try_from(close.error_code.into_inner()).ok()
+        }
+        _ => None,
+    }
 }
