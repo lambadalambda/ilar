@@ -4861,3 +4861,15 @@ dismissed Astra's default selection before the model-switch persistence path ran
 The picker now takes the current model identity and gates both the no-op check
 and active-row marker on it. Explicit selections and same-model no-ops remain
 unchanged. Regression reproduced before the fix; all 458 TUI tests pass.
+
+## Set reasoning from `ilar exec`
+
+`--reasoning` is checked against the selected model, not `general.model`.
+A resumed session saves the change as a model event, just like `--model`.
+`default` records no variant, so a later `--continue` does not pick up the
+configured default. Like `--model`, the change is saved at startup, before
+the first turn acquires its writer lease.
+
+The test-first run timed out while compiling dependencies. The new tests
+pass; the workspace run hit macOS sandbox and file-worker failures in this
+restricted environment.

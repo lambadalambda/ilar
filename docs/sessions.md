@@ -315,6 +315,7 @@ ilar exec "summarize the failing tests"        # answer on stdout
 echo "what changed today?" | ilar exec         # or the prompt on stdin
 ilar exec --continue "now open a PR"           # same session as last time
 ilar exec --json "audit the auth flow"         # NDJSON events on stdout
+ilar exec --reasoning high "compare these designs"
 ```
 
 The answer is the only thing on stdout, so `ilar exec "…" > answer.md`
@@ -322,6 +323,11 @@ is useful; tool calls, retries and subagents go to stderr. `--model`,
 `--agent`, `--session` and `--continue` behave as they do in the TUI —
 both drivers resolve the same runtime — and the session is a real one:
 checkpointed, resumable, and listed in the TUI's picker afterwards.
+
+`--reasoning <level>` overrides the configured or saved reasoning level
+and saves the new level in the session. Use `--reasoning default` to clear
+it. Levels depend on the selected model; see `ilar models`.
+
 Exit codes: 0 completed, 2 hit the iteration limit, 130 aborted, 1
 failed. The `question` tool is not attached, since nobody is there to
 answer; a model that asks is told so immediately.

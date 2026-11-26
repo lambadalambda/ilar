@@ -289,6 +289,10 @@ struct ExecArgs {
     #[arg(long)]
     model: Option<String>,
 
+    /// Reasoning level for the selected model; use `default` to clear it
+    #[arg(long, value_name = "LEVEL")]
+    reasoning: Option<String>,
+
     /// Agent name from config (markdown agents)
     #[arg(long)]
     agent: Option<String>,
@@ -1369,6 +1373,7 @@ async fn run_exec(config: &ilar::config::Config, args: ExecArgs) -> Result<i32> 
         config,
         &ilar::runtime::RuntimeOptions {
             model: args.model,
+            reasoning: args.reasoning,
             agent: args.agent,
             resume,
             cwd: cwd.clone(),
@@ -1753,6 +1758,7 @@ async fn main() -> Result<()> {
             &config,
             &ilar::runtime::RuntimeOptions {
                 model: cli_model.map(str::to_string),
+                reasoning: None,
                 agent: cli_agent.map(str::to_string),
                 resume: resume_target.clone(),
                 cwd: cwd.clone(),
@@ -5963,6 +5969,20 @@ async fn run_app(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn exec_accepts_a_reasoning_level() {
+        use clap::Parser as _;
+
+        let args =
+            super::Args::try_parse_from(["ilar", "exec", "--reasoning", "high", "summarize this"])
+                .unwrap();
+        let Some(super::Command::Exec(exec)) = args.command else {
+            panic!("expected exec");
+        };
+        assert_eq!(exec.reasoning.as_deref(), Some("high"));
+        assert_eq!(exec.prompt.as_deref(), Some("summarize this"));
+    }
 
     #[test]
     fn subagent_model_selection_changes_only_after_a_successful_save() {

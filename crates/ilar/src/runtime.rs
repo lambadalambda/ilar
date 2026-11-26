@@ -33,6 +33,8 @@ use crate::tools::{ToolContext, ToolRegistry, service::ServiceManager};
 pub struct RuntimeOptions {
     /// `provider/model-id` override for this run.
     pub model: Option<String>,
+    /// Reasoning override for the selected model; `default` clears the variant.
+    pub reasoning: Option<String>,
     /// Agent name from configuration.
     pub agent: Option<String>,
     /// Session to resume; a new one is created when absent.
@@ -121,7 +123,7 @@ pub struct RuntimePlan {
     /// reads as a bug in the program rather than a rule about the flag.
     pub notices: Vec<String>,
     skill_store: Arc<crate::skill::SkillStore>,
-    persisted_model: Option<String>,
+    record_model_change: bool,
     user_dir: PathBuf,
     cwd: PathBuf,
     questions: bool,
@@ -540,19 +542,28 @@ impl RuntimePlan {
             agent.model.as_deref(),
             &config.general.model,
         );
-        let reasoning = selected_reasoning(
-            resumed.is_some(),
-            &model,
-            persisted_model.as_deref(),
-            persisted_variant.as_deref(),
-            config.general.reasoning.as_deref(),
-        );
-        // Before anything is built: an id nothing knows is not a
-        // session to plan, and the variant check below would otherwise
-        // be the only thing that noticed.
         config.ensure_model_known(&model)?;
-        let (reasoning, dropped_reasoning) = usable_reasoning(&model, reasoning);
-        notices.extend(dropped_reasoning);
+        let reasoning = if let Some(level) = options.reasoning.as_deref() {
+            let variant = (level != "default").then_some(level);
+            crate::model::variant_options(&model, variant).with_context(|| {
+                format!("invalid --reasoning {level:?} for {model}; see `ilar models`")
+            })?;
+            variant.map(str::to_string)
+        } else {
+            let inherited = selected_reasoning(
+                resumed.is_some(),
+                &model,
+                persisted_model.as_deref(),
+                persisted_variant.as_deref(),
+                config.general.reasoning.as_deref(),
+            );
+            let (reasoning, dropped_reasoning) = usable_reasoning(&model, inherited);
+            notices.extend(dropped_reasoning);
+            reasoning
+        };
+        let record_model_change = resumed.is_some()
+            && (persisted_model.as_deref() != Some(model.as_str())
+                || (options.reasoning.is_some() && reasoning != persisted_variant));
 
         let skill_store = Arc::new(if options.own_skills_only {
             crate::skill::SkillStore::own_only(user_dir.clone())
@@ -615,7 +626,7 @@ impl RuntimePlan {
             skipped_project_instructions,
             notices,
             skill_store,
-            persisted_model,
+            record_model_change,
             user_dir,
             cwd: options.cwd.clone(),
             questions: options.questions,
@@ -700,11 +711,17 @@ impl RuntimePlan {
 
         let session_id = match &self.session_id {
             Some(id) => {
-                // A CLI override on a resumed session is a real model
-                // change and is recorded as one.
-                if self.persisted_model.as_deref() != Some(self.model.as_str()) {
-                    persist_model_change(resolver.as_ref(), &store, id, &self.model, None)
-                        .with_context(|| format!("persisting model override {}", self.model))?;
+                if self.record_model_change {
+                    persist_model_change(
+                        resolver.as_ref(),
+                        &store,
+                        id,
+                        &self.model,
+                        self.reasoning.as_deref(),
+                    )
+                    .with_context(|| {
+                        format!("saving model or reasoning override for {}", self.model)
+                    })?;
                 }
                 // Resuming is using: the session's own directory now
                 // answers `--continue` with it.
@@ -1366,6 +1383,55 @@ mod tests {
         .to_string();
         assert!(error.contains("unknown agent \"explorer\""), "{error}");
         assert!(error.contains("build, explore"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn explicit_reasoning_overrides_config_and_is_saved_on_resume() {
+        let root = tempfile::tempdir().unwrap();
+        let user = root.path().join("config");
+        std::fs::create_dir(&user).unwrap();
+        std::fs::write(
+            user.join("ilar.toml"),
+            "[general]\nmodel = 'openai/gpt-5.2'\nreasoning = 'medium'\n",
+        )
+        .unwrap();
+        let config = crate::config::Loader::with_env(vec![("ILAR_OPENAI_API_KEY", "test".into())])
+            .config_dir(user)
+            .state_dir(root.path().join("state"))
+            .resolve()
+            .unwrap();
+        let resolve = |level: Option<&str>, resume: Option<String>| {
+            RuntimePlan::resolve(
+                &config,
+                &RuntimeOptions {
+                    reasoning: level.map(str::to_string),
+                    resume,
+                    cwd: root.path().to_path_buf(),
+                    ..Default::default()
+                },
+            )
+        };
+        let start = |level, resume| {
+            resolve(Some(level), resume)
+                .unwrap()
+                .start(&config)
+                .unwrap()
+        };
+        let id = start("high", None).session_id;
+        let saved = || resolve(None, Some(id.clone())).unwrap().reasoning;
+        assert_eq!(saved().as_deref(), Some("high"));
+        start("low", Some(id.clone()));
+        assert_eq!(saved().as_deref(), Some("low"));
+        let err = resolve(Some("unsupported"), Some(id.clone()))
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("invalid --reasoning \"unsupported\" for openai/gpt-5.2")
+        );
+        assert_eq!(saved().as_deref(), Some("low"));
+        start("default", Some(id.clone()));
+        assert_eq!(saved(), None);
     }
 
     /// Nothing records an agent change, so `--agent` on a resumed

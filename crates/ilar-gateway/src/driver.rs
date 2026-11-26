@@ -918,6 +918,7 @@ pub fn plan(
             // `/model` switch outlives a restart; the default is for
             // fresh sessions only.
             model: resume.is_none().then(|| default_model(config, gateway)),
+            reasoning: None,
             agent: gateway.agent.clone(),
             resume,
             cwd: workspace.clone(),

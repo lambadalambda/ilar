@@ -1,5 +1,7 @@
 # Completed issues
 
+- [x] [Reasoning override for `ilar exec`](issues/exec-reasoning-option.md)
+
 - [x] [An Anthropic-wire provider](issues/an-anthropic-wire-provider.md)
 
 - [x] [Gemini 4 Neon on OpenCode Zen](issues/opencode-zen-gemini-neon.md)
