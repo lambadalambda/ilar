@@ -105,13 +105,11 @@ use futures::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use ilar::session::{SessionEvent, SessionStore, SessionTail, TailUpdate};
+use ilar::session::{LiveMessage, SessionEvent, SessionStore, SessionTail, TailUpdate};
 use tokio::sync::broadcast;
 
 use super::drive::{Drive, DriveError, Fate, NewSession, TurnFailure};
-use super::watch::{
-    LiveMessage, LiveState, SessionEntry, TailEnd, TailMessage, Watcher, next_message,
-};
+use super::watch::{LiveState, SessionEntry, TailEnd, TailMessage, Watcher, next_message};
 use crate::web::view::{
     has_invocation, invocation_slice, live_reset, project_live_delta, project_page, usage_totals,
 };
