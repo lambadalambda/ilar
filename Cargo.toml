@@ -10,6 +10,7 @@ authors = ["lainsoykaf"]
 
 [workspace.dependencies]
 ilar = { path = "crates/ilar" }
+ilar-remote = { path = "crates/ilar-remote" }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures = "0.3"

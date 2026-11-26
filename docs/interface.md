@@ -146,8 +146,8 @@ take a steer is refused — `wait for the current operation before /goal`
 — with the text left on the prompt, because the commands are armed,
 expanded and routed on the way *into* a turn: steered, `/goal ship the
 parser` would reach the model as that literal line and arm nothing.
-`/btw`, `/memory` and `/context` are the exceptions, and are meant for
-mid-turn. `/memory` (or **Show memories** in the palette) shows what
+`/btw`, `/memory`, `/context` and `/remote` are the exceptions, and are
+meant for mid-turn. `/memory` (or **Show memories** in the palette) shows what
 the session's memory holds, laid out like the session search: the core
 block and every note's title on the left, newest first, the ones
 recalled into this session marked `↺`, and the selected one in full on
@@ -302,6 +302,22 @@ question nor the answer is written to the log — an aside must never
 steer the ongoing work. It runs beside a live turn (mid-turn is when
 you want one), costs almost nothing thanks to the provider's prompt
 cache, and a newer `/btw` replaces a still-running one.
+
+## Remote control: `/remote`
+
+`/remote` opens a QR code for this session. A phone that scans it is
+paired with this session only: the code carries a one-time secret, and
+the first device that shows it is the only one let in from then on. It
+can drop and reconnect without the code. The connection goes over iroh
+through n0's public relay, encrypted end to end; no server of ours is
+involved. Esc closes the modal and leaves remote control on; `/remote`
+opens it again, and `/remote stop` ends it. Switching session or
+quitting ends it too, and every start makes a new key, so an old code
+reaches nothing.
+
+The phone side (a web app on GitHub Pages) is not built yet; for now
+`cargo run -p ilar-remote --example pair -- <link>` pairs from a
+terminal.
 
 ## Switching sessions: `/sessions`
 

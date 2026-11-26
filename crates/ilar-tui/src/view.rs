@@ -1336,6 +1336,10 @@ impl App {
                 render_aside(frame, self.aside.as_ref().expect("aside modal"));
                 None
             }
+            Some(Modal::Remote) => {
+                crate::remote::render(frame, self.remote.as_ref().expect("remote view"));
+                None
+            }
             Some(Modal::ThemePicker) => Some(render_theme_picker(
                 frame,
                 self.theme_picker.as_ref().expect("theme picker"),

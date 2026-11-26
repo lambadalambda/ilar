@@ -96,6 +96,8 @@ pub(crate) enum Intent {
     OpenContextPicker,
     /// `/context <size>`: set it directly; `None` restores the model's.
     SetContextWindow(Option<u64>),
+    /// `/remote`: show the QR code (starting the host) or stop it.
+    Remote(crate::remote::RemoteCommand),
 }
 
 /// Where pasted text goes.
@@ -146,6 +148,7 @@ pub(crate) fn paste_target(state: &LoopState) -> PasteTarget {
             | Modal::Help
             | Modal::Todos
             | Modal::Aside
+            | Modal::Remote
             | Modal::PendingManager
             | Modal::VariantPicker
             | Modal::ContextPicker,
@@ -367,6 +370,13 @@ pub(crate) fn submit(state: &LoopState, busy: bool, text: String) -> Vec<Intent>
     // the model can act on.
     if let Some(("context", size)) = crate::parse_slash_invocation(&text) {
         return vec![context_command(size)];
+    }
+    // Opens beside a running turn: the phone is how you follow one.
+    if let Some(("remote", args)) = crate::parse_slash_invocation(&text) {
+        return vec![match crate::remote::parse(args) {
+            Some(command) => Intent::Remote(command),
+            None => Intent::Notice(crate::remote::USAGE.into(), NoticeLevel::Warning),
+        }];
     }
     if let Some((name, args)) = crate::parse_slash_invocation(&text)
         && MAINTENANCE_COMMANDS.contains(&name)
@@ -693,6 +703,7 @@ mod tests {
             Modal::Help,
             Modal::Todos,
             Modal::Aside,
+            Modal::Remote,
             Modal::PendingManager,
             Modal::VariantPicker,
             Modal::ContextPicker,
@@ -734,6 +745,28 @@ mod tests {
         }
         // ×1024² on a count near u64::MAX must fail rather than wrap.
         assert_eq!(parse_context_size("18446744073709551615m"), None);
+    }
+
+    #[test]
+    fn remote_opens_or_stops_mid_turn_and_is_never_steering_text() {
+        use crate::remote::{RemoteCommand, USAGE};
+        let running = LoopState {
+            turn_running: true,
+            steerable: true,
+            ..idle()
+        };
+        assert_eq!(
+            submit(&running, true, "/remote".into()),
+            vec![Intent::Remote(RemoteCommand::Open)]
+        );
+        assert_eq!(
+            submit(&idle(), false, "/remote stop".into()),
+            vec![Intent::Remote(RemoteCommand::Stop)]
+        );
+        assert_eq!(
+            submit(&idle(), false, "/remote now".into()),
+            vec![Intent::Notice(USAGE.into(), NoticeLevel::Warning)]
+        );
     }
 
     #[test]
