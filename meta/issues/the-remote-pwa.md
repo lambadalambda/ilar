@@ -11,6 +11,11 @@ the remote wire.
 - QR scan with the camera (BarcodeDetector where present, a JS fallback
   otherwise) and paste-a-ticket as a second way in.
 - Transcript view, prompt input, approval and question prompts, cancel.
+- The browser's iroh key is stored (IndexedDB) per ticket id: pairing
+  pins the key, so a new key after a reload is refused for good.
+- `history.replaceState` removes the ticket from the URL after reading.
+- `client::hello` gets a timeout, and a refusal (close code 403) is told
+  apart from a network error.
 - Manifest and service worker so it installs and starts offline.
 - A GitHub Actions workflow builds the WASM and deploys to Pages.
 

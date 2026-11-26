@@ -12,6 +12,7 @@ mod links;
 mod markdown;
 mod modals;
 mod questions;
+mod remote;
 mod schedule;
 mod secret_cli;
 mod selection;
@@ -782,6 +783,11 @@ fn apply_intent(
             app.memory_menu_requested = Some(filter);
             None
         }
+        Intent::Remote(command) => {
+            // Consumed by run_app, which owns the host.
+            app.remote_requested = Some(command);
+            None
+        }
         Intent::PastePalette(text) => {
             if let Some(palette) = app.command_palette.as_mut() {
                 palette.insert_query(&text);
@@ -1030,6 +1036,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "context",
         "override the context window this session assumes (128k, 1M, 200000, or default)",
+    ),
+    (
+        "remote",
+        "control this session from a phone: shows a QR code (/remote stop ends it)",
     ),
 ];
 const MAX_GOAL_ROUNDS: u32 = 25;
@@ -3812,6 +3822,12 @@ async fn run_app(
     // A running /btw, detached from the turn slot entirely.
     let mut aside_handle: Option<AsideHandle> = None;
     let mut aside_cancel: Option<CancellationToken> = None;
+    // /remote: lives as long as this run_app, so a session switch or a
+    // quit drops the host and the QR code with it.
+    let mut remote_control = remote::RemoteControl::default();
+    app.remote = None;
+    app.remote_visible = false;
+    app.remote_requested = None;
     let mut ring_on_turn_completion = false;
     let mut bell_pending = false;
     // The stall watchdog's bell fires once per silence episode; data
@@ -4189,6 +4205,7 @@ async fn run_app(
                 }
             }
         }
+        remote_control.tick(app);
         // The memory menu reads the store and this session's recalls.
         if let Some(filter) = app.memory_menu_requested.take() {
             let menu = match &app.memory {
@@ -4919,6 +4936,16 @@ async fn run_app(
                             }
                             _ => {}
                         },
+                        // Closing leaves remote control on; `/remote stop`
+                        // ends it.
+                        Modal::Remote => {
+                            if matches!(
+                                (code, control),
+                                (KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter, false)
+                            ) {
+                                app.remote_visible = false;
+                            }
+                        }
                         Modal::ThemePicker => {
                             let action = {
                                 let picker = app.theme_picker.as_mut().unwrap();

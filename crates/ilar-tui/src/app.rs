@@ -685,6 +685,12 @@ pub(crate) struct App {
     pub(crate) aside_requested: Option<String>,
     /// The answered aside, displayed until dismissed.
     pub(crate) aside: Option<AsideModal>,
+    /// `/remote`, waiting for run_app (which owns the host).
+    pub(crate) remote_requested: Option<crate::remote::RemoteCommand>,
+    /// What the remote host shows; `Some` while remote control is on.
+    pub(crate) remote: Option<crate::remote::RemoteView>,
+    /// The remote modal is open; closing it leaves remote control on.
+    pub(crate) remote_visible: bool,
     pub(crate) search_active: bool,
     pub(crate) search_query: String,
     pub(crate) search_matches: Vec<usize>,
@@ -907,6 +913,9 @@ impl App {
             compact_requested: false,
             aside_requested: None,
             aside: None,
+            remote_requested: None,
+            remote: None,
+            remote_visible: false,
             search_active: false,
             search_query: String::new(),
             search_matches: Vec::new(),
@@ -1007,6 +1016,8 @@ impl App {
             Some(Modal::Todos)
         } else if self.aside.is_some() {
             Some(Modal::Aside)
+        } else if self.remote_visible && self.remote.is_some() {
+            Some(Modal::Remote)
         } else if self.theme_picker.is_some() {
             Some(Modal::ThemePicker)
         } else if self.skill_picker.is_some() {
@@ -1238,9 +1249,11 @@ impl App {
             // The question modal navigates its own rows with the arrows;
             // search leaves the wheel to the transcript so results stay
             // browsable underneath it.
+            // The remote modal has nothing to scroll.
             Some(Modal::Question)
             | Some(Modal::Grant)
             | Some(Modal::Password)
+            | Some(Modal::Remote)
             | Some(Modal::Search)
             | None => {
                 return false;
@@ -1297,6 +1310,7 @@ impl App {
                 | Modal::Help
                 | Modal::Todos
                 | Modal::Aside
+                | Modal::Remote
                 | Modal::Search => {}
             }
         }
@@ -5049,9 +5063,9 @@ mod tests {
 
         // All candidates on bare slash, fuzzy-filtered as the name grows.
         let all = slash_candidates("/", &inventory);
-        assert_eq!(all.len(), 10);
+        assert_eq!(all.len(), 11);
         for builtin in [
-            "goal", "compact", "rewind", "fork", "sessions", "btw", "memory", "context",
+            "goal", "compact", "rewind", "fork", "sessions", "btw", "memory", "context", "remote",
         ] {
             assert_eq!(
                 all.iter().filter(|(name, _)| name == builtin).count(),

@@ -521,6 +521,7 @@ pub(crate) enum Modal {
     Help,
     Todos,
     Aside,
+    Remote,
     ThemePicker,
     SkillPicker,
     SessionPicker,
@@ -1012,6 +1013,10 @@ static HELP_SECTIONS: &[HelpSection] = &[
             ),
             binding!("/btw <question>", "quick aside; answered, never recorded"),
             binding!("/memory", "what this session's memory holds"),
+            binding!(
+                "/remote [stop]",
+                "QR code to control this session from a phone"
+            ),
             binding!("palette: Session usage", "token and cost totals"),
             binding!(
                 "/context [size]",

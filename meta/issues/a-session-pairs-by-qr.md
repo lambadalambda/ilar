@@ -19,3 +19,14 @@ for this session only, and a QR code with the ticket.
 - A peer without the secret, or a second peer after pairing, is
   refused (tested).
 - A QR code from session A does not reach session B.
+
+## Outcome
+
+Done 2026-11-26. `crates/ilar-remote` has the ticket, the pairing rule
+and the host (13 tests, two of them mutation-checked); `/remote` in the
+TUI starts a host per session and shows the code (`remote.rs`, 6
+tests). Live on tenco: the `pair` example paired with a real TUI
+through n0's relay in about 1 s, and zbarimg decoded the link from the
+captured screen. Each start makes a new key, and the host stops when
+the session ends, so a code from session A does not reach session B.
+No phone was tried; that comes with [[the-remote-pwa]].

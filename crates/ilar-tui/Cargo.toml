@@ -21,6 +21,9 @@ serve = ["dep:axum", "dep:getrandom"]
 
 [dependencies]
 ilar = { workspace = true }
+ilar-remote = { workspace = true }
+# /remote draws its QR code itself; no image or SVG features.
+qrcode = { version = "0.14", default-features = false }
 tokio = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }

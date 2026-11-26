@@ -137,7 +137,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 ## Milestone 28 — Remote control
 
 - [ ] [Remote control over iroh — index](issues/remote-control-over-iroh-index.md) — index
-- [ ] [A session pairs by QR](issues/a-session-pairs-by-qr.md)
 - [ ] [The remote wire](issues/the-remote-wire.md)
 - [ ] [The remote PWA](issues/the-remote-pwa.md)
 
