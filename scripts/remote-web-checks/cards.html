@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="app.css" />
+    <script type="importmap">
+      { "imports": { "preact": "./vendor/preact.module.js", "preact/hooks": "./vendor/hooks.module.js", "htm": "./vendor/htm.module.js" } }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      // A fake remote: one session, an open prompt the test can swap,
+      // and every command recorded in window.sent.
+      window.sent = [];
+      const listeners = new Set();
+      let prompt = null;
+      window.setPrompt = (next) => { prompt = next; listeners.forEach((l) => l()); };
+      const page = { id: "s1", session: { id: "s1", title: "cards", model: "m" }, events: [], cursor: 0, has_more: false, count: 0, line: 1, usage: {} };
+      window.__ILAR_REMOTE__ = {
+        id: "s1",
+        api: (path) => path === "/api/sessions" ? Promise.resolve({ sessions: [{ ...page.session, state: "idle", driven: true }] })
+          : path.endsWith("/children") ? Promise.resolve({ children: [] }) : Promise.resolve(page),
+        post: async () => ({ fate: "sent" }),
+        stream: () => ({ readyState: 1, addEventListener() {}, close() {} }),
+        state: () => ({ prompt, notice: "" }),
+        subscribe: (l) => { listeners.add(l); return () => listeners.delete(l); },
+        send: async (command) => { window.sent.push(command); },
+      };
+      await import("./app.js");
+    </script>
+  </body>
+</html>
