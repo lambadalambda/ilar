@@ -6836,6 +6836,31 @@ mod tests {
     }
 
     #[test]
+    fn the_status_line_says_when_remote_control_is_on() {
+        use crate::remote::{RemoteStatus, RemoteView};
+        let mut app = App::new();
+        app.configure_runtime(
+            "openai/gpt-5.6-sol".into(),
+            None,
+            std::path::PathBuf::from("/workspace/project"),
+            204_000,
+            Some(272_000),
+            false,
+        );
+        assert!(!rendered_text(&app.status_line(120)).contains('⇄'));
+
+        app.remote = Some(RemoteView::ready("https://x/#t".into()));
+        let waiting = rendered_text(&app.status_line(120));
+        assert!(waiting.ends_with("⇄ remote"), "{waiting}");
+        assert_eq!(UnicodeWidthStr::width(waiting.as_str()), 120, "{waiting}");
+
+        app.remote.as_mut().unwrap().status = RemoteStatus::Connected("5dda89b5".into());
+        let connected = rendered_text(&app.status_line(120));
+        assert!(connected.ends_with("⇄ phone"), "{connected}");
+        assert!(UnicodeWidthStr::width(connected.as_str()) <= 120);
+    }
+
+    #[test]
     fn status_line_prioritizes_notices_and_shows_a_wide_context_meter() {
         let mut app = App::new();
         app.configure_runtime(
