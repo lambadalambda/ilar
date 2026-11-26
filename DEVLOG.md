@@ -1,5 +1,21 @@
 # DEVLOG
 
+## /remote pairs a device
+
+`/remote` starts an iroh endpoint with a fresh key for the session and
+shows a QR code for `https://lambadalambda.github.io/ilar/#<ticket>`.
+The ticket is binary (version, endpoint id, 16-byte secret, relay URL),
+so the link is 150 characters, not the spike's 390; at error-correction
+level L that is a 45-module code, 25 terminal rows. A terminal too small
+for the whole code gets the link and "enlarge the terminal", because a
+cut code does not scan. The first device with the secret is pinned by
+endpoint id. Two traps found in review: a dropped host kept its accept
+task (and so the old code) alive until the process ended, and
+`now_or_never()` on a finished `JoinHandle` can still return `Pending`
+under tokio's coop budget. An SVG render of the screen did not scan
+(the font leaves gaps between half-block rows); the captured text
+decoded with zbarimg.
+
 ## iroh reaches a browser
 
 Spike in `experiments/iroh-remote/` for remote control from a phone. iroh
