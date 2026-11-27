@@ -1,5 +1,16 @@
 # DEVLOG
 
+## Safari refuses relay hosts with a root dot
+
+The first iPhone scan gave a blank page. On the iOS 26.5 simulator the
+relay WebSocket closed with 1006 every time: iroh names n0's relays as
+`euc1-1.relay.n0.iroh.link.`, and Safari's WebSocket fails on the root
+dot where Chrome does not. The browser client now dials the same relays
+without the dot (`ilar_remote::browser`), for its own home relay and for
+the ticket's. Tickets keep the dot, so links already shown still work.
+The page also showed nothing while it connected; it now says
+"connecting…".
+
 ## The phone app reuses the share renderer
 
 `web/remote` is a shell around the same `app.js` that `ilar serve` and
