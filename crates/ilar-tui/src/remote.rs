@@ -41,10 +41,7 @@ pub(crate) fn parse(args: &str) -> Option<RemoteCommand> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RemoteStatus {
     Starting,
-    Waiting,
-    Connected(String),
-    /// Paired once; the device may come back without the QR code.
-    Away(String),
+    Ready,
     Failed(String),
 }
 
@@ -53,6 +50,10 @@ pub(crate) struct RemoteView {
     /// `None` until the host is up.
     pub(crate) link: Option<String>,
     pub(crate) status: RemoteStatus,
+    /// The devices connected now, by short id, in order of arrival.
+    pub(crate) connected: Vec<String>,
+    /// How many devices paired; they may come back without the code.
+    pub(crate) paired: usize,
 }
 
 impl RemoteView {
@@ -60,46 +61,60 @@ impl RemoteView {
         Self {
             link: None,
             status: RemoteStatus::Starting,
+            connected: Vec::new(),
+            paired: 0,
         }
     }
 
     pub(crate) fn ready(link: String) -> Self {
         Self {
             link: Some(link),
-            status: RemoteStatus::Waiting,
+            status: RemoteStatus::Ready,
+            ..Self::starting()
         }
     }
 
     /// Applies a change; returns the notice worth showing, if any.
     pub(crate) fn apply(&mut self, change: Change) -> Option<String> {
-        let (status, notice) = match change {
-            Change::Paired(id) => (
-                RemoteStatus::Connected(short(&id)),
-                Some(format!("remote: device {} paired", short(&id))),
-            ),
-            Change::Back(id) => (RemoteStatus::Connected(short(&id)), None),
-            Change::Away(id) => (
-                RemoteStatus::Away(short(&id)),
-                Some(format!("remote: device {} disconnected", short(&id))),
-            ),
-            Change::Refused(id) => {
-                return Some(format!("remote: refused device {}", short(&id)));
+        let connect = |connected: &mut Vec<String>, id: String| {
+            if !connected.contains(&id) {
+                connected.push(id);
             }
         };
-        self.status = status;
-        notice
+        match change {
+            Change::Paired(id) => {
+                self.paired += 1;
+                connect(&mut self.connected, short(&id));
+                Some(format!("remote: device {} paired", short(&id)))
+            }
+            Change::Back(id) => {
+                connect(&mut self.connected, short(&id));
+                None
+            }
+            Change::Away(id) => {
+                self.connected.retain(|known| *known != short(&id));
+                Some(format!("remote: device {} disconnected", short(&id)))
+            }
+            Change::Refused(id) => Some(format!("remote: refused device {}", short(&id))),
+        }
     }
 
     fn status_line(&self) -> Line<'static> {
         let (text, color) = match &self.status {
             RemoteStatus::Starting => ("starting; reaching the iroh relay…".into(), theme::MUTED),
-            RemoteStatus::Waiting => ("waiting for a device to scan".into(), theme::MUTED),
-            RemoteStatus::Connected(id) => (format!("connected: device {id}"), theme::RUNNING),
-            RemoteStatus::Away(id) => (
-                format!("device {id} is away; it can reconnect without the code"),
+            RemoteStatus::Failed(error) => (format!("failed: {error}"), theme::ERROR),
+            RemoteStatus::Ready if !self.connected.is_empty() => (
+                format!(
+                    "connected: {} · scan to add a device",
+                    self.connected.join(", ")
+                ),
+                theme::RUNNING,
+            ),
+            RemoteStatus::Ready if self.paired > 0 => (
+                "paired devices are away; they reconnect without the code".into(),
                 theme::MUTED,
             ),
-            RemoteStatus::Failed(error) => (format!("failed: {error}"), theme::ERROR),
+            RemoteStatus::Ready => ("waiting for a device to scan".into(), theme::MUTED),
         };
         Line::styled(text, Style::default().fg(color))
     }
@@ -121,10 +136,18 @@ pub(crate) struct RemoteControl {
     host: Option<RemoteHost>,
     starting: Option<JoinHandle<anyhow::Result<RemoteHost>>>,
     events: Option<UnboundedReceiver<HostEvent>>,
-    /// The device's link while one is connected.
-    link: Option<Link>,
-    /// What the device has been told; reopened (with a snapshot) for
-    /// every new link.
+    /// The connected devices.
+    devices: Vec<Device>,
+    /// Whether the host was last told to pair new devices; it follows
+    /// whether the QR code is on screen.
+    open: Option<bool>,
+}
+
+/// One connected device: its link, and what it has been told (reopened,
+/// with a snapshot, for every new link).
+struct Device {
+    peer: EndpointId,
+    link: Link,
     feed: Option<Feed>,
 }
 
@@ -194,82 +217,94 @@ impl RemoteControl {
                 app.set_notice(notice, NoticeLevel::Info);
             }
         }
-        let Some(link) = &self.link else {
-            return;
-        };
-        let followed = match &mut self.feed {
-            Some(feed) => feed.pump(link, app),
-            None => Feed::open(link, store, session_id, app).map(|feed| self.feed = Some(feed)),
-        };
-        // The log cannot be followed: say so and hang up, rather than
-        // leave the device looking at a log that silently stopped.
-        if let Err(error) = followed {
+        // New devices pair while the code is on screen, and only then.
+        if let Some(host) = &self.host
+            && self.open != Some(app.remote_visible)
+        {
+            host.set_open(app.remote_visible);
+            self.open = Some(app.remote_visible);
+        }
+        let mut lost = Vec::new();
+        self.devices.retain_mut(|device| {
+            let followed = match &mut device.feed {
+                Some(feed) => feed.pump(&device.link, app),
+                None => Feed::open(&device.link, store, session_id, app)
+                    .map(|feed| device.feed = Some(feed)),
+            };
+            // The log cannot be followed: say so and hang up, rather
+            // than leave the device looking at a log that silently
+            // stopped.
+            let Err(error) = followed else { return true };
             let text = format!("cannot follow this session: {error}");
-            let _ = link.to_device.send(ToDevice::Notice { text });
-            (self.link, self.feed) = (None, None);
-            if let Some(view) = app.remote.as_mut()
-                && let RemoteStatus::Connected(id) = &view.status
-            {
-                view.status = RemoteStatus::Away(id.clone());
+            let _ = device.link.to_device.send(ToDevice::Notice { text });
+            lost.push(device.peer);
+            false
+        });
+        if let Some(view) = app.remote.as_mut() {
+            for peer in lost {
+                view.apply(Change::Away(peer));
             }
         }
     }
 
-    /// What the device sent since the last call; `run_app` does them,
-    /// because the reply channels and the turn are its own. An image
-    /// request is answered here, from the log the feed follows.
-    pub(crate) fn commands(&mut self) -> Vec<FromDevice> {
-        let Some(link) = self.link.as_mut() else {
-            return Vec::new();
-        };
+    /// What the devices sent since the last call, each with its sender;
+    /// `run_app` does them, because the reply channels and the turn are
+    /// its own. An image request is answered here, from the log the
+    /// asking device's feed follows.
+    pub(crate) fn commands(&mut self) -> Vec<(EndpointId, FromDevice)> {
         let mut commands = Vec::new();
-        while let Ok(command) = link.from_device.try_recv() {
-            match command {
-                FromDevice::Image { event_id, n } => {
-                    let answer = match &self.feed {
-                        Some(feed) => feed.image(&event_id, n),
-                        None => ToDevice::Image {
-                            event_id,
-                            n,
-                            image: None,
-                        },
-                    };
-                    let _ = link.to_device.send(answer);
+        for device in &mut self.devices {
+            while let Ok(command) = device.link.from_device.try_recv() {
+                match command {
+                    FromDevice::Image { event_id, n } => {
+                        let answer = match &device.feed {
+                            Some(feed) => feed.image(&event_id, n),
+                            None => ToDevice::Image {
+                                event_id,
+                                n,
+                                image: None,
+                            },
+                        };
+                        let _ = device.link.to_device.send(answer);
+                    }
+                    command => commands.push((device.peer, command)),
                 }
-                command => commands.push(command),
             }
         }
         commands
     }
 
-    /// Tells the device why its last command did nothing.
-    pub(crate) fn notify(&self, text: String) {
-        if let Some(link) = &self.link {
-            let _ = link.to_device.send(ToDevice::Notice { text });
+    /// Tells `peer` why its last command did nothing.
+    pub(crate) fn notify(&self, peer: EndpointId, text: String) {
+        if let Some(device) = self.devices.iter().find(|device| device.peer == peer) {
+            let _ = device.link.to_device.send(ToDevice::Notice { text });
         }
     }
 
-    /// Keeps the newest link; a disconnect of one already replaced is
-    /// old news and changes nothing.
+    /// Keeps each device's newest link; a disconnect of one already
+    /// replaced is old news and changes nothing.
     fn take_event(&mut self, event: HostEvent) -> Option<Change> {
-        match event {
-            HostEvent::Paired { peer, link } => {
-                (self.link, self.feed) = (Some(link), None);
-                Some(Change::Paired(peer))
-            }
-            HostEvent::Welcome { peer, link } => {
-                (self.link, self.feed) = (Some(link), None);
-                Some(Change::Back(peer))
-            }
+        let (peer, link, change) = match event {
+            HostEvent::Paired { peer, link } => (peer, link, Change::Paired(peer)),
+            HostEvent::Welcome { peer, link } => (peer, link, Change::Back(peer)),
             HostEvent::Disconnected { peer, serial } => {
-                let current = self.link.as_ref().is_some_and(|l| l.serial == serial);
-                current.then(|| {
-                    (self.link, self.feed) = (None, None);
-                    Change::Away(peer)
-                })
+                let before = self.devices.len();
+                self.devices
+                    .retain(|device| !(device.peer == peer && device.link.serial == serial));
+                return (self.devices.len() < before).then_some(Change::Away(peer));
             }
-            HostEvent::Refused(peer) => Some(Change::Refused(peer)),
+            HostEvent::Refused(peer) => return Some(Change::Refused(peer)),
+        };
+        let device = Device {
+            peer,
+            link,
+            feed: None,
+        };
+        match self.devices.iter_mut().find(|known| known.peer == peer) {
+            Some(known) => *known = device,
+            None => self.devices.push(device),
         }
+        Some(change)
     }
 
     fn start(&mut self) {
@@ -284,7 +319,8 @@ impl RemoteControl {
             starting.abort();
         }
         self.events = None;
-        (self.link, self.feed) = (None, None);
+        self.devices.clear();
+        self.open = None;
         if let Some(host) = self.host.take() {
             tokio::spawn(host.stop());
         }
@@ -594,22 +630,28 @@ mod tests {
     }
 
     #[test]
-    fn pairing_connects_and_a_drop_leaves_the_device_away() {
+    fn devices_connect_drop_and_come_back_each_on_its_own() {
         let mut view = RemoteView::ready("https://x/#t".into());
-        let phone = device();
+        let (phone, desktop) = (device(), device());
         assert!(view.apply(Change::Paired(phone)).is_some());
-        assert_eq!(view.status, RemoteStatus::Connected(short(&phone)));
+        assert!(view.apply(Change::Paired(desktop)).is_some());
+        assert_eq!(view.connected, [short(&phone), short(&desktop)]);
         view.apply(Change::Away(phone));
-        assert_eq!(view.status, RemoteStatus::Away(short(&phone)));
+        assert_eq!(view.connected, [short(&desktop)]);
         assert_eq!(view.apply(Change::Back(phone)), None);
-        assert_eq!(view.status, RemoteStatus::Connected(short(&phone)));
+        assert_eq!(view.apply(Change::Back(phone)), None, "a second tab");
+        assert_eq!(view.connected, [short(&desktop), short(&phone)]);
+        assert_eq!(view.paired, 2);
     }
 
     #[test]
     fn a_refused_device_is_a_notice_not_a_status() {
         let mut view = RemoteView::ready("https://x/#t".into());
         assert!(view.apply(Change::Refused(device())).is_some());
-        assert_eq!(view.status, RemoteStatus::Waiting);
+        assert_eq!(
+            (view.status.clone(), view.connected.len()),
+            (RemoteStatus::Ready, 0)
+        );
     }
 
     fn link(serial: u64) -> Link {
@@ -818,7 +860,36 @@ mod tests {
             serial: 1,
         };
         assert_eq!(control.take_event(current), Some(Change::Away(phone)));
-        assert!(control.link.is_none());
+        assert!(control.devices.is_empty());
+    }
+
+    /// A second device has its own link: one leaving does not touch the
+    /// other, and a command's reply goes to its sender.
+    #[test]
+    fn each_device_keeps_its_link_and_hears_its_own_replies() {
+        let mut control = RemoteControl::default();
+        let (phone, desktop) = (device(), device());
+        let (phone_link, mut phone_end) = linked(0);
+        let (desktop_link, mut desktop_end) = linked(1);
+        control.take_event(HostEvent::Paired {
+            peer: phone,
+            link: phone_link,
+        });
+        control.take_event(HostEvent::Paired {
+            peer: desktop,
+            link: desktop_link,
+        });
+        control.notify(desktop, "for the desktop".into());
+        assert!(drain(&mut phone_end).is_empty());
+        assert_eq!(drain(&mut desktop_end).len(), 1);
+
+        let gone = HostEvent::Disconnected {
+            peer: phone,
+            serial: 0,
+        };
+        assert_eq!(control.take_event(gone), Some(Change::Away(phone)));
+        assert_eq!(control.devices.len(), 1);
+        assert_eq!(control.devices[0].peer, desktop);
     }
 
     fn screen(view: &RemoteView, width: u16, height: u16) -> String {

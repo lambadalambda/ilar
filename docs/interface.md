@@ -305,17 +305,22 @@ cache, and a newer `/btw` replaces a still-running one.
 
 ## Remote control: `/remote`
 
-`/remote` opens a QR code for this session. A phone that scans it is
-paired with this session only: the code carries a one-time secret, and
-the first device that shows it is the only one let in from then on. It
-can drop and reconnect without the code. The connection goes over iroh
-through n0's public relay, encrypted end to end; no server of ours is
-involved. `c` copies the link (to send it to the phone some other way).
-Esc closes the modal and leaves remote control on; `/remote`
-opens it again, and `/remote stop` ends it. Switching session or
-quitting ends it too, and every start makes a new key, so an old code
-reaches nothing. The status line ends in `⇄ remote` while it is on and
-`⇄ phone` while a device is connected.
+`/remote` opens a QR code for this session. A device that scans it is
+paired with this session only. The code carries a secret, and it pairs
+new devices only while the QR window is on screen: a phone and a
+desktop (or more) can pair, but a copied or photographed link adds
+nobody after Esc. A paired device can drop and reconnect without the
+code; if it connects twice (two tabs), the newer connection replaces
+its older one. The connection goes over iroh through n0's public
+relay, encrypted end to end; no server of ours is involved. `c` copies
+the link (to send it to a device some other way). Esc closes the modal
+and leaves remote control on; `/remote` opens it again (to add a
+device), and `/remote stop` ends it and forgets every device.
+Switching session or quitting ends it too, and every start makes a new
+key, so an old code reaches nothing. The status line ends in
+`⇄ remote` while it is on, `⇄ phone` while a device is connected and
+`⇄ 2 devices` (and so on) for more. All connected devices see the same
+session and may all drive it; the terminal's rules below apply to each.
 
 A paired device sees the session as the web share renders it, with
 the running step streaming, and whether a tool waits on a grant or a

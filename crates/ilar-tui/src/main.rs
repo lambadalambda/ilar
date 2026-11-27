@@ -4423,8 +4423,9 @@ async fn run_app(
             }
         }
         remote_control.tick(app, store, session_id);
-        // The phone's commands, done as the keys would do them.
-        for command in remote_control.commands() {
+        // The devices' commands, done as the keys would do them; what a
+        // command could not do goes back to the device that sent it.
+        for (sender, command) in remote_control.commands() {
             let state = observe(
                 app,
                 &turn_handle,
@@ -4457,7 +4458,7 @@ async fn run_app(
                 ),
             };
             if let Some(text) = told {
-                remote_control.notify(text);
+                remote_control.notify(sender, text);
             }
         }
         // The memory menu reads the store and this session's recalls.

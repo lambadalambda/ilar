@@ -170,15 +170,19 @@ impl App {
     /// while `/remote` is on: after Esc it is the only sign of it.
     pub(crate) fn status_line(&self, width: u16) -> Line<'static> {
         use crate::remote::RemoteStatus;
-        let marker = self.remote.as_ref().map(|view| match view.status {
-            RemoteStatus::Connected(_) => (" ⇄ phone", theme::RUNNING),
-            RemoteStatus::Failed(_) => (" ⇄ remote failed", ERROR),
-            _ => (" ⇄ remote", MUTED),
-        });
+        let marker = self
+            .remote
+            .as_ref()
+            .map(|view| match (&view.status, view.connected.len()) {
+                (RemoteStatus::Failed(_), _) => (" ⇄ remote failed".to_string(), ERROR),
+                (_, 0) => (" ⇄ remote".to_string(), MUTED),
+                (_, 1) => (" ⇄ phone".to_string(), theme::RUNNING),
+                (_, many) => (format!(" ⇄ {many} devices"), theme::RUNNING),
+            });
         let Some((text, color)) = marker.filter(|_| width >= 64) else {
             return self.status_line_body(width);
         };
-        let marker_width = UnicodeWidthStr::width(text) as u16;
+        let marker_width = UnicodeWidthStr::width(text.as_str()) as u16;
         let mut line = self.status_line_body(width - marker_width);
         line.spans
             .push(Span::styled(text, Style::default().fg(color)));

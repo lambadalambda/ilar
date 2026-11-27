@@ -360,7 +360,8 @@ async function start(newLink) {
     await ensureConnected();
   } catch (error) {
     const reason = {
-      refused: "This device was refused: the code was used by another device, or it belongs to a session that has stopped remote control.",
+      refused:
+        "This device was refused: a new device pairs only while the session shows its QR code (run /remote there), and a session that stopped remote control takes no one.",
       ticket: "That is not an ilar remote link.",
       busy: "The session is busy; try again in a moment.",
     }[kind(error)];

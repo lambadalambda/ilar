@@ -6863,10 +6863,21 @@ mod tests {
         assert!(waiting.ends_with("⇄ remote"), "{waiting}");
         assert_eq!(UnicodeWidthStr::width(waiting.as_str()), 120, "{waiting}");
 
-        app.remote.as_mut().unwrap().status = RemoteStatus::Connected("5dda89b5".into());
+        app.remote.as_mut().unwrap().connected = vec!["5dda89b5".into()];
         let connected = rendered_text(&app.status_line(120));
         assert!(connected.ends_with("⇄ phone"), "{connected}");
         assert!(UnicodeWidthStr::width(connected.as_str()) <= 120);
+
+        app.remote
+            .as_mut()
+            .unwrap()
+            .connected
+            .push("e0c1a2b3".into());
+        let two = rendered_text(&app.status_line(120));
+        assert!(two.ends_with("⇄ 2 devices"), "{two}");
+
+        app.remote.as_mut().unwrap().status = RemoteStatus::Failed("relay".into());
+        assert!(rendered_text(&app.status_line(120)).ends_with("⇄ remote failed"));
     }
 
     #[test]
