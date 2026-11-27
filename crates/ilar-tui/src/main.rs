@@ -3449,6 +3449,60 @@ fn answer_grant(
     deliver_answer(app, grant_reply, answer, line, "processing grant")
 }
 
+/// Why a model switch from the phone cannot happen now, if it cannot:
+/// the TUI picker's rules (between turns, a configured model, one of its
+/// levels).
+fn remote_model_refusal(app: &App, model: &str, variant: Option<&str>) -> Option<String> {
+    if app.busy {
+        return Some("a turn is running — switch models between turns".into());
+    }
+    if !app.available_models.iter().any(|known| known == model) {
+        return Some(format!("{model} is not a configured model"));
+    }
+    let levels = ilar::model::find(model).map_or(&[][..], |info| info.variants());
+    match variant {
+        Some(level) if !levels.iter().any(|known| known.id == level) => {
+            Some(format!("{model} has no thinking level {level}"))
+        }
+        _ => None,
+    }
+}
+
+/// A model switch from the phone, as the picker does it.
+#[allow(clippy::too_many_arguments)]
+fn switch_model_remotely(
+    app: &mut App,
+    resolver: &dyn ProviderResolver,
+    store: &SessionStore,
+    session_id: &str,
+    system_prompt: &str,
+    registry: &ToolRegistry,
+    model: String,
+    variant: Option<String>,
+) -> Option<String> {
+    if let Some(refusal) = remote_model_refusal(app, &model, variant.as_deref()) {
+        return Some(refusal);
+    }
+    match adopt_model_selection(
+        app,
+        resolver,
+        store,
+        session_id,
+        system_prompt,
+        registry,
+        model.clone(),
+        variant,
+    ) {
+        Ok(()) => {
+            // A picker open at the terminal would show the old choice.
+            app.model_picker = None;
+            app.variant_picker = None;
+            None
+        }
+        Err(error) => Some(format!("cannot switch to {model}: {error}")),
+    }
+}
+
 /// A command from the paired phone, done the way the keys do it. A
 /// prompt goes through `decide::submit` like typed text, but never
 /// touches the draft. Returns what the phone should be told, if the
@@ -3535,6 +3589,9 @@ fn apply_remote_command(
         }
         FromDevice::Cancel => (!abort_turn(app, cancel, notifications_paused))
             .then(|| "nothing is running to cancel".into()),
+        // run_app switches models itself: that needs the resolver and
+        // the store, which this does not hold.
+        FromDevice::Model { .. } => Some("a model switch did not reach the session".into()),
     }
 }
 
@@ -4337,18 +4394,31 @@ async fn run_app(
                 &steer_tx,
                 notifications_paused,
             );
-            if let Some(text) = apply_remote_command(
-                app,
-                command,
-                &state,
-                &mut intents,
-                steer_tx.as_ref(),
-                &mut grant_reply,
-                &mut question_reply,
-                &mut pending_question_id,
-                cancel.as_ref(),
-                &mut notifications_paused,
-            ) {
+            let told = match command {
+                ilar_remote::wire::FromDevice::Model { model, variant } => switch_model_remotely(
+                    app,
+                    resolver.as_ref(),
+                    store,
+                    session_id,
+                    system_prompt,
+                    registry,
+                    model,
+                    variant,
+                ),
+                command => apply_remote_command(
+                    app,
+                    command,
+                    &state,
+                    &mut intents,
+                    steer_tx.as_ref(),
+                    &mut grant_reply,
+                    &mut question_reply,
+                    &mut pending_question_id,
+                    cancel.as_ref(),
+                    &mut notifications_paused,
+                ),
+            };
+            if let Some(text) = told {
                 remote_control.notify(text);
             }
         }
@@ -6162,6 +6232,34 @@ mod tests {
             slots.cancel.as_ref(),
             &mut slots.paused,
         )
+    }
+
+    #[test]
+    fn a_phone_model_switch_waits_for_the_turn_and_names_only_known_choices() {
+        let model = ilar::model::catalog()
+            .iter()
+            .find(|model| !model.variants().is_empty())
+            .expect("a catalog model with thinking levels");
+        let mut app = super::App::new();
+        app.available_models = vec![model.full_id()];
+        let level = Some(model.variants()[0].id.to_string());
+        let refusal = |app: &super::App, id: &str, variant: &Option<String>| {
+            super::remote_model_refusal(app, id, variant.as_deref())
+        };
+
+        assert_eq!(refusal(&app, &model.full_id(), &level), None);
+        assert_eq!(
+            refusal(&app, &model.full_id(), &None),
+            None,
+            "the default level"
+        );
+        assert!(refusal(&app, "nowhere/unknown", &None).is_some());
+        assert!(refusal(&app, &model.full_id(), &Some("no-such-level".into())).is_some());
+        app.busy = true;
+        assert_eq!(
+            refusal(&app, &model.full_id(), &level).as_deref(),
+            Some("a turn is running — switch models between turns")
+        );
     }
 
     #[test]

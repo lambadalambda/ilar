@@ -9,7 +9,7 @@ use futures::FutureExt;
 use ilar::session::{LiveMessage, LiveTail, SessionStore, SessionTail, TailUpdate, live_path};
 use ilar_remote::EndpointId;
 use ilar_remote::host::{HostEvent, Link, RemoteHost};
-use ilar_remote::wire::{FromDevice, Prompt, ToDevice};
+use ilar_remote::wire::{Choice, FromDevice, ModelChoice, Prompt, ToDevice};
 use ratatui::Frame;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -284,6 +284,8 @@ pub(crate) struct Feed {
     inputs: HashMap<String, Value>,
     busy: bool,
     prompt: Option<Prompt>,
+    /// The model and thinking level the device was last told.
+    model: (String, Option<String>),
 }
 
 impl Feed {
@@ -313,8 +315,10 @@ impl Feed {
             inputs: HashMap::new(),
             busy: app.busy,
             prompt: current_prompt(app),
+            model: current_model(app),
         };
         feed.snapshot(link);
+        let _ = link.to_device.send(model_menu(app));
         Ok(feed)
     }
 
@@ -385,7 +389,43 @@ impl Feed {
             self.prompt = prompt.clone();
             send(ToDevice::Prompt { prompt });
         }
+        let model = current_model(app);
+        if model != self.model {
+            self.model = model;
+            send(model_menu(app));
+        }
         Ok(())
+    }
+}
+
+fn current_model(app: &App) -> (String, Option<String>) {
+    (app.current_model.clone(), app.current_variant.clone())
+}
+
+/// The TUI picker's choices: the configured models the catalog can
+/// name, each with its thinking levels.
+fn model_menu(app: &App) -> ToDevice {
+    let models = app
+        .available_models
+        .iter()
+        .filter_map(|id| ilar::model::find(id))
+        .map(|model| ModelChoice {
+            id: model.full_id(),
+            name: model.name.to_string(),
+            variants: model
+                .variants()
+                .iter()
+                .map(|variant| Choice {
+                    id: variant.id.to_string(),
+                    name: variant.name.to_string(),
+                })
+                .collect(),
+        })
+        .collect();
+    ToDevice::Models {
+        current: app.current_model.clone(),
+        variant: app.current_variant.clone(),
+        models,
     }
 }
 
@@ -577,8 +617,12 @@ mod tests {
         let mut app = App::new();
 
         let mut feed = Feed::open(&link, &store, &id, &app).unwrap();
-        let [ToDevice::Snapshot { page, busy, .. }] = &drain(&mut device)[..] else {
-            panic!("one snapshot first");
+        let [
+            ToDevice::Snapshot { page, busy, .. },
+            ToDevice::Models { .. },
+        ] = &drain(&mut device)[..]
+        else {
+            panic!("the snapshot first, then the model menu");
         };
         assert!(!busy);
         assert!(page["events"].to_string().contains("first"), "{page}");
@@ -597,6 +641,59 @@ mod tests {
         );
         feed.pump(&link, &app).unwrap();
         assert!(drain(&mut device).is_empty(), "nothing new, nothing sent");
+    }
+
+    #[test]
+    fn the_model_menu_names_the_choices_and_follows_a_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let id = ilar::session::new_id();
+        store
+            .create(ilar::session::SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        let (link, mut device) = linked(0);
+        let mut app = App::new();
+        let with_levels = ilar::model::catalog()
+            .iter()
+            .find(|model| !model.variants().is_empty())
+            .expect("a catalog model with thinking levels");
+        app.current_model = with_levels.full_id();
+        app.available_models = vec![with_levels.full_id(), "nowhere/unknown".into()];
+
+        let mut feed = Feed::open(&link, &store, &id, &app).unwrap();
+        let sent = drain(&mut device);
+        let Some(ToDevice::Models {
+            current,
+            variant,
+            models,
+        }) = sent.last()
+        else {
+            panic!("{sent:?}");
+        };
+        assert_eq!(current, &with_levels.full_id());
+        assert_eq!(variant, &None);
+        assert_eq!(
+            models.len(),
+            1,
+            "a model the catalog cannot name is left out"
+        );
+        assert_eq!(models[0].variants.len(), with_levels.variants().len());
+
+        let level = with_levels.variants()[0].id.to_string();
+        app.current_variant = Some(level.clone());
+        feed.pump(&link, &app).unwrap();
+        assert!(
+            matches!(&drain(&mut device)[..], [ToDevice::Models { variant: Some(v), .. }] if *v == level)
+        );
+        feed.pump(&link, &app).unwrap();
+        assert!(drain(&mut device).is_empty(), "no change, no menu");
     }
 
     #[test]

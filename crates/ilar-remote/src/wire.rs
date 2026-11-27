@@ -53,6 +53,29 @@ pub enum ToDevice {
     Notice {
         text: String,
     },
+    /// The model menu: what the session runs on, and what it could.
+    /// Sent after the snapshot and again on every change.
+    Models {
+        current: String,
+        /// The thinking level; `None` is the provider's default.
+        variant: Option<String>,
+        models: Vec<ModelChoice>,
+    },
+}
+
+/// A model the session may switch to, with its thinking levels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChoice {
+    /// `provider/model`, as the TUI's picker names it.
+    pub id: String,
+    pub name: String,
+    pub variants: Vec<Choice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    pub id: String,
+    pub name: String,
 }
 
 /// What the session waits on.
@@ -92,6 +115,12 @@ pub enum FromDevice {
         response: Value,
     },
     Cancel,
+    /// Switch the model and thinking level (`None`: the provider's
+    /// default), as the TUI's picker does: between turns only.
+    Model {
+        model: String,
+        variant: Option<String>,
+    },
 }
 
 /// Mirrors `ilar::secrets::Grant`.
@@ -208,6 +237,36 @@ mod tests {
         lines.push(b"0123456789").unwrap();
         assert_eq!(lines.next_line(), None);
         assert!(lines.push(b"x").is_err());
+    }
+
+    #[test]
+    fn the_model_menu_and_a_choice_have_a_stable_json_shape() {
+        let models = ToDevice::Models {
+            current: "zai/glm-5.2".into(),
+            variant: Some("high".into()),
+            models: vec![ModelChoice {
+                id: "zai/glm-5.2".into(),
+                name: "GLM 5.2".into(),
+                variants: vec![Choice {
+                    id: "high".into(),
+                    name: "High".into(),
+                }],
+            }],
+        };
+        assert_eq!(
+            String::from_utf8(encode(&models)).unwrap(),
+            "{\"type\":\"models\",\"current\":\"zai/glm-5.2\",\"variant\":\"high\",\"models\":[{\"id\":\"zai/glm-5.2\",\"name\":\"GLM 5.2\",\"variants\":[{\"id\":\"high\",\"name\":\"High\"}]}]}\n"
+        );
+        let choice: FromDevice =
+            serde_json::from_str("{\"type\":\"model\",\"model\":\"a/b\",\"variant\":null}")
+                .unwrap();
+        assert_eq!(
+            choice,
+            FromDevice::Model {
+                model: "a/b".into(),
+                variant: None
+            }
+        );
     }
 
     #[test]
