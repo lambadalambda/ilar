@@ -514,3 +514,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Remote control over iroh — index](issues/remote-control-over-iroh-index.md)
 - [x] [The phone picks model and thinking](issues/the-phone-picks-model-and-thinking.md)
 - [x] [Images to and from the phone](issues/images-to-and-from-the-phone.md)
+- [x] [The Svelte renderer](issues/the-svelte-renderer.md)
+- [x] [Svelte web UI — index](issues/svelte-web-ui-index.md)

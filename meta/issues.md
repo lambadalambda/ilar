@@ -134,10 +134,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [Import Claude Code's memories](issues/import-claude-codes-memories.md)
 
-## Milestone 29 — Svelte web UI
-
-- [ ] [Svelte web UI — index](issues/svelte-web-ui-index.md) — index
-- [ ] [The Svelte renderer](issues/the-svelte-renderer.md)
 
 ## Review follow-ups
 
