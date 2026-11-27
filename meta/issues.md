@@ -138,7 +138,6 @@ milestones 15–17 stay filed — they come back when the feature does.*
 
 - [ ] [Svelte web UI — index](issues/svelte-web-ui-index.md) — index
 - [ ] [The Svelte renderer](issues/the-svelte-renderer.md)
-- [ ] [The phone picks model and thinking](issues/the-phone-picks-model-and-thinking.md)
 - [ ] [Images to and from the phone](issues/images-to-and-from-the-phone.md)
 
 ## Review follow-ups

@@ -512,3 +512,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [The remote wire](issues/the-remote-wire.md)
 - [x] [The remote PWA](issues/the-remote-pwa.md)
 - [x] [Remote control over iroh — index](issues/remote-control-over-iroh-index.md)
+- [x] [The phone picks model and thinking](issues/the-phone-picks-model-and-thinking.md)
