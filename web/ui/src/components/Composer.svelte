@@ -8,6 +8,7 @@
   import QuestionCard from "./QuestionCard.svelte";
   import { apiPath, post, REMOTE, SHARE } from "../lib/source.js";
   import { compact, cost, FATE_WORDS, message } from "../lib/format.js";
+  import { currentModel } from "../lib/rows.js";
   let { id, session, view, version } = $props();
 
   let text = $state("");
@@ -40,11 +41,11 @@
 
   const head = $derived.by(() => {
     version;
-    return { live: Boolean(view.live), usage: view.usage || {}, count: view.count, status: view.status, model: view.session && view.session.model };
+    return { live: Boolean(view.live), usage: view.usage || {}, count: view.count, status: view.status, model: currentModel(view.events, view.session && view.session.model) };
   });
   const state = $derived((session && session.state) || (head.live ? "working" : "idle"));
   const driven = $derived(Boolean(session && session.driven));
-  const model = $derived((session && session.model) || head.model || "");
+  const model = $derived(head.model || (session && session.model) || "");
   const saying = $derived(
     state === "working"
       ? (session && session.activity) || (model ? model + " is working…" : "working…")

@@ -86,3 +86,10 @@ test("stabilize keeps the row objects that did not change", async () => {
   assert.equal(again.rows[0], first.rows[0]);
   assert.equal(again.rows.length, 2);
 });
+
+test("the newest model change names the model, else the session's", async () => {
+  const { currentModel } = await import("../src/lib/rows.js");
+  const events = [{ type: "model_change", model: "a/one" }, { type: "user_message" }, { type: "model_change", model: "b/two", variant: "high" }];
+  assert.equal(currentModel(events, "z/start"), "b/two · high");
+  assert.equal(currentModel([], "z/start"), "z/start");
+});

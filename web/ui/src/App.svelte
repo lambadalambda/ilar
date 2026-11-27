@@ -3,6 +3,7 @@
 <script>
   import Chat from "./components/Chat.svelte";
   import Details from "./components/Details.svelte";
+  import ModelMenu from "./components/ModelMenu.svelte";
   import Sheet from "./components/Sheet.svelte";
   import Sidebar from "./components/Sidebar.svelte";
   import { api, DETACHED, REMOTE, SHARE, source } from "./lib/source.js";
@@ -99,11 +100,17 @@
   {/if}
   <Chat {id} {view} {version} {session} ondrawer={() => (drawer = !drawer)} onmenu={() => (menu = true)} />
   {#if wide}
-    <aside class="side-panel">{#if id}<Details {id} {view} {version} />{/if}</aside>
+    <aside class="side-panel">
+      {#if id}
+        {#if REMOTE}<ModelMenu />{/if}
+        <Details {id} {view} {version} />
+      {/if}
+    </aside>
   {/if}
 </div>
 {#if menu && id && !wide}
   <Sheet title="Session" onclose={() => (menu = false)}>
+    {#if REMOTE}<ModelMenu />{/if}
     <Details {id} {view} {version} />
   </Sheet>
 {/if}

@@ -163,6 +163,16 @@ export function digest(events) {
   return { meta: meta || {}, latest, compactions };
 }
 
+/** The model the session runs on now: its newest switch, else what the
+ * session header says. */
+export function currentModel(events, fallback) {
+  for (let at = events.length - 1; at >= 0; at -= 1) {
+    const event = events[at];
+    if (event.type === "model_change") return event.model + (event.variant ? " · " + event.variant : "");
+  }
+  return fallback || "";
+}
+
 /** Sessions by directory, newest group first, no-directory last. */
 export function grouped(sessions) {
   const groups = new Map();

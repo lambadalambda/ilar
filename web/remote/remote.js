@@ -4,9 +4,9 @@
 // and share files use — a source that reads from the wire.
 //
 // The wire is crates/ilar-remote/src/wire.rs: a `snapshot` (the whole log
-// as one page in serve's shape), then `append`, `live`, `busy`, `prompt`
-// and `notice` frames; this page sends `prompt`, `grant`, `question` and
-// `cancel`.
+// as one page in serve's shape), then `append`, `live`, `busy`, `prompt`,
+// `notice` and `models` frames; this page sends `prompt`, `grant`,
+// `question`, `cancel` and `model`.
 
 import init, { connect } from "./pkg/ilar_remote_web.js";
 
@@ -57,6 +57,8 @@ let busy = false;
 let prompt = null;
 let notice = "";
 let noticeTimer = null;
+// The model menu: {current, variant, models[{id, name, variants}]}.
+let models = null;
 // Snapshots received, and where the page app.js last loaded stood: a
 // stream that opens behind the page (a new snapshot, or appends since)
 // tells the renderer to reload rather than miss them.
@@ -124,6 +126,9 @@ function handle(message) {
       break;
     case "prompt":
       prompt = message.prompt;
+      break;
+    case "models":
+      models = { current: message.current, variant: message.variant, models: message.models };
       break;
     case "notice":
       notice = message.text;
@@ -258,7 +263,7 @@ window.__ILAR_REMOTE__ = {
     );
     return stream;
   },
-  state: () => ({ prompt, notice }),
+  state: () => ({ prompt, notice, models }),
   subscribe(listener) {
     listeners.add(listener);
     return () => listeners.delete(listener);

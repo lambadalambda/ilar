@@ -4,7 +4,7 @@
 <script>
   import { api, apiPath, DETACHED, SHARE } from "../lib/source.js";
   import { basename, compact, contextTokens, tokens } from "../lib/format.js";
-  import { digest } from "../lib/rows.js";
+  import { currentModel, digest } from "../lib/rows.js";
   import { preview } from "../lib/richtext.js";
   let { id, view, version } = $props();
 
@@ -28,7 +28,8 @@
 
   const facts = $derived.by(() => {
     version;
-    return digest(view.events);
+    const facts = digest(view.events);
+    return { ...facts, model: currentModel(view.events, (view.session && view.session.model) || facts.meta.model) };
   });
   const session = $derived.by(() => {
     version;
@@ -54,7 +55,7 @@
 
 <div class="list-title">Session</div>
 <div class="list">
-  <div class="list-row"><span class="label">Model</span><span class="value mono">{session.model || facts.meta.model || "—"}</span></div>
+  <div class="list-row"><span class="label">Model</span><span class="value mono">{facts.model || "—"}</span></div>
   <div class="list-row"><span class="label">Agent</span><span class="value mono">{session.agent || facts.meta.agent || "—"}</span></div>
   <div class="list-row"><span class="label">Directory</span><span class="value mono" title={session.cwd || facts.meta.cwd || ""}>{basename(session.cwd || facts.meta.cwd) || "—"}</span></div>
   {#if facts.compactions}<div class="list-row"><span class="label">Compactions</span><span class="value">{facts.compactions}</span></div>{/if}

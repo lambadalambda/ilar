@@ -6,7 +6,7 @@
   import Rows from "./Rows.svelte";
   import Spans from "./Spans.svelte";
   import { inline, preview } from "../lib/richtext.js";
-  import { pageRows, sessionLive, stabilize } from "../lib/rows.js";
+  import { currentModel, pageRows, sessionLive, stabilize } from "../lib/rows.js";
   import { DETACHED } from "../lib/source.js";
   import { tick } from "svelte";
   let { id, view, version, session, ondrawer, onmenu } = $props();
@@ -39,6 +39,10 @@
     return sessionLive(session || view.session);
   });
   const state = $derived((session && session.state) || (head && head.state) || "idle");
+  const model = $derived.by(() => {
+    version;
+    return currentModel(view.events, head.model);
+  });
 
   $effect(() => {
     version;
@@ -71,7 +75,7 @@
     <div class="chat-title">
       <h1>{#if id}<Spans spans={inline(preview(head.title || "New session", 120))} />{:else}ilar{/if}</h1>
       {#if id}
-        <div class="chat-sub"><span class="dot {state}"></span>{head.model || ""}{state === "working" ? " · working" : ""}</div>
+        <div class="chat-sub"><span class="dot {state}"></span>{model}{state === "working" ? " · working" : ""}</div>
       {/if}
     </div>
     <button class="icon-button menu-toggle" class:hidden={!id} type="button" onclick={onmenu} aria-label="session menu">⋯</button>
