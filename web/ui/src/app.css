@@ -922,6 +922,9 @@ pre.diff .hunk {
   box-shadow: var(--shadow);
   font-size: 13px;
 }
+.hidden-file {
+  display: none;
+}
 .attached {
   display: flex;
   gap: 6px;
