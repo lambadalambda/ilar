@@ -317,6 +317,7 @@ async function start(newLink) {
   $("pair").hidden = true;
   $("app").hidden = false;
   await import("./app.js");
+  window.__ILAR_STARTED__ = true;
 }
 
 $("pair-go").addEventListener("click", () => {
@@ -361,13 +362,19 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 
-await init();
-const saved = stored() || {};
-key = saved.key || [];
-const fresh = takeLink();
-if (fresh) start(fresh);
-else if (saved.link) start(saved.link);
-else {
+async function boot() {
+  // Without WebAssembly the page's own script has said why (index.html).
+  if (typeof WebAssembly !== "object") return;
+  try {
+    await init();
+  } catch (error) {
+    return showPairing("The iroh client did not load: " + String((error && error.message) || error));
+  }
+  const saved = stored() || {};
+  key = saved.key || [];
+  const fresh = takeLink();
+  if (fresh) return start(fresh);
+  if (saved.link) return start(saved.link);
   let why = "";
   try {
     why = sessionStorage.getItem(STORE + ".why") || "";
@@ -377,3 +384,5 @@ else {
   }
   showPairing(why);
 }
+
+boot();

@@ -27,7 +27,7 @@
   </head>
   <body>
     <div id="app"></div>
-    <main id="pair" class="pair" hidden>
+    <main id="pair" class="pair">
       <h1>ilar remote</h1>
       <p>Run <code>/remote</code> in an ilar session, then scan its code or paste its link.</p>
       <p id="pair-error" class="pair-error" hidden></p>
@@ -37,8 +37,74 @@
       </div>
       <button id="pair-scan" type="button" hidden>scan the code</button>
       <video id="pair-video" playsinline muted hidden></video>
-      <p id="pair-status" class="pair-status"></p>
+      <p id="pair-status" class="pair-status">loading…</p>
+      <p class="pair-foot">
+        <span id="pair-version">build dev</span> ·
+        <button id="pair-reset" type="button" class="pair-reset">clear the cache and reload</button>
+      </p>
     </main>
+    <script>
+      // A classic script, so it runs even where the modules cannot: a
+      // page that does not start (no WebAssembly in Lockdown Mode, a file
+      // that did not load, a Safari without import maps) says why rather
+      // than staying blank. remote.js sets __ILAR_STARTED__ once the
+      // session renders; errors after that belong to the app.
+      (function () {
+        var $ = function (id) {
+          return document.getElementById(id);
+        };
+        window.__ilarFail = function (text) {
+          $("app").hidden = true;
+          $("pair").hidden = false;
+          $("pair-error").hidden = false;
+          $("pair-error").textContent = text;
+          $("pair-status").textContent = "";
+        };
+        addEventListener(
+          "error",
+          function (event) {
+            if (window.__ILAR_STARTED__) return;
+            var target = event.target;
+            if (target && target !== window && target.tagName !== "SCRIPT") return;
+            __ilarFail(
+              "The app did not start: " +
+                (event.message || "a file did not load (" + (target && target.src) + ")"),
+            );
+          },
+          true,
+        );
+        addEventListener("unhandledrejection", function (event) {
+          if (window.__ILAR_STARTED__) return;
+          var reason = event.reason;
+          __ilarFail("The app did not start: " + ((reason && reason.message) || reason));
+        });
+        // Drops the service worker and its cache, so the next load comes
+        // from the network.
+        $("pair-reset").addEventListener("click", function () {
+          var workers = navigator.serviceWorker
+            ? navigator.serviceWorker.getRegistrations().then(function (all) {
+                return Promise.all(all.map(function (r) { return r.unregister(); }));
+              })
+            : Promise.resolve();
+          var cached = window.caches
+            ? caches.keys().then(function (names) {
+                return Promise.all(names.map(function (n) { return caches.delete(n); }));
+              })
+            : Promise.resolve();
+          Promise.all([workers, cached]).then(
+            function () { location.reload(); },
+            function () { location.reload(); },
+          );
+        });
+        if (typeof WebAssembly !== "object") {
+          __ilarFail(
+            "This browser has WebAssembly turned off, and ilar remote needs it. " +
+              "Lockdown Mode does this. To allow it for this site only: tap the page " +
+              "menu (aA) in the address bar, then Website Settings, then turn off Lockdown Mode.",
+          );
+        }
+      })();
+    </script>
     <script type="module" src="remote.js"></script>
   </body>
 </html>
