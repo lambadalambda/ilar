@@ -47,3 +47,16 @@
 .pair-status {
   font-size: 13px;
 }
+.pair-foot {
+  margin-top: 32px;
+  font-size: 12px;
+}
+.pair .pair-reset {
+  min-height: 0;
+  padding: 0;
+  color: var(--dim);
+  background: none;
+  border: 0;
+  text-decoration: underline;
+  font-size: 12px;
+}

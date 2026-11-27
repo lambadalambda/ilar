@@ -26,6 +26,8 @@ cp web/remote/* "$OUT/"
 # A new build gets a new cache name, so phones drop the old shell, and
 # the cache list is what was built (wasm-bindgen may add snippets).
 VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
+sed -i.bak "s|<span id=\"pair-version\">build dev</span>|<span id=\"pair-version\">build $VERSION</span>|" "$OUT/index.html"
+rm "$OUT/index.html.bak"
 FILES=$(cd "$OUT" && find . -type f ! -name sw.js | sed 's|^\./||' | sort | sed 's/.*/"&"/' | paste -sd, -)
 sed -e "s/^const VERSION = \"dev\";/const VERSION = \"$VERSION\";/" \
   -e "s|^const SHELL = \[\];|const SHELL = [\"./\",$FILES];|" \
