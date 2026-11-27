@@ -22,14 +22,15 @@ self.addEventListener("activate", (event) => {
 });
 
 // The network first, so a deploy shows up on the next open; the cache
-// when there is none.
+// when there is none. "no-cache" asks the server each time: Pages says
+// max-age=600, which would hold an old copy for ten minutes.
 // Only this app's own files, and only good answers: a 404 during a
 // deploy must not replace the cached shell, and nothing the wasm client
 // fetches elsewhere belongs here.
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET" || new URL(event.request.url).origin !== location.origin) return;
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, { cache: "no-cache" })
       .then((response) => {
         if (response.ok) {
           const copy = response.clone();
