@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/ilar", "crates/ilar-tui", "crates/ilar-gateway", "crates/ilar-remote", "crates/ilar-remote-web"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license-file = "LICENSE"
 authors = ["lainsoykaf"]
