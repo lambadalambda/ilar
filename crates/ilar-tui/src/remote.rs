@@ -945,7 +945,7 @@ mod tests {
 
     #[test]
     fn the_qr_code_is_square_with_a_quiet_zone() {
-        let lines = qr_lines("https://lambadalambda.github.io/ilar/#AQIDBA");
+        let lines = qr_lines("https://remote.ilar.app/#AQIDBA");
         let width = lines[0].width();
         assert_eq!(lines.len(), width.div_ceil(2));
         let top: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();

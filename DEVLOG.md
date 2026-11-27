@@ -1,5 +1,17 @@
 # DEVLOG
 
+## ilar.app
+
+The domain is at Porkbun, and DNS is set through its API: the apex on
+GitHub Pages' four addresses (A and AAAA), `www` and `remote` as CNAMEs
+to `lambadalambda.github.io`. One Pages site has one custom domain, so
+the landing page is its own repository (`lambadalambda/ilar-site`,
+ilar.app) and this repository's site, the phone app, is
+`remote.ilar.app` — on its own origin, so the device key in its storage
+is no longer shared with other Pages sites of the account. Each domain
+was set on its Pages site before the DNS pointed there, so nobody else
+could claim the name in between.
+
 ## The renderer moves to Svelte
 
 The Preact `app.js` (no build step, vendored modules) is now a Svelte 5

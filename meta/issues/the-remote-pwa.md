@@ -38,4 +38,5 @@ turn. Confirmed on the user's iPhone 2026-11-27 (Lockdown Mode needs a
 per-site exception, which the page explains). Left over: a real phone on another
 network; iOS has no in-app scanner (the system camera opens the link);
 the app shares `lambadalambda.github.io`'s storage with other Pages
-sites of that account.
+sites of that account. (Fixed 2026-11-27: the app moved to its own origin,
+<https://remote.ilar.app/>.)

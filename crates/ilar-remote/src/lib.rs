@@ -24,9 +24,10 @@ pub use ticket::Ticket;
 /// images (`FromDevice::Prompt.images`, `FromDevice::Image`).
 pub const ALPN: &[u8] = b"ilar/remote/2";
 
-/// Where the PWA lives; the ticket rides in the link's `#fragment`, so
-/// it never reaches the web server.
-pub const DEFAULT_WEB_BASE: &str = "https://lambadalambda.github.io/ilar/";
+/// Where the PWA lives (the GitHub Pages site of this repository, on its
+/// own origin so its storage is its own); the ticket rides in the link's
+/// `#fragment`, so it never reaches the web server.
+pub const DEFAULT_WEB_BASE: &str = "https://remote.ilar.app/";
 
 /// Close code a refused peer sees: final, scan a new code.
 pub const REFUSED: u32 = 403;

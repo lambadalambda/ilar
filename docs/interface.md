@@ -336,17 +336,17 @@ commands that only the terminal can show (`/sessions`, `/rewind`,
 `/fork`, `/btw`, `/memory`, `/context`, `/remote` except `/remote stop`)
 are refused. Passwords are only ever typed at the terminal.
 
-The phone side is a web app at
-<https://lambadalambda.github.io/ilar/>, which the QR code links to:
-scan it with the phone's camera, or open the app and paste the link
-(Chrome on Android can also scan from inside the app). It renders the
-session with the same page as share files, and can be added to the
-home screen. The app keeps this device's key in the browser, so it
-reconnects without the code; clearing the site's data means scanning a
-new code. That storage belongs to the whole `lambadalambda.github.io`
-origin, so any other Pages site there could read it — serve the app
-from its own domain if that matters (`scripts/build-remote-web.sh`
-builds it; `.github/workflows/remote-web.yml` deploys it).
+The phone side is a web app at <https://remote.ilar.app/>, which the
+QR code links to: scan it with the phone's camera, or open the app and
+paste the link (Chrome on Android can also scan from inside the app).
+It renders the session with the same page as share files, and can be
+added to the home screen. The app keeps this device's key in the
+browser, on its own origin, so it reconnects without the code; clearing
+the site's data means scanning a new code. `scripts/build-remote-web.sh`
+builds it and `.github/workflows/remote-web.yml` deploys it to this
+repository's GitHub Pages site. The old address,
+`lambadalambda.github.io/ilar/`, redirects there, but a device paired
+on it keeps its key in the old origin and pairs again.
 
 `cargo run -p ilar-remote --example pair -- <link>` is a terminal
 stand-in for the phone: it prints what the session sends and sends each
