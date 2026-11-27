@@ -5,3 +5,6 @@
 # Python bytecode from scripts/
 __pycache__/
 *.pyc
+
+# web/ui (the Svelte renderer) installs here; its build output is committed.
+node_modules/
