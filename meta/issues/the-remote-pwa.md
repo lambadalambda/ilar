@@ -34,7 +34,8 @@ over n0's relay (paired in 1.8 s, a message started a turn) and with
 `scripts/remote-web-checks/cards.*`. The first iPhone scan gave a blank
 page: Safari fails on relay hosts with a root dot (see DEVLOG); fixed
 and checked on the iOS 26.5 simulator, a prompt from it ran a real
-turn. Open: a real phone on another
+turn. Confirmed on the user's iPhone 2026-11-27 (Lockdown Mode needs a
+per-site exception, which the page explains). Left over: a real phone on another
 network; iOS has no in-app scanner (the system camera opens the link);
 the app shares `lambadalambda.github.io`'s storage with other Pages
 sites of that account.

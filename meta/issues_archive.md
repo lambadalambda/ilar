@@ -510,3 +510,5 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [iroh reaches a browser](issues/iroh-reaches-a-browser.md)
 - [x] [A session pairs by QR](issues/a-session-pairs-by-qr.md)
 - [x] [The remote wire](issues/the-remote-wire.md)
+- [x] [The remote PWA](issues/the-remote-pwa.md)
+- [x] [Remote control over iroh — index](issues/remote-control-over-iroh-index.md)
