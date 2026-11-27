@@ -4,9 +4,9 @@
 // and share files use — a source that reads from the wire.
 //
 // The wire is crates/ilar-remote/src/wire.rs: a `snapshot` (the whole log
-// as one page in serve's shape), then `append`, `live`, `busy`, `prompt`
-// and `notice` frames; this page sends `prompt`, `grant`, `question` and
-// `cancel`.
+// as one page in serve's shape), then `append`, `live`, `busy`, `prompt`,
+// `notice` and `models` frames; this page sends `prompt`, `grant`,
+// `question`, `cancel` and `model`.
 
 import init, { connect } from "./pkg/ilar_remote_web.js";
 
@@ -57,6 +57,8 @@ let busy = false;
 let prompt = null;
 let notice = "";
 let noticeTimer = null;
+// The model menu: {current, variant, models[{id, name, variants}]}.
+let models = null;
 // Snapshots received, and where the page app.js last loaded stood: a
 // stream that opens behind the page (a new snapshot, or appends since)
 // tells the renderer to reload rather than miss them.
@@ -125,6 +127,12 @@ function handle(message) {
     case "prompt":
       prompt = message.prompt;
       break;
+    case "models":
+      models = { current: message.current, variant: message.variant, models: message.models };
+      break;
+    case "image":
+      gotImage(message);
+      return;
     case "notice":
       notice = message.text;
       clearTimeout(noticeTimer);
@@ -135,6 +143,51 @@ function handle(message) {
       break;
   }
   changed();
+}
+
+// Images, by "event/n": the log carries only a descriptor, so each is
+// asked for once and kept as an object URL. A request the session did
+// not answer before the link dropped is asked again next time.
+// At most IMAGES_KEPT are kept; the oldest is let go (and asked again if
+// shown again).
+const IMAGES_KEPT = 60;
+const images = new Map();
+const waiting = new Map();
+
+function image(eventId, n) {
+  const key = eventId + "/" + n;
+  if (!images.has(key)) {
+    if (images.size >= IMAGES_KEPT) {
+      const [oldest, promise] = images.entries().next().value;
+      images.delete(oldest);
+      promise.then((url) => URL.revokeObjectURL(url), () => {});
+    }
+    images.set(
+      key,
+      new Promise((resolve, reject) => {
+        waiting.set(key, { resolve, reject });
+        send({ type: "image", event_id: eventId, n }).catch((error) => forget(key, error));
+      }),
+    );
+  }
+  return images.get(key);
+}
+
+function forget(key, error) {
+  const pending = waiting.get(key);
+  waiting.delete(key);
+  images.delete(key);
+  if (pending) pending.reject(error);
+}
+
+function gotImage(message) {
+  const key = message.event_id + "/" + message.n;
+  const pending = waiting.get(key);
+  if (!pending) return;
+  if (!message.image) return forget(key, new Error("the session has no such image"));
+  waiting.delete(key);
+  const bytes = Uint8Array.from(atob(message.image.data), (char) => char.charCodeAt(0));
+  pending.resolve(URL.createObjectURL(new Blob([bytes], { type: message.image.media_type })));
 }
 
 async function pump(connection) {
@@ -150,6 +203,7 @@ async function pump(connection) {
   if (remote === connection) remote = null;
   connection.close();
   connection.free();
+  for (const key of [...waiting.keys()]) forget(key, new Error("the link dropped"));
   if (active) active.emit("error");
 }
 
@@ -230,7 +284,7 @@ window.__ILAR_REMOTE__ = {
   },
   async post(path, body) {
     if (path.endsWith("/message")) {
-      await send({ type: "prompt", text: body.text });
+      await send({ type: "prompt", text: body.text, images: body.images || [] });
       return { fate: "sent" };
     }
     if (path.endsWith("/abort")) {
@@ -258,12 +312,17 @@ window.__ILAR_REMOTE__ = {
     );
     return stream;
   },
-  state: () => ({ prompt, notice }),
+  state: () => ({ prompt, notice, models }),
   subscribe(listener) {
     listeners.add(listener);
     return () => listeners.delete(listener);
   },
   send,
+  // This session's images only: a child's are not sent to the phone.
+  image: (sessionId, eventId, n) =>
+    page && sessionId === page.id ? image(eventId, n) : Promise.reject(new Error("not sent to the phone")),
+  // The composer offers photos.
+  photos: true,
 };
 
 // ----------------------------------------------------------- pairing

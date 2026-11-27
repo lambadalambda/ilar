@@ -1,22 +1,15 @@
 //! A session as one self-contained HTML file.
 //!
 //! The same renderer `ilar serve` uses, with the data already in the
-//! page instead of behind an HTTP request: styles, vendored modules,
-//! `app.js` and the projected session all inline. It opens from
-//! `file://` with no server, no network and no account, and it has not
-//! left the machine until someone sends it.
+//! page instead of behind an HTTP request: styles, `app.js` (the
+//! Svelte build from web/ui, one module with no imports) and the
+//! projected session all inline. It opens from `file://` with no
+//! server, no network and no account, and it has not left the machine
+//! until someone sends it.
 //!
-//! **Why blobs and not an import map.** `app.js` is an ES module that
-//! imports the bare specifiers `preact`, `preact/hooks` and `htm`, and
-//! the hooks build imports `preact` itself. An inline
-//! `<script type="module">` cannot be imported by specifier, and a
-//! module fetched from `file://` runs into opaque-origin rules. So the
-//! page carries each module's source as inert `text/plain`, and a
-//! classic bootstrap script turns them into `blob:` URLs in dependency
-//! order, rewriting each bare specifier to the concrete URL of the
-//! blob before making the next one. Blob URLs inherit the document's
-//! origin and nothing is fetched, so the graph resolves the same way
-//! everywhere. No import map, no build step, no CDN.
+//! The app's source is carried as inert `text/plain` and started from a
+//! `blob:` URL by a classic bootstrap, which first parses the session:
+//! a session that will not parse says so on the page.
 
 use ilar::session::SessionEvent;
 use serde_json::{Value, json};
@@ -154,27 +147,6 @@ fn cut_results(
     }
 }
 
-/// The bare specifiers the page's modules import, each with the source
-/// that satisfies it, in **dependency order**: a module is turned into
-/// a blob URL only once everything it imports already has one, because
-/// its imports are rewritten to those URLs on the way in. `hooks`
-/// imports `preact`, so `preact` comes first.
-///
-/// This is not the order the *replacement* wants — there, a specifier
-/// that is a prefix of another has to go first, or rewriting
-/// `"preact"` would turn `"preact/hooks"` into a blob URL with
-/// `/hooks` glued on the end. The bootstrap sorts for that separately.
-/// Getting these two confused is exactly what a browser caught: with
-/// the list in replacement order, `hooks` was blobbed before `preact`
-/// had a URL and its bare import survived into the page.
-fn modules() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("preact", super::assets::PREACT),
-        ("preact/hooks", super::assets::HOOKS),
-        ("htm", super::assets::HTM),
-    ]
-}
-
 /// `encodeURIComponent`, for the paths the page will ask for. Session
 /// and tool-call ids are uuids and tool names in practice, but the key
 /// has to match what the page builds byte for byte, so it is encoded
@@ -204,15 +176,7 @@ fn urlish(value: &str) -> String {
 /// The page, with `session` the payload `app.js` would otherwise have
 /// fetched from `/api/sessions/{id}`.
 pub(crate) fn page(title: &str, session: &Value) -> String {
-    let mut sources = String::new();
-    let mut order = Vec::new();
-    for (index, (specifier, source)) in modules().into_iter().enumerate() {
-        let id = format!("ilar-module-{index}");
-        sources.push_str(&inert_script(&id, source));
-        order.push(json!({ "id": id, "specifier": specifier }));
-    }
-    let app_id = "ilar-app";
-    sources.push_str(&inert_script(app_id, super::assets::APP_JS));
+    let app = inert_script("ilar-app", super::assets::APP_JS);
 
     format!(
         "<!doctype html>\n\
@@ -230,29 +194,25 @@ pub(crate) fn page(title: &str, session: &Value) -> String {
          <body>\n\
          <div id=\"app\"></div>\n\
          <script type=\"application/json\" id=\"ilar-session\">\n{session}\n</script>\n\
-         {sources}\
-         <script type=\"application/json\" id=\"ilar-modules\">\n{order}\n</script>\n\
+         {app}\
          <script>\n{bootstrap}\n</script>\n\
          </body>\n\
          </html>\n",
         title = escape_text(title),
         css = super::assets::APP_CSS,
         session = escape_script_json(session),
-        order = escape_script_json(&Value::Array(order)),
-        sources = sources,
         bootstrap = BOOTSTRAP,
     )
 }
 
-/// One module's source, parked where no parser will run it. The type
-/// is deliberately not `module`: these are raw material for the
-/// bootstrap, not scripts of the page.
+/// The app's source, parked where no parser will run it. The type is
+/// deliberately not `module`: it is raw material for the bootstrap.
 fn inert_script(id: &str, source: &str) -> String {
     // Verbatim: the bootstrap hands this text to the module loader, so
     // an escape here would be a syntax error there. That is safe only
-    // because these are our own vendored assets — see
-    // `the_inlined_assets_cannot_close_their_own_block`, which is the
-    // guard, and which fails if anything vendored later could.
+    // because the build writes no `</script` or `<!--` (web/ui's
+    // vite.config.js) — `the_inlined_assets_cannot_close_their_own_block`
+    // is the guard.
     debug_assert!(!closes_a_script(source), "asset {id} could close its block");
     format!("<script type=\"text/plain\" id=\"{id}\">\n{source}\n</script>\n")
 }
@@ -291,41 +251,14 @@ fn escape_text(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Turn the inert sources into a live module graph, then start the app.
-///
-/// A classic script, so it runs before any module does and can build
-/// the URLs the modules will import each other by.
+/// Parse the session, then start the app from a blob URL (which
+/// inherits the document's origin, so nothing is fetched).
 const BOOTSTRAP: &str = r#"
 (function () {
   var read = function (id) { return document.getElementById(id).textContent; };
   var blob = function (src) {
     return URL.createObjectURL(new Blob([src], { type: "text/javascript" }));
   };
-  // Each module's bare specifiers are rewritten to the concrete blob
-  // URL of the module that satisfies them, before that module is
-  // itself turned into a blob. The list is ordered so a dependency is
-  // always built before whatever imports it.
-  var resolved = [];
-  var rewrite = function (src) {
-    // Longest specifier first, whatever order they were built in: a
-    // shorter one that prefixes a longer would otherwise rewrite half
-    // of it. Dependency order is the list's business, not this pass's.
-    var by_length = resolved.slice().sort(function (a, b) {
-      return b.specifier.length - a.specifier.length;
-    });
-    for (var i = 0; i < by_length.length; i += 1) {
-      src = src.split('"' + by_length[i].specifier + '"').join('"' + by_length[i].url + '"');
-      src = src.split("'" + by_length[i].specifier + "'").join('"' + by_length[i].url + '"');
-    }
-    return src;
-  };
-  var modules = JSON.parse(read("ilar-modules"));
-  for (var i = 0; i < modules.length; i += 1) {
-    resolved.push({
-      specifier: modules[i].specifier,
-      url: blob(rewrite(read(modules[i].id))),
-    });
-  }
   // Inside the guard: a session that would not parse used to leave a
   // blank page with the reason only in a console nobody opens.
   var fail = function (error) {
@@ -338,7 +271,7 @@ const BOOTSTRAP: &str = r#"
     fail(error);
     return;
   }
-  import(blob(rewrite(read("ilar-app")))).catch(fail);
+  import(blob(read("ilar-app"))).catch(fail);
 })();
 "#;
 
@@ -359,10 +292,8 @@ mod tests {
     ///
     /// The bodies have to go or the check is meaningless: `app.js`
     /// contains the string `src=` in the branch it does *not* take
-    /// when shared, the vendored modules carry their provenance as
-    /// `https://unpkg.com/…` comments, and preact carries the XML
-    /// namespace constants it hands to `createElementNS`. None of
-    /// those is a request; all of them would trip a naive grep.
+    /// when shared, and the framework carries XML namespace constants.
+    /// Neither is a request; both would trip a naive grep.
     fn markup_only(html: &str) -> String {
         let mut out = String::new();
         let mut rest = html;
@@ -437,9 +368,9 @@ mod tests {
                 "the page must not carry {reach:?}: {markup}"
             );
         }
-        // And the renderer and its dependencies all travelled.
+        // And the renderer travelled.
         let html = sample();
-        assert!(html.contains("preact/hooks"), "the specifier map is there");
+        assert!(html.contains("id=\"ilar-app\""), "the app is there");
         assert!(html.contains("<style>"), "styles are inline");
         assert!(html.contains("__ILAR_SHARE__"), "so is the session");
     }
@@ -455,30 +386,15 @@ mod tests {
         assert!(markup_only("<script src=\"/app.js\"></script>").contains("src="));
     }
 
-    /// Dependency order, checked against what the sources actually
-    /// import. A module blobbed before something it imports has a URL
-    /// keeps its bare specifier, and the page dies on load with "the
-    /// specifier 'preact' was not remapped to anything" — which is how
-    /// this was found, in a browser, with the list in the other order.
+    /// The build is one module: an import left in it would have nothing
+    /// to resolve against in a file.
     #[test]
-    fn modules_come_after_what_they_import() {
-        let all = modules();
-        for (index, (specifier, source)) in all.iter().enumerate() {
-            for (other, _) in &all[index + 1..] {
-                assert!(
-                    !source.contains(&format!("\"{other}\"")),
-                    "{specifier:?} imports {other:?}, so {other:?} must come first"
-                );
-            }
-        }
-        // And the renderer itself comes last of all: it imports every
-        // one of them.
-        for (specifier, _) in &all {
-            assert!(
-                super::super::assets::APP_JS.contains(&format!("\"{specifier}\"")),
-                "the page imports {specifier:?}"
-            );
-        }
+    fn the_app_imports_nothing() {
+        let app = super::super::assets::APP_JS;
+        assert!(
+            !app.contains("import ") && !app.contains("import{"),
+            "app.js has an import"
+        );
     }
 
     /// Session text is model- and user-authored, it lands inside a
@@ -534,20 +450,15 @@ mod tests {
         );
     }
 
-    /// The vendored sources go in verbatim, because the module loader
-    /// parses exactly what is written. That is only safe while none of
-    /// them can end the element holding it — which is this test's job,
-    /// for whatever is vendored next.
+    /// The app goes in verbatim, because the module loader parses
+    /// exactly what is written. That is only safe while it cannot end
+    /// the element holding it.
     #[test]
     fn the_inlined_assets_cannot_close_their_own_block() {
-        for (name, source) in [
-            ("app.js", super::super::assets::APP_JS),
-            ("preact", super::super::assets::PREACT),
-            ("hooks", super::super::assets::HOOKS),
-            ("htm", super::super::assets::HTM),
-        ] {
-            assert!(!closes_a_script(source), "{name} could close its block");
-        }
+        assert!(
+            !closes_a_script(super::super::assets::APP_JS),
+            "app.js could close its block"
+        );
     }
 
     /// The title is an element's text, not a script's.

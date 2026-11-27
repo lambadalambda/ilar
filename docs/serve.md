@@ -49,12 +49,12 @@ generate without the server ever joining the writing process.
 
 ## The page
 
-Files compiled into the binary — an HTML shell, a stylesheet, about
-2,000 lines of hand-written JavaScript, and the vendored libraries under
-`assets/vendor/`. No build step, no
-node_modules, no CDN and no webfont: `ilar serve` works on a plane. The
-server API is the durable artifact here; the page is deliberately
-replaceable.
+Files compiled into the binary — an HTML shell and the committed Svelte
+build of `web/ui` (one `app.js` with no imports, one `app.css`; rebuild
+with `scripts/build-web-ui.sh`). Cargo needs no Node, and there is no
+CDN and no webfont: `ilar serve` works on a plane. The same build renders
+share files and the phone app of `/remote`. The server API is the
+durable artifact here; the page is deliberately replaceable.
 
 - `#/` — the session list, grouped by the directory each session was
   launched from (newest group first, newest session first within it,
@@ -239,12 +239,10 @@ not sent upstream and not written to server logs. The page moves it into
 `Bearer` header; `EventSource` and `<img>` cannot set headers, so those
 carry `?token=`. Comparison is constant-time. A failure is `401` with an
 empty body on **every** path, including unmatched ones, so the token is
-not an oracle for which sessions exist — the six static files (`/`,
-`/app.css`, `/app.js` and the three vendored ESM modules under
-`/vendor/`) are the necessary exception, because the page has to load
-before it can read the fragment, a module the page imports cannot be
-handed a token by the loader at all, and none of them carries anything
-from the store. `ILAR_SERVE_TOKEN` pins a token instead of generating
+not an oracle for which sessions exist — the three static files (`/`,
+`/app.css`, `/app.js`) are the necessary exception, because the page has
+to load before it can read the fragment, and none of them carries
+anything from the store. `ILAR_SERVE_TOKEN` pins a token instead of generating
 one, and pinning it requires the check on any bind, loopback included; a
 pinned token may be any text — it is percent-encoded into the printed
 URL and decoded out of `?token=`, so spaces and punctuation survive the

@@ -11,3 +11,10 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 # (meta/issues/an-adoption-test-hangs-once-in-ten.md, 2026-09-05).
 cargo test --workspace
 cargo test -p ilar-tui --all-features
+# The committed Svelte build matches its sources (needs Node; skipped,
+# loudly, where there is none).
+if command -v npm >/dev/null; then
+  scripts/build-web-ui.sh --check
+else
+  echo "warning: no npm, web/ui build freshness not checked" >&2
+fi

@@ -16,3 +16,13 @@ and changes them, as the TUI's model picker does.
 
 - From the phone, switch the model and thinking level; the TUI status
   bar shows the change, and the next turn uses it.
+
+## Status
+
+Built 2026-11-27: `ToDevice::Models` / `FromDevice::Model` (ALPN
+`ilar/remote/2`), the TUI applies a choice through
+`adopt_model_selection` and refuses it mid-turn; the phone's menu has
+Model and Thinking rows. Checked on the iOS simulator against a live
+TUI: switched to Kimi K3.1 Pro at High, the TUI status showed it, and
+the next turn ran on it. Open: the context limit in the menu is the
+snapshot's until the next reconnect.

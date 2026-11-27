@@ -23,7 +23,6 @@
 //! GET  /api/sessions/{id}/results/{tool_use_id}        full untruncated text
 //! GET  /api/sessions/{id}/images/{event_id}/{n}        image bytes
 //! GET  /  /app.css  /app.js                            the page
-//! GET  /vendor/{preact,hooks,htm}.module.js            its ESM modules
 //! POST /api/sessions            {prompt,cwd?,model?}   create and run
 //! POST /api/sessions/{id}/message        {text}        steer or start
 //! POST /api/sessions/{id}/abort                        cancel a driven turn
@@ -148,9 +147,6 @@ pub(crate) fn router(state: ServeState) -> Router {
         .route("/", get(index))
         .route("/app.css", get(stylesheet))
         .route("/app.js", get(script))
-        .route("/vendor/preact.module.js", get(vendor_preact))
-        .route("/vendor/hooks.module.js", get(vendor_hooks))
-        .route("/vendor/htm.module.js", get(vendor_htm))
         .route("/api/sessions", get(sessions).post(create_session))
         .route("/api/sessions/{id}", get(transcript))
         .route("/api/sessions/{id}/events", get(events))
@@ -333,17 +329,8 @@ pub(crate) fn url_for(address: &SocketAddr, token: Option<&str>) -> String {
 /// deliver, and `--open` would open a 401. These bytes are identical for
 /// every install, already public inside the binary, and say nothing
 /// whatever about the store; the data behind them stays gated, including
-/// the fallback. The vendored modules are here for the same reason and
-/// with more force: a module the page imports is fetched by the module
-/// loader, which cannot be handed a token either.
-const PUBLIC_PATHS: [&str; 6] = [
-    "/",
-    "/app.css",
-    "/app.js",
-    "/vendor/preact.module.js",
-    "/vendor/hooks.module.js",
-    "/vendor/htm.module.js",
-];
+/// the fallback.
+const PUBLIC_PATHS: [&str; 3] = ["/", "/app.css", "/app.js"];
 
 async fn require_token(State(state): State<ServeState>, request: Request, next: Next) -> Response {
     let Some(expected) = state.token.as_deref() else {
@@ -1136,10 +1123,9 @@ fn rfc3339(time: std::time::SystemTime) -> String {
 // -------------------------------------------------------------- assets
 
 /// The page is a handful of files compiled into the binary: one artifact
-/// to ship, and no path a request could traverse. Three of them are the
-/// page itself and three are the vendored ESM modules it imports —
-/// preact, its hooks and htm, pinned and copied verbatim, so `ilar serve`
-/// still works on a plane and still has no build step.
+/// to ship, and no path a request could traverse: the shell, and the
+/// Svelte build (one module, no imports), so `ilar serve` works on a
+/// plane.
 async fn index() -> Response {
     asset("text/html; charset=utf-8", crate::web::assets::INDEX)
 }
@@ -1150,18 +1136,6 @@ async fn stylesheet() -> Response {
 
 async fn script() -> Response {
     script_asset(crate::web::assets::APP_JS)
-}
-
-async fn vendor_preact() -> Response {
-    script_asset(crate::web::assets::PREACT)
-}
-
-async fn vendor_hooks() -> Response {
-    script_asset(crate::web::assets::HOOKS)
-}
-
-async fn vendor_htm() -> Response {
-    script_asset(crate::web::assets::HTM)
 }
 
 fn script_asset(body: &'static str) -> Response {

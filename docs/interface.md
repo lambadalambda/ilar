@@ -319,8 +319,12 @@ reaches nothing. The status line ends in `⇄ remote` while it is on and
 A paired device sees the session as the web share renders it, with
 the running step streaming, and whether a tool waits on a grant or a
 question. It can send what you would type (a new turn, a steer, or a
-queued message), answer a grant or a question, and cancel the running
-turn. Two limits keep it from stepping on the terminal: a prompt waits
+queued message) with photos attached, answer a grant or a question,
+cancel the running turn, and switch the model and thinking level from
+its menu (between turns, as the picker allows). The phone scales a
+photo to 1600 px before it sends it, and the session takes it only
+when the model has vision, as at the terminal. Images in the transcript
+are fetched one by one when shown. Two limits keep it from stepping on the terminal: a prompt waits
 until the terminal has no draft, attachment or menu open, and the
 commands that only the terminal can show (`/sessions`, `/rewind`,
 `/fork`, `/btw`, `/memory`, `/context`, `/remote` except `/remote stop`)

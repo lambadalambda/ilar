@@ -66,7 +66,7 @@ restriction on what it may be.
   that outlives a session, cron and heartbeat turns, and a tool policy
   built into the registries. [Details](docs/gateway.md).
 - **Watch it from a browser** *(stood down)*. `ilar serve` tails the
-  store into a page with no build step, but it is not in the default
+  store into a page compiled into the binary, but it is not in the default
   build while the terminal agent gets its house in order: build with
   `--features serve` to wake it. [Details](docs/serve.md).
 - **Frugal by construction.** Compaction, asides, and topic naming all
