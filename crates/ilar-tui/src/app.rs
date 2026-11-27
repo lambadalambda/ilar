@@ -432,6 +432,30 @@ fn arm_or_confirm(manager: &mut PendingManager, item: PendingItem) -> PendingAct
     }
 }
 
+/// Payload cap, on the picture as it will be *stored*, after the shrink:
+/// providers reject far larger, but a session line this size is already
+/// unpleasant to carry around. Not the ingest cap, which weighs the file
+/// on its way in and is generous because most of what it weighs is about
+/// to go.
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Why `image` cannot ride a message to `model`, if it cannot: a model
+/// without vision would silently ignore what the user thinks it saw.
+/// The terminal's attach and the phone's prompt both ask this.
+pub(crate) fn image_refusal(model: &str, image: &ilar::session::ImageContent) -> Option<String> {
+    if !ilar::model::supports_vision(model) {
+        return Some(format!("{model} cannot view images"));
+    }
+    let bytes = image.byte_len();
+    (bytes > MAX_IMAGE_BYTES).then(|| {
+        format!(
+            "image too large ({} — the cap is {})",
+            crate::text::format_bytes(bytes as u64),
+            crate::text::format_bytes(MAX_IMAGE_BYTES as u64)
+        )
+    })
+}
+
 /// Whether a queued or steered text is a task/tool notification
 /// envelope — a result that left the notification machinery and became
 /// an ordinary message. The tag prefix is the cheap screen; the display
@@ -763,6 +787,10 @@ pub(crate) struct App {
     pub(crate) hover: Option<crate::selection::SelectionPoint>,
     /// Images attached with Ctrl-V, waiting to ride the next message.
     pub(crate) pending_images: Vec<ilar::session::ImageContent>,
+    /// A paired phone's photos for the turn this loop pass starts: not
+    /// the terminal's draft, so they neither block nor ride what is
+    /// typed there.
+    pub(crate) staged_turn_images: Vec<ilar::session::ImageContent>,
     /// Clipboard images being prepared for this draft, in paste order.
     pub(crate) clipboard_images: Vec<crate::PendingImage>,
     /// The exited-services disclosure: open?, and where its toggle
@@ -959,6 +987,7 @@ impl App {
             transcript_pressed_target: None,
             hover: None,
             pending_images: Vec::new(),
+            staged_turn_images: Vec::new(),
             clipboard_images: Vec::new(),
             services_show_exited: false,
 
@@ -2695,31 +2724,11 @@ impl App {
     /// Images follow the next message, whether started, steered or queued.
     /// Returns whether it attached, so multi-file drops can summarize.
     pub(crate) fn attach_image(&mut self, image: ilar::session::ImageContent) -> bool {
-        /// Payload cap, on the picture as it will be *stored*, after
-        /// the shrink: providers reject far larger, but a session line
-        /// this size is already unpleasant to carry around. Not the
-        /// ingest cap, which weighs the file on its way in and is
-        /// generous because most of what it weighs is about to go.
-        const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-        if !ilar::model::supports_vision(&self.current_model) {
-            self.set_notice(
-                format!("{} cannot view images", self.current_model),
-                NoticeLevel::Warning,
-            );
+        if let Some(refusal) = image_refusal(&self.current_model, &image) {
+            self.set_notice(refusal, NoticeLevel::Warning);
             return false;
         }
         let bytes = image.byte_len();
-        if bytes > MAX_IMAGE_BYTES {
-            self.set_notice(
-                format!(
-                    "image too large ({} — the cap is {})",
-                    crate::text::format_bytes(bytes as u64),
-                    crate::text::format_bytes(MAX_IMAGE_BYTES as u64)
-                ),
-                NoticeLevel::Warning,
-            );
-            return false;
-        }
         let kind = image
             .media_type
             .strip_prefix("image/")

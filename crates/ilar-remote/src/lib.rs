@@ -19,7 +19,8 @@ pub use pairing::{Pairing, Secret, Verdict};
 pub use ticket::Ticket;
 
 /// The ALPN of the remote protocol; bump the version on a wire change.
-/// 2: the model menu (`ToDevice::Models`, `FromDevice::Model`).
+/// 2: the model menu (`ToDevice::Models`, `FromDevice::Model`) and
+/// images (`FromDevice::Prompt.images`, `FromDevice::Image`).
 pub const ALPN: &[u8] = b"ilar/remote/2";
 
 /// Where the PWA lives; the ticket rides in the link's `#fragment`, so

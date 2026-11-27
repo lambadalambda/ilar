@@ -63,7 +63,10 @@ fn command(line: &str) -> Option<FromDevice> {
                 answer: answer(word.trim())?,
             })
         }
-        None => Some(FromDevice::Prompt { text: line.into() }),
+        None => Some(FromDevice::Prompt {
+            text: line.into(),
+            images: Vec::new(),
+        }),
     }
 }
 

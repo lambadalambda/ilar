@@ -11,8 +11,9 @@ use iroh::endpoint::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Bounds a line from the device: commands are small.
-pub const MAX_FROM_DEVICE: usize = 256 * 1024;
+/// Bounds a line from the device: a prompt with a few photos, which the
+/// phone scales down before it sends them.
+pub const MAX_FROM_DEVICE: usize = 16 * 1024 * 1024;
 /// Bounds a line from the host: a snapshot carries a whole session.
 pub const MAX_TO_DEVICE: usize = 64 * 1024 * 1024;
 
@@ -61,6 +62,22 @@ pub enum ToDevice {
         variant: Option<String>,
         models: Vec<ModelChoice>,
     },
+    /// The answer to `FromDevice::Image`; `None` when there is no such
+    /// image.
+    Image {
+        event_id: String,
+        n: usize,
+        image: Option<Image>,
+    },
+}
+
+/// An image as the session stores it (`ilar::session::ImageContent`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Image {
+    /// e.g. "image/jpeg".
+    pub media_type: String,
+    /// Base64 bytes.
+    pub data: String,
 }
 
 /// A model the session may switch to, with its thinking levels.
@@ -69,6 +86,8 @@ pub struct ModelChoice {
     /// `provider/model`, as the TUI's picker names it.
     pub id: String,
     pub name: String,
+    /// Whether it takes images, so the phone offers photos only then.
+    pub vision: bool,
     pub variants: Vec<Choice>,
 }
 
@@ -100,9 +119,17 @@ pub enum Prompt {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FromDevice {
     /// Typed text: a new turn, a steer or a queued message, exactly as
-    /// if typed into the TUI.
+    /// if typed into the TUI, with the images attached to it.
     Prompt {
         text: String,
+        #[serde(default)]
+        images: Vec<Image>,
+    },
+    /// The bytes of image `n` of event `event_id` (the projection sends
+    /// only a descriptor).
+    Image {
+        event_id: String,
+        n: usize,
     },
     /// `secret` names the prompt answered (from `Prompt::Grant`), so a
     /// late answer cannot land on a newer prompt. `None` refuses.
@@ -247,6 +274,7 @@ mod tests {
             models: vec![ModelChoice {
                 id: "zai/glm-5.2".into(),
                 name: "GLM 5.2".into(),
+                vision: false,
                 variants: vec![Choice {
                     id: "high".into(),
                     name: "High".into(),
@@ -255,7 +283,7 @@ mod tests {
         };
         assert_eq!(
             String::from_utf8(encode(&models)).unwrap(),
-            "{\"type\":\"models\",\"current\":\"zai/glm-5.2\",\"variant\":\"high\",\"models\":[{\"id\":\"zai/glm-5.2\",\"name\":\"GLM 5.2\",\"variants\":[{\"id\":\"high\",\"name\":\"High\"}]}]}\n"
+            "{\"type\":\"models\",\"current\":\"zai/glm-5.2\",\"variant\":\"high\",\"models\":[{\"id\":\"zai/glm-5.2\",\"name\":\"GLM 5.2\",\"vision\":false,\"variants\":[{\"id\":\"high\",\"name\":\"High\"}]}]}\n"
         );
         let choice: FromDevice =
             serde_json::from_str("{\"type\":\"model\",\"model\":\"a/b\",\"variant\":null}")
@@ -266,6 +294,53 @@ mod tests {
                 model: "a/b".into(),
                 variant: None
             }
+        );
+    }
+
+    #[test]
+    fn a_prompt_carries_images_and_an_image_is_asked_for_by_event() {
+        let bare: FromDevice =
+            serde_json::from_str("{\"type\":\"prompt\",\"text\":\"hi\"}").unwrap();
+        assert_eq!(
+            bare,
+            FromDevice::Prompt {
+                text: "hi".into(),
+                images: Vec::new()
+            },
+            "a prompt without images is still a prompt"
+        );
+        let photo = Image {
+            media_type: "image/jpeg".into(),
+            data: "AAAA".into(),
+        };
+        let with: FromDevice = serde_json::from_str(
+            "{\"type\":\"prompt\",\"text\":\"\",\"images\":[{\"media_type\":\"image/jpeg\",\"data\":\"AAAA\"}]}",
+        )
+        .unwrap();
+        assert_eq!(
+            with,
+            FromDevice::Prompt {
+                text: String::new(),
+                images: vec![photo.clone()]
+            }
+        );
+        let ask: FromDevice =
+            serde_json::from_str("{\"type\":\"image\",\"event_id\":\"e1\",\"n\":0}").unwrap();
+        assert_eq!(
+            ask,
+            FromDevice::Image {
+                event_id: "e1".into(),
+                n: 0
+            }
+        );
+        assert_eq!(
+            String::from_utf8(encode(&ToDevice::Image {
+                event_id: "e1".into(),
+                n: 0,
+                image: Some(photo),
+            }))
+            .unwrap(),
+            "{\"type\":\"image\",\"event_id\":\"e1\",\"n\":0,\"image\":{\"media_type\":\"image/jpeg\",\"data\":\"AAAA\"}}\n"
         );
     }
 

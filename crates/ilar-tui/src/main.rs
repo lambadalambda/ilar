@@ -938,10 +938,14 @@ fn apply_intent(
         Intent::StartTurn(text) => {
             // Starting a new turn preserves the raw text only in prompt history;
             // failed-turn resume uses persisted conversation state.
+            // Taken first: a phone's photos belong to this start, and
+            // must not wait for the next one if the text is refused.
+            let mut images = std::mem::take(&mut app.staged_turn_images);
             let text = prepare_prompt(app, text)?;
-            // Whatever is attached rides this turn; the transcript row
-            // shows a marker per image in place of the payload.
-            let images = std::mem::take(&mut app.pending_images);
+            // Whatever is attached rides this turn (the phone's photos,
+            // the draft's images); the transcript row shows a marker per
+            // image in place of the payload.
+            images.append(&mut app.pending_images);
             app.retry_available = false;
             app.turn_committed = false;
             app.clear_notice();
@@ -3522,7 +3526,20 @@ fn apply_remote_command(
 ) -> Option<String> {
     use ilar_remote::wire::{FromDevice, GrantAnswer};
     match command {
-        FromDevice::Prompt { text } => {
+        FromDevice::Prompt { text, images } => {
+            let images: Vec<ilar::session::ImageContent> = images
+                .into_iter()
+                .map(|image| ilar::session::ImageContent {
+                    media_type: image.media_type,
+                    data: image.data,
+                })
+                .collect();
+            if let Some(refusal) = images
+                .iter()
+                .find_map(|image| crate::app::image_refusal(&app.current_model, image))
+            {
+                return Some(refusal);
+            }
             // A turn this pass already decided to start is running as far
             // as the next prompt is concerned: two starts in one pass
             // would orphan the first turn. So the second one queues.
@@ -3545,8 +3562,27 @@ fn apply_remote_command(
                 Intent::Queue(_) => Some("queued until the current turn ends".into()),
                 _ => None,
             });
-            apply_event_intents(app, decided, intents, steer);
-            told
+            // The photos ride this message only. A start is done later in
+            // this pass and takes the staged ones; a steer or a queue is
+            // done now and takes the draft's images. That draft is blank
+            // (a phone prompt goes through only then), so the photos go
+            // there for the moment and nothing is left behind.
+            let message = |i: &Intent| matches!(i, Intent::Steer(_) | Intent::Queue(_));
+            let dropped = !images.is_empty()
+                && told.is_none()
+                && !decided
+                    .iter()
+                    .any(|i| message(i) || matches!(i, Intent::StartTurn(_)));
+            if decided.iter().any(|i| matches!(i, Intent::StartTurn(_))) {
+                app.staged_turn_images = images;
+                apply_event_intents(app, decided, intents, steer);
+            } else {
+                app.pending_images = images;
+                apply_event_intents(app, decided, intents, steer);
+                app.pending_images.clear();
+            }
+            // A command is not a message: say that its photos stayed here.
+            told.or(dropped.then(|| "a command takes no photos; they were dropped".into()))
         }
         FromDevice::Grant { secret, answer } => {
             // The phone names the prompt it answers: a late answer must
@@ -3592,6 +3628,8 @@ fn apply_remote_command(
         // run_app switches models itself: that needs the resolver and
         // the store, which this does not hold.
         FromDevice::Model { .. } => Some("a model switch did not reach the session".into()),
+        // RemoteControl::commands answers these from the feed.
+        FromDevice::Image { .. } => None,
     }
 }
 
@@ -6265,7 +6303,10 @@ mod tests {
     #[test]
     fn a_phone_prompt_starts_a_turn_like_typed_text_and_a_refusal_goes_back() {
         use ilar_remote::wire::FromDevice;
-        let prompt = |text: &str| FromDevice::Prompt { text: text.into() };
+        let prompt = |text: &str| FromDevice::Prompt {
+            text: text.into(),
+            images: Vec::new(),
+        };
         let (mut app, mut slots) = (super::App::new(), Slots::default());
         assert_eq!(remote(&mut app, &mut slots, prompt("hi")), None);
         assert_eq!(slots.intents, vec![super::Intent::StartTurn("hi".into())]);
@@ -6279,13 +6320,64 @@ mod tests {
     #[test]
     fn a_second_phone_prompt_in_one_pass_queues() {
         use ilar_remote::wire::FromDevice;
-        let prompt = |text: &str| FromDevice::Prompt { text: text.into() };
+        let prompt = |text: &str| FromDevice::Prompt {
+            text: text.into(),
+            images: Vec::new(),
+        };
         let (mut app, mut slots) = (super::App::new(), Slots::default());
         remote(&mut app, &mut slots, prompt("one"));
         let told = remote(&mut app, &mut slots, prompt("two"));
         assert_eq!(told.as_deref(), Some("queued until the current turn ends"));
         assert_eq!(slots.intents, vec![super::Intent::StartTurn("one".into())]);
         assert_eq!(app.queued_messages.len(), 1);
+    }
+
+    /// A photo rides its own prompt: the turn it starts takes it, and a
+    /// prompt queued behind that turn in the same pass keeps its own.
+    #[test]
+    fn a_phone_photo_rides_its_own_prompt() {
+        use ilar_remote::wire::{FromDevice, Image};
+        let photo = |data: &str| Image {
+            media_type: "image/jpeg".into(),
+            data: data.into(),
+        };
+        let prompt = |text: &str, data: &str| FromDevice::Prompt {
+            text: text.into(),
+            images: vec![photo(data)],
+        };
+        let (mut app, mut slots) = (super::App::new(), Slots::default());
+        app.current_model = ilar::model::catalog()
+            .iter()
+            .map(|model| model.full_id())
+            .find(|id| ilar::model::supports_vision(id))
+            .expect("a catalog model with vision");
+
+        assert_eq!(remote(&mut app, &mut slots, prompt("one", "AAAA")), None);
+        assert_eq!(slots.intents, vec![super::Intent::StartTurn("one".into())]);
+        remote(&mut app, &mut slots, prompt("two", "BBBB"));
+        let datas = |images: &[ilar::session::ImageContent]| {
+            images.iter().map(|i| i.data.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            datas(&app.staged_turn_images),
+            ["AAAA"],
+            "the start's photo waits for it"
+        );
+        assert!(app.draft_is_blank(), "and is not the terminal's draft");
+        assert_eq!(datas(&app.queued_messages[0].images), ["BBBB"]);
+
+        let mut idle = Slots::default();
+        app.staged_turn_images.clear();
+        let command = remote(&mut app, &mut idle, prompt("/remote stop", "DDDD"));
+        assert!(command.is_some_and(|text| text.contains("takes no photos")));
+        assert!(app.staged_turn_images.is_empty() && app.pending_images.is_empty());
+
+        app.current_model = "nowhere/blind".into();
+        let (mut app_blind, mut fresh) = (app, Slots::default());
+        app_blind.staged_turn_images.clear();
+        let refused = remote(&mut app_blind, &mut fresh, prompt("three", "CCCC"));
+        assert!(refused.is_some_and(|text| text.contains("cannot view images")));
+        assert!(fresh.intents.is_empty() && app_blind.staged_turn_images.is_empty());
     }
 
     #[test]

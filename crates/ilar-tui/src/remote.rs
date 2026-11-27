@@ -6,10 +6,12 @@ use crate::app::App;
 use crate::web::view;
 use crate::{NoticeLevel, theme};
 use futures::FutureExt;
-use ilar::session::{LiveMessage, LiveTail, SessionStore, SessionTail, TailUpdate, live_path};
+use ilar::session::{
+    LiveMessage, LiveTail, SessionEvent, SessionStore, SessionTail, TailUpdate, live_path,
+};
 use ilar_remote::EndpointId;
 use ilar_remote::host::{HostEvent, Link, RemoteHost};
-use ilar_remote::wire::{Choice, FromDevice, ModelChoice, Prompt, ToDevice};
+use ilar_remote::wire::{Choice, FromDevice, Image, ModelChoice, Prompt, ToDevice};
 use ratatui::Frame;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -214,12 +216,30 @@ impl RemoteControl {
     }
 
     /// What the device sent since the last call; `run_app` does them,
-    /// because the reply channels and the turn are its own.
+    /// because the reply channels and the turn are its own. An image
+    /// request is answered here, from the log the feed follows.
     pub(crate) fn commands(&mut self) -> Vec<FromDevice> {
         let Some(link) = self.link.as_mut() else {
             return Vec::new();
         };
-        std::iter::from_fn(|| link.from_device.try_recv().ok()).collect()
+        let mut commands = Vec::new();
+        while let Ok(command) = link.from_device.try_recv() {
+            match command {
+                FromDevice::Image { event_id, n } => {
+                    let answer = match &self.feed {
+                        Some(feed) => feed.image(&event_id, n),
+                        None => ToDevice::Image {
+                            event_id,
+                            n,
+                            image: None,
+                        },
+                    };
+                    let _ = link.to_device.send(answer);
+                }
+                command => commands.push(command),
+            }
+        }
+        commands
     }
 
     /// Tells the device why its last command did nothing.
@@ -398,6 +418,29 @@ impl Feed {
     }
 }
 
+impl Feed {
+    /// Image `n` of event `event_id`, from the log the feed follows.
+    pub(crate) fn image(&self, event_id: &str, n: usize) -> ToDevice {
+        let image = self.tail.events().iter().find_map(|event| match event {
+            SessionEvent::UserMessage { id, images, .. }
+            | SessionEvent::ToolResult { id, images, .. }
+                if id == event_id =>
+            {
+                images.get(n)
+            }
+            _ => None,
+        });
+        ToDevice::Image {
+            event_id: event_id.to_string(),
+            n,
+            image: image.map(|image| Image {
+                media_type: image.media_type.clone(),
+                data: image.data.clone(),
+            }),
+        }
+    }
+}
+
 fn current_model(app: &App) -> (String, Option<String>) {
     (app.current_model.clone(), app.current_variant.clone())
 }
@@ -412,6 +455,7 @@ fn model_menu(app: &App) -> ToDevice {
         .map(|model| ModelChoice {
             id: model.full_id(),
             name: model.name.to_string(),
+            vision: model.supports_vision(),
             variants: model
                 .variants()
                 .iter()
@@ -641,6 +685,60 @@ mod tests {
         );
         feed.pump(&link, &app).unwrap();
         assert!(drain(&mut device).is_empty(), "nothing new, nothing sent");
+    }
+
+    #[test]
+    fn the_feed_answers_an_image_by_its_event_and_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_path_buf());
+        let id = ilar::session::new_id();
+        let mut session = store
+            .create(ilar::session::SessionMeta {
+                session_id: id.clone(),
+                parent_id: None,
+                agent: "build".into(),
+                model: "zai/glm-4.7".into(),
+                workspace: None,
+                cwd: None,
+            })
+            .unwrap();
+        let event_id = ilar::session::new_id();
+        session
+            .append(ilar::session::SessionEvent::UserMessage {
+                id: event_id.clone(),
+                text: "look".into(),
+                images: vec![ilar::session::ImageContent {
+                    media_type: "image/png".into(),
+                    data: "iVBORw0K".into(),
+                }],
+                ts: chrono::Utc::now(),
+            })
+            .unwrap();
+        let (link, _device) = linked(0);
+        let feed = Feed::open(&link, &store, &id, &App::new()).unwrap();
+
+        let ToDevice::Image {
+            image: Some(image), ..
+        } = feed.image(&event_id, 0)
+        else {
+            panic!("the image is there");
+        };
+        assert_eq!(
+            (image.media_type.as_str(), image.data.as_str()),
+            ("image/png", "iVBORw0K")
+        );
+        assert!(matches!(
+            feed.image(&event_id, 1),
+            ToDevice::Image {
+                image: None,
+                n: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            feed.image("nowhere", 0),
+            ToDevice::Image { image: None, .. }
+        ));
     }
 
     #[test]
