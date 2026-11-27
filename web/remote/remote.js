@@ -294,6 +294,8 @@ function unpair(why) {
 
 async function start(newLink) {
   link = newLink;
+  $("pair").hidden = false;
+  $("pair-error").hidden = true;
   $("pair-status").textContent = "connecting…";
   try {
     await ensureConnected();
@@ -346,6 +348,13 @@ $("pair-scan").addEventListener("click", async () => {
   } catch (error) {
     $("pair-status").textContent = "no camera: " + String(error.message || error);
   }
+});
+
+// A code scanned while this page is open changes only the hash; a
+// reload takes the new ticket as a fresh visit does.
+addEventListener("hashchange", () => {
+  const fragment = location.hash.slice(1);
+  if (fragment && !fragment.startsWith("/")) location.reload();
 });
 
 if ("serviceWorker" in navigator) {
