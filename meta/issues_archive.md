@@ -516,3 +516,4 @@ installs use ChatGPT OAuth). Fixture tests pass; run
 - [x] [Images to and from the phone](issues/images-to-and-from-the-phone.md)
 - [x] [The Svelte renderer](issues/the-svelte-renderer.md)
 - [x] [Svelte web UI — index](issues/svelte-web-ui-index.md)
+- [x] [Several devices follow one session](issues/several-devices-follow-one-session.md)
