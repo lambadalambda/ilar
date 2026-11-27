@@ -310,7 +310,8 @@ paired with this session only: the code carries a one-time secret, and
 the first device that shows it is the only one let in from then on. It
 can drop and reconnect without the code. The connection goes over iroh
 through n0's public relay, encrypted end to end; no server of ours is
-involved. Esc closes the modal and leaves remote control on; `/remote`
+involved. `c` copies the link (to send it to the phone some other way).
+Esc closes the modal and leaves remote control on; `/remote`
 opens it again, and `/remote stop` ends it. Switching session or
 quitting ends it too, and every start makes a new key, so an old code
 reaches nothing. The status line ends in `⇄ remote` while it is on and

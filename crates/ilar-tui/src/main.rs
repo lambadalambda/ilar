@@ -5184,14 +5184,28 @@ async fn run_app(
                         },
                         // Closing leaves remote control on; `/remote stop`
                         // ends it.
-                        Modal::Remote => {
-                            if matches!(
-                                (code, control),
-                                (KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter, false)
-                            ) {
+                        Modal::Remote => match (code, control) {
+                            (KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter, false) => {
                                 app.remote_visible = false;
                             }
-                        }
+                            // The link on screen is cut into rows inside a
+                            // border, which a mouse selection copies too.
+                            (KeyCode::Char('c'), false) => {
+                                let link = app.remote.as_ref().and_then(|view| view.link.clone());
+                                match link.map(|link| app.copy_to_clipboard(&link)) {
+                                    Some(Ok(())) => app.set_notice(
+                                        "copied the remote link".to_string(),
+                                        NoticeLevel::Info,
+                                    ),
+                                    Some(Err(error)) => app.set_notice(
+                                        format!("cannot copy the link: {error:#}"),
+                                        NoticeLevel::Error,
+                                    ),
+                                    None => {}
+                                }
+                            }
+                            _ => {}
+                        },
                         Modal::ThemePicker => {
                             let action = {
                                 let picker = app.theme_picker.as_mut().unwrap();

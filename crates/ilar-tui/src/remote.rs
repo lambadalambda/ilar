@@ -553,7 +553,7 @@ pub(crate) fn render(frame: &mut Frame, view: &RemoteView) {
         area,
         " remote ",
         theme::MARKUP,
-        " Esc close · /remote stop ends it ",
+        " c copy link · Esc close · /remote stop ends it ",
     ) else {
         return;
     };
