@@ -8,9 +8,9 @@
 use futures::lock::Mutex;
 use ilar_remote::client::{self, Receiver, Refused, Sender};
 use ilar_remote::iroh::endpoint::{Connection, presets};
-use ilar_remote::iroh::{Endpoint, SecretKey};
+use ilar_remote::iroh::{Endpoint, RelayMode, SecretKey};
 use ilar_remote::wire::FromDevice;
-use ilar_remote::{ALPN, Ticket};
+use ilar_remote::{ALPN, Ticket, browser};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
@@ -43,7 +43,12 @@ pub async fn connect(link: String, key: Vec<u8>) -> Result<Remote, JsError> {
         Err(_) => SecretKey::generate(),
     };
     let key = secret_key.to_bytes();
+    let ticket = Ticket {
+        relay: ticket.relay.as_ref().map(browser::relay_url),
+        ..ticket
+    };
     let endpoint = Endpoint::builder(presets::N0)
+        .relay_mode(RelayMode::Custom(browser::relay_map()))
         .secret_key(secret_key)
         .bind()
         .await

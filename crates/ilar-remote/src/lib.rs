@@ -5,6 +5,7 @@
 //! The first peer that shows the secret is pinned, every other peer is
 //! refused. See meta/issues/remote-control-over-iroh-index.md.
 
+pub mod browser;
 pub mod client;
 #[cfg(not(target_family = "wasm"))]
 pub mod host;

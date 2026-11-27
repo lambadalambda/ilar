@@ -31,7 +31,10 @@ Built: `web/remote` (shell, pairing, service worker), the wasm client in
 grant and question cards, `scripts/build-remote-web.sh`, and the Pages
 workflow. Checked in headless Chrome at phone size against a live TUI
 over n0's relay (paired in 1.8 s, a message started a turn) and with
-`scripts/remote-web-checks/cards.*`. Open: a real phone on another
+`scripts/remote-web-checks/cards.*`. The first iPhone scan gave a blank
+page: Safari fails on relay hosts with a root dot (see DEVLOG); fixed
+and checked on the iOS 26.5 simulator, a prompt from it ran a real
+turn. Open: a real phone on another
 network; iOS has no in-app scanner (the system camera opens the link);
 the app shares `lambadalambda.github.io`'s storage with other Pages
 sites of that account.
