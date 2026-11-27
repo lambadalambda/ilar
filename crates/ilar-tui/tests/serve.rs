@@ -1189,9 +1189,6 @@ async fn the_router_serves_the_page_and_refuses_every_other_method() {
         ("/", "text/html; charset=utf-8"),
         ("/app.css", "text/css; charset=utf-8"),
         ("/app.js", "text/javascript; charset=utf-8"),
-        ("/vendor/preact.module.js", "text/javascript; charset=utf-8"),
-        ("/vendor/hooks.module.js", "text/javascript; charset=utf-8"),
-        ("/vendor/htm.module.js", "text/javascript; charset=utf-8"),
     ] {
         let response = server.get(path).await;
         assert_eq!(response.status(), 200, "GET {path}");
@@ -1201,30 +1198,12 @@ async fn the_router_serves_the_page_and_refuses_every_other_method() {
     }
 
     // The page loads its own files and nothing else: no CDN, no webfont,
-    // no build step — `ilar serve` works on a plane. The vendored
-    // modules are reached through the import map, which is also what
-    // resolves the bare `preact` specifier inside the hooks build.
+    // and no build step at run time: `ilar serve` works on a plane. app.js is one module with no
+    // imports (the Svelte build), so the page needs nothing else.
     let index = server.get("/").await.text().await.unwrap();
     assert!(index.contains("href=\"/app.css\""), "{index}");
     assert!(index.contains("src=\"/app.js\""), "{index}");
-    assert!(index.contains("\"/vendor/preact.module.js\""), "{index}");
-    assert!(index.contains("\"/vendor/hooks.module.js\""), "{index}");
-    assert!(index.contains("\"/vendor/htm.module.js\""), "{index}");
     assert!(!index.contains("http"), "no external URL: {index}");
-
-    // The module graph closes: app.js imports only names the map knows,
-    // and the one bare specifier a vendored file carries is `preact`.
-    let script = server.get("/app.js").await.text().await.unwrap();
-    for import in ["\"preact\"", "\"preact/hooks\"", "\"htm\""] {
-        assert!(script.contains(import), "app.js imports {import}");
-    }
-    let hooks = server
-        .get("/vendor/hooks.module.js")
-        .await
-        .text()
-        .await
-        .unwrap();
-    assert!(hooks.contains("preact"), "hooks resolve through the map");
 
     // `/api/sessions` answers GET and POST; everything else on it is a
     // 405 from the router. A transcript answers GET only — the write
@@ -1281,16 +1260,8 @@ async fn a_required_token_gates_every_route() {
     // The page is the exception, and has to be: the token arrives in the
     // URL fragment, which a browser never sends, so a gated `/` would
     // make the printed URL impossible to open. The assets carry nothing
-    // from the store — and a module the page imports cannot be handed a
-    // token by the loader at all.
-    for path in [
-        "/",
-        "/app.css",
-        "/app.js",
-        "/vendor/preact.module.js",
-        "/vendor/hooks.module.js",
-        "/vendor/htm.module.js",
-    ] {
+    // from the store.
+    for path in ["/", "/app.css", "/app.js"] {
         let response = server.client.get(server.url(path)).send().await.unwrap();
         assert_eq!(response.status(), 200, "un-tokened GET {path}");
     }

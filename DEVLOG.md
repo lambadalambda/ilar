@@ -1,5 +1,19 @@
 # DEVLOG
 
+## The renderer moves to Svelte
+
+The Preact `app.js` (no build step, vendored modules) is now a Svelte 5
+app in `web/ui`, built by Vite into one `app.js` with no imports and one
+`app.css`, committed where the binary embeds them; `scripts/check.sh`
+fails when the commit and the sources disagree (the build is
+byte-identical on macOS and Linux). One module simplifies a share file:
+no module graph to link. Two things the port had to respect: the
+transcript is still a mutable object with a paint counter (copying it
+per frame is quadratic), so every component reads it inside a
+`$derived` of `version`; and a share file inlines the script, so the
+build writes `<` as `\x3C` before `!--` and `/script`. The look is a
+native chat app: bubbles, tool cards, sheets, light and dark.
+
 ## Safari refuses relay hosts with a root dot
 
 The first iPhone scan gave a blank page. On the iOS 26.5 simulator the

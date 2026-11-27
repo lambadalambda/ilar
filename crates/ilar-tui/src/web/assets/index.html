@@ -1,28 +1,15 @@
 <!doctype html>
-<!-- The whole page: an empty root and the modules that fill it. Every
-     node that carries a value from the store is built by app.js as a
-     preact vnode, so nothing server-derived ever reaches an HTML parser.
-
-     The import map is what lets the vendored files stay verbatim copies:
-     preact's hooks build imports the bare specifier "preact", and this
-     is where that name is resolved to a path this server actually
-     serves. No CDN, no build step — every URL below is local. -->
+<!-- The whole page: an empty root and the module that fills it, the
+     Svelte build of web/ui (one file, no imports). Every value from the
+     store is set as a text node, so nothing server-derived ever reaches
+     an HTML parser. No CDN: every URL below is local. -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="referrer" content="no-referrer" />
     <title>ilar</title>
     <link rel="stylesheet" href="/app.css" />
-    <script type="importmap">
-      {
-        "imports": {
-          "preact": "/vendor/preact.module.js",
-          "preact/hooks": "/vendor/hooks.module.js",
-          "htm": "/vendor/htm.module.js"
-        }
-      }
-    </script>
   </head>
   <body>
     <div id="app"></div>

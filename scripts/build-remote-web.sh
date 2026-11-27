@@ -21,7 +21,7 @@ mkdir -p "$OUT/pkg"
   target/wasm32-unknown-unknown/release/ilar_remote_web.wasm
 
 ASSETS=crates/ilar-tui/src/web/assets
-cp -R "$ASSETS/app.js" "$ASSETS/app.css" "$ASSETS/vendor" "$OUT/"
+cp "$ASSETS/app.js" "$ASSETS/app.css" "$OUT/"
 cp web/remote/* "$OUT/"
 # A new build gets a new cache name, so phones drop the old shell, and
 # the cache list is what was built (wasm-bindgen may add snippets).

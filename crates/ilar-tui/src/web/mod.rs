@@ -16,7 +16,9 @@ pub(crate) mod share;
 pub(crate) mod view;
 
 /// The page, as the binary carries it. `serve` hands these out as
-/// separate routes; `share` inlines them into one file.
+/// separate routes; `share` inlines them into one file. `app.js` and
+/// `app.css` are the committed Svelte build of web/ui
+/// (scripts/build-web-ui.sh), so cargo needs no Node.
 pub(crate) mod assets {
     /// The server's page shell. A share file builds its own, because
     /// it has no routes to point at.
@@ -24,7 +26,4 @@ pub(crate) mod assets {
     pub(crate) const INDEX: &str = include_str!("assets/index.html");
     pub(crate) const APP_CSS: &str = include_str!("assets/app.css");
     pub(crate) const APP_JS: &str = include_str!("assets/app.js");
-    pub(crate) const PREACT: &str = include_str!("assets/vendor/preact.module.js");
-    pub(crate) const HOOKS: &str = include_str!("assets/vendor/hooks.module.js");
-    pub(crate) const HTM: &str = include_str!("assets/vendor/htm.module.js");
 }
