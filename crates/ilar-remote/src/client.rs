@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Hello {
-    /// base64url; absent when a pinned peer comes back.
+    /// base64url; absent when a paired peer comes back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
 }
@@ -101,7 +101,7 @@ impl Receiver {
     }
 }
 
-/// Presents `secret` (or nothing, as a pinned peer) on `conn`.
+/// Presents `secret` (or nothing, as a paired peer) on `conn`.
 pub async fn hello(conn: &Connection, secret: Option<&Secret>) -> Result<Session> {
     let refused_or = |error: anyhow::Error| match close_code(conn) {
         Some(code) if code == crate::REFUSED => anyhow::Error::new(Refused),

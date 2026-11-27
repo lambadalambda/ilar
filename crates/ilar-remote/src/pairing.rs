@@ -1,6 +1,8 @@
-//! Who may control the session: the first peer with the secret, only.
+//! Who may control the session: the peers that showed the secret while
+//! the pairing window was open.
 
 use iroh::EndpointId;
+use std::collections::HashSet;
 
 pub const SECRET_LEN: usize = 16;
 
@@ -32,41 +34,50 @@ impl std::fmt::Debug for Secret {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// The secret was right; this peer is now the only one.
+    /// The secret was right; this peer is now paired.
     Paired,
-    /// The pinned peer came back.
+    /// A paired peer came back.
     Welcome,
     Refused,
 }
 
 /// The pairing rule as a value: no I/O, so the host and tests share it.
+/// The secret pairs a new peer only while the window is open (the TUI
+/// opens it while the QR code is on screen); a paired peer comes back
+/// at any time.
 #[derive(Debug)]
 pub struct Pairing {
     secret: Secret,
-    pinned: Option<EndpointId>,
+    paired: HashSet<EndpointId>,
+    open: bool,
 }
 
 impl Pairing {
+    /// Open: a start shows the code.
     pub fn new(secret: Secret) -> Self {
         Self {
             secret,
-            pinned: None,
+            paired: HashSet::new(),
+            open: true,
         }
     }
 
-    pub fn pinned(&self) -> Option<EndpointId> {
-        self.pinned
+    pub fn paired(&self) -> usize {
+        self.paired.len()
+    }
+
+    pub fn set_open(&mut self, open: bool) {
+        self.open = open;
     }
 
     pub fn admit(&mut self, peer: EndpointId, presented: Option<&Secret>) -> Verdict {
-        match self.pinned {
-            Some(pinned) if pinned == peer => Verdict::Welcome,
-            Some(_) => Verdict::Refused,
-            None if presented.is_some_and(|s| self.secret.matches(s)) => {
-                self.pinned = Some(peer);
-                Verdict::Paired
-            }
-            None => Verdict::Refused,
+        if self.paired.contains(&peer) {
+            Verdict::Welcome
+        } else if self.open && presented.is_some_and(|s| self.secret.matches(s)) {
+            self.paired.insert(peer);
+            Verdict::Paired
+        } else {
+            Verdict::Refused
         }
     }
 }
@@ -80,12 +91,26 @@ mod tests {
     }
 
     #[test]
-    fn the_secret_pairs_the_first_peer() {
+    fn the_secret_pairs_each_peer_while_the_window_is_open() {
+        let secret = Secret::generate();
+        let mut pairing = Pairing::new(secret);
+        let (phone, desktop) = (peer(), peer());
+        assert_eq!(pairing.admit(phone, Some(&secret)), Verdict::Paired);
+        assert_eq!(pairing.admit(desktop, Some(&secret)), Verdict::Paired);
+        assert_eq!(pairing.paired(), 2);
+    }
+
+    #[test]
+    fn a_closed_window_refuses_new_peers_and_lets_known_ones_back() {
         let secret = Secret::generate();
         let mut pairing = Pairing::new(secret);
         let phone = peer();
-        assert_eq!(pairing.admit(phone, Some(&secret)), Verdict::Paired);
-        assert_eq!(pairing.pinned(), Some(phone));
+        pairing.admit(phone, Some(&secret));
+        pairing.set_open(false);
+        assert_eq!(pairing.admit(peer(), Some(&secret)), Verdict::Refused);
+        assert_eq!(pairing.admit(phone, None), Verdict::Welcome);
+        pairing.set_open(true);
+        assert_eq!(pairing.admit(peer(), Some(&secret)), Verdict::Paired);
     }
 
     #[test]
@@ -96,19 +121,11 @@ mod tests {
             Verdict::Refused
         );
         assert_eq!(pairing.admit(peer(), None), Verdict::Refused);
-        assert_eq!(pairing.pinned(), None);
+        assert_eq!(pairing.paired(), 0);
     }
 
     #[test]
-    fn the_secret_is_spent_after_pairing() {
-        let secret = Secret::generate();
-        let mut pairing = Pairing::new(secret);
-        pairing.admit(peer(), Some(&secret));
-        assert_eq!(pairing.admit(peer(), Some(&secret)), Verdict::Refused);
-    }
-
-    #[test]
-    fn the_pinned_peer_comes_back_without_the_secret() {
+    fn a_paired_peer_comes_back_without_the_secret() {
         let secret = Secret::generate();
         let mut pairing = Pairing::new(secret);
         let phone = peer();

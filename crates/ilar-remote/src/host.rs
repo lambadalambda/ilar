@@ -7,6 +7,7 @@ use crate::{ALPN, BUSY, Pairing, REFUSED, Secret, Ticket, Verdict};
 use anyhow::{Context, Result};
 use iroh::endpoint::{Builder, Connection, Incoming, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointId};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -42,8 +43,8 @@ pub enum HostEvent {
         peer: EndpointId,
         link: Link,
     },
-    /// The pinned peer reconnected. Its older connection is closed:
-    /// the newest one wins.
+    /// A paired peer reconnected. Its own older connection is closed:
+    /// per device, the newest one wins.
     Welcome {
         peer: EndpointId,
         link: Link,
@@ -60,6 +61,7 @@ pub enum HostEvent {
 pub struct RemoteHost {
     endpoint: Endpoint,
     ticket: Ticket,
+    shared: Arc<Shared>,
     accept: JoinHandle<()>,
 }
 
@@ -100,18 +102,29 @@ impl RemoteHost {
         };
         let shared = Arc::new(Shared {
             pairing: Mutex::new(Pairing::new(secret)),
-            current: Mutex::new(None),
+            current: Mutex::new(HashMap::new()),
             last_refused: Mutex::new(None),
             handshakes: Arc::new(Semaphore::new(MAX_HANDSHAKES)),
             serial: AtomicU64::new(0),
             events,
         });
-        let accept = tokio::spawn(accept_loop(endpoint.clone(), shared));
+        let accept = tokio::spawn(accept_loop(endpoint.clone(), shared.clone()));
         Ok(Self {
             endpoint,
             ticket,
+            shared,
             accept,
         })
+    }
+
+    /// Whether the ticket's secret pairs new devices now (it does from
+    /// the start). Paired devices come back either way.
+    pub fn set_open(&self, open: bool) {
+        self.shared
+            .pairing
+            .lock()
+            .expect("pairing lock")
+            .set_open(open);
     }
 
     fn with_current_relay(mut self) -> Self {
@@ -136,8 +149,9 @@ impl RemoteHost {
 
 struct Shared {
     pairing: Mutex<Pairing>,
-    /// The paired device's live connection, so a newer one can close it.
-    current: Mutex<Option<Connection>>,
+    /// Each paired device's live connection, so its newer one can close
+    /// it.
+    current: Mutex<HashMap<EndpointId, Connection>>,
     last_refused: Mutex<Option<Instant>>,
     handshakes: Arc<Semaphore>,
     serial: AtomicU64,
@@ -154,10 +168,11 @@ impl Shared {
         }
     }
 
-    /// Makes `conn` the device's connection, closing the one it
-    /// replaces, and hands the TUI its link. One critical section, so
-    /// two reconnects racing cannot leave the TUI holding the loser's
-    /// link: serials and events come out in takeover order.
+    /// Makes `conn` the device's connection, closing that device's one
+    /// it replaces (other devices keep theirs), and hands the TUI its
+    /// link. One critical section, so two reconnects racing cannot leave
+    /// the TUI holding the loser's link: serials and events come out in
+    /// takeover order.
     fn take_over(
         &self,
         conn: &Connection,
@@ -169,7 +184,7 @@ impl Shared {
         UnboundedSender<FromDevice>,
     ) {
         let mut current = self.current.lock().expect("current lock");
-        if let Some(previous) = current.replace(conn.clone()) {
+        if let Some(previous) = current.insert(peer, conn.clone()) {
             previous.close(0u32.into(), b"replaced");
         }
         let serial = self.serial.fetch_add(1, Ordering::Relaxed);
@@ -239,6 +254,16 @@ async fn serve(incoming: Incoming, shared: Arc<Shared>) {
         _ = conn.closed() => {}
     }
     conn.close(0u32.into(), b"done");
+    {
+        // Its own entry only: a newer connection may have replaced it.
+        let mut current = shared.current.lock().expect("current lock");
+        if current
+            .get(&peer)
+            .is_some_and(|live| live.stable_id() == conn.stable_id())
+        {
+            current.remove(&peer);
+        }
+    }
     let _ = shared.events.send(HostEvent::Disconnected { peer, serial });
 }
 

@@ -76,13 +76,27 @@ async fn a_wrong_secret_is_refused_as_such() {
 }
 
 #[tokio::test]
-async fn a_second_device_is_refused_after_pairing() {
+async fn devices_pair_while_the_window_is_open_and_each_keeps_its_link() {
     let (host, mut events) = host().await;
     let secret = host.ticket().secret;
-    let (_phone, _first, _session) = paired(&host).await;
-    events.recv().await;
-    let (_other, second) = dial(&host).await;
-    let error = client::hello(&second, Some(&secret)).await.err().unwrap();
+    let (phone, _first, mut phone_session) = paired(&host).await;
+    let phone_link = link_for(&mut events, phone.id()).await;
+    let (desktop, _second, _desktop_session) = paired(&host).await;
+    let _desktop_link = link_for(&mut events, desktop.id()).await;
+
+    // The desktop's arrival did not replace the phone's connection.
+    phone_link
+        .to_device
+        .send(ToDevice::Busy { busy: true })
+        .unwrap();
+    assert_eq!(
+        phone_session.next().await.unwrap(),
+        Some(ToDevice::Busy { busy: true })
+    );
+
+    host.set_open(false);
+    let (_late, third) = dial(&host).await;
+    let error = client::hello(&third, Some(&secret)).await.err().unwrap();
     assert!(is_refused(&error), "{error:#}");
 }
 

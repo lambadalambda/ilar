@@ -1,9 +1,10 @@
 //! Remote control of one ilar session over iroh.
 //!
 //! A session starts a [`host::RemoteHost`] with a fresh key; its
-//! [`Ticket`] (endpoint id, relay, one-time secret) goes into a QR code.
-//! The first peer that shows the secret is pinned, every other peer is
-//! refused. See meta/issues/remote-control-over-iroh-index.md.
+//! [`Ticket`] (endpoint id, relay, secret) goes into a QR code. A peer
+//! that shows the secret while the pairing window is open is paired and
+//! may come back without it; every other peer is refused. See
+//! meta/issues/remote-control-over-iroh-index.md.
 
 pub mod browser;
 pub mod client;
